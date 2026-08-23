@@ -156,12 +156,18 @@ type ledgerGetResponse struct {
 // facts and are null on every other kind, honestly — a command a turn ran is
 // not a tool call.
 type ledgerCausedWire struct {
-	EntryID  string              `json:"entryId"`
-	Position int                 `json:"position"`
-	Kind     string              `json:"kind"`
-	Intent   string              `json:"intent"`
-	Effect   *string             `json:"effect"`
-	Resource *content.GrantScope `json:"resource"`
+	EntryID  string `json:"entryId"`
+	Position int    `json:"position"`
+	// At is where in the turn's ANSWER this happened, in UTF-16 code units
+	// (nocx-9sqii): the offset the renderer cuts the prose at, so a restored
+	// turn draws its fragments around the blocks it caused exactly where the
+	// live one did. The position orders the causes; this places them.
+	At         int                 `json:"at"`
+	Kind       string              `json:"kind"`
+	Intent     string              `json:"intent"`
+	Effect     *string             `json:"effect"`
+	Resource   *content.GrantScope `json:"resource"`
+	OpensBlock bool                `json:"opensBlock"`
 }
 
 // ledgerCausedWireOf maps one resolved cause to the wire. The empty effect —
@@ -169,11 +175,13 @@ type ledgerCausedWire struct {
 // enum on the wire is closed, and an empty string is not in it.
 func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 	w := ledgerCausedWire{
-		EntryID:  c.EntryID,
-		Position: c.Position,
-		Kind:     string(c.Kind),
-		Intent:   c.Intent,
-		Resource: c.Resource,
+		EntryID:    c.EntryID,
+		Position:   c.Position,
+		At:         c.At,
+		Kind:       string(c.Kind),
+		Intent:     c.Intent,
+		Resource:   c.Resource,
+		OpensBlock: c.OpensBlock,
 	}
 	if c.Effect != "" {
 		effect := string(c.Effect)

@@ -143,6 +143,17 @@ type ToolCall struct {
 	// names no resource in its parameters (git.status's repository IS the
 	// grant's path scope).
 	Resource *content.GrantScope
+	// OpensBlock is the declaration's own fact
+	// (agenttools.Declaration.OpensBlock): this call's work becomes a
+	// TOP-LEVEL BLOCK, so the block is the account of the call and the flow
+	// draws no line beside it (nocx-9sqii). True for `run` alone today.
+	//
+	// It rides the announcement because the renderer has to decide, at the
+	// moment the call arrives, whether to seal the answer fragment it is
+	// writing and let the block take that position. Deriving it from Tool in
+	// the renderer would be a second copy of the tool table — the reason
+	// Effect rides here too (ADR-0028 decision 4).
+	OpensBlock bool
 }
 
 // Message is one turn of the conversation, in this package's own

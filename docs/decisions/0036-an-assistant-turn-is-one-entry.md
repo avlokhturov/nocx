@@ -66,7 +66,10 @@ are each unnecessary. The last remains true as a defect and is filed separately
 (`nocx-69x9e`): `entries.kind` is documented as the author and also carries what the row
 is, so a question the person typed is stored saying the agent authored it.
 
-**A turn is a block, so it appears where blocks appear.** `blocks.list` therefore offers
+**A turn is a block, so it appears where blocks appear.** (**Amended 2026-08-23 by
+`nocx-9sqii` — a turn is drawn as SEVERAL blocks, one per fragment of its answer, with
+the blocks it caused between them. See the amendment at the end of this file; the rest
+of this paragraph stands.**) `blocks.list` therefore offers
 the model only entries that have ENDED — otherwise the open entry in the pane is the
 question being answered right now, and the model is handed its own unanswered question as
 context. The same rule covers a command still running.
@@ -80,3 +83,71 @@ and no command line". It is drawn as a line inside the turn's flow. It is curren
 anchored to nothing at all, which means a restored turn comes back without the calls it
 made; `caused-by`, freed by this decision, is the relation that will join an action to its
 turn.
+
+## Amendment, 2026-08-23 — a turn is drawn as FRAGMENTS around the blocks it caused (`nocx-9sqii`)
+
+**The sentence amended is "A turn is a block, so it appears where blocks appear."**
+It is now: **a turn is one ENTRY, drawn as one or more blocks — one per fragment of
+its answer — and the blocks it caused stand between them.**
+
+**Why.** The owner asked «Как мне проверить сколько места на диске?» and read, in this
+order: the question, a bare `▸ run` line carrying neither arguments nor result, the
+finished answer «41G свободно, занято 79%», and THEN — below the whole turn — the
+`df -h` block with the twelve lines the answer was distilled from.
+
+```
+causal:  question -> tool call -> evidence -> answer
+drawn:   question -> call marker -> answer  -> evidence
+```
+
+One command occupied two positions and the useful half was in the one nobody reads
+first. The cause is exactly the amended sentence: if a turn is ONE block, and a
+command the turn runs is ANOTHER block appended at the tail of the scrollback, then
+the answer necessarily finishes above the evidence it was written from. No amount of
+work inside either block can fix an ordering the block model forbids.
+
+**What is dropped.** Only the identity between a turn and a single block. A turn that
+ran a command now draws several: the question and the prose before the first command,
+that command's own block, the prose written from it, and so on. The fragments are ONE
+turn and say so from a stored fact — every one carries the turn's `data-entry-id`, and
+a continuation carries its index and the kit's `continued` badge. A reader must never
+have to tell a continuation from a second answer by a colour.
+
+**What is untouched, and why it did not need to change.**
+
+- **A turn is still one ENTRY** — the whole of this ADR's decision. Nothing about the
+  ledger changes: one row, `kind = agent`, the question as `intent`, the answer as one
+  artifact on the turn's run. The fragments are a PROJECTION of that entry
+  (ADR-0019: one authoritative ledger, disposable projections), and the arrangement is
+  a projection OF the relation, never a fact the renderer stores.
+- **`blocks.list` still offers only entries that have ENDED.** The reason given above
+  is about the OPEN entry in the pane, not about how many elements it draws.
+- **`nocx-shxv0`'s ownership rule survives verbatim: the BLOCK owns the command, the
+  answer's LINE owns WHEN.** What was wrong was never that rule — it was that the two
+  owners were drawn in different neighbourhoods. So for a tool that opens a block the
+  line is now gone and the block stands in its place, saying WHEN by standing there;
+  for a tool that opens none, the line is still the only thing that says the call
+  occurred, which is `nocx-nm9md` narrowed to `readScreen`, `blocks.list` and
+  `blocks.read`.
+- **The reasoning is still not persisted**, and a restored turn still has no reasoning
+  note at all.
+
+**What the fragments needed that did not exist.** `nocx-h1l4o` gave every caused entry
+a causal POSITION, which orders the causes and does not say where in the prose any of
+them sat — so a restored turn put its calls at the head of its flow while the live one
+interleaved them. The amendment closes that deliberately-deferred gap by making the
+anchor a stored fact too: `caused-by`'s payload carries `at`, how much of the answer
+had been written when the cause was recorded, in UTF-16 code units. The unit is the
+reader's: the renderer cuts a JavaScript string, and a byte offset would split «занято»
+mid-character on the first Russian answer this feature was reported against.
+
+**Two arrangements were considered and rejected, and they are not open for
+re-litigation without amending this ADR again.**
+
+- **Nesting the command's block inside the turn's body.** It puts a fixed VT grid,
+  which must not re-wrap (`nocx-juau`), inside reflowing prose — and the nested block
+  then has to be argued back into being a first-class block for selection, copy,
+  re-run and block navigation, which is the whole of what it already was.
+- **Hoisting the command above the question.** In a terminal, vertical position is a
+  claim about time, and that claim would be that the command preceded the intent that
+  caused it.

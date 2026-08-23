@@ -55,6 +55,22 @@ type Declaration struct {
 	// fs.FS supplied to Assemble (the composition root passes the directory
 	// that contains the schemas — contracts/tools — not the repo root).
 	Params string
+	// OpensBlock says the tool's work becomes a TOP-LEVEL BLOCK of its own
+	// — true for `run` alone, which submits a command through the same
+	// orchestration a person's line takes, so the block, its output, its
+	// exit status and its ledger entry are the account of that call.
+	//
+	// The renderer needs it to decide where the call is drawn: a tool that
+	// opens a block is drawn AS that block, at the point in the turn where
+	// it happened, and a line beside it would restate the command a second
+	// time (nocx-9sqii). A tool that opens none keeps its line, which is
+	// then the only thing that says the call occurred.
+	//
+	// Declared here rather than matched on the name in the renderer, for
+	// the reason the effect is declared (ADR-0028 decision 4): a renderer
+	// holding its own list of which tools open blocks is a second copy of
+	// this table, and it disagrees the day a tool is added.
+	OpensBlock bool
 	// Narrow constructs the narrowed capability a tool executes through —
 	// the only path by which a tool gains authority (ADR-0028 decision 4:
 	// the dispatcher narrows, it does not check). Given the run's grant it
@@ -136,6 +152,7 @@ var declarations = []Declaration{
 		Executes:    InRenderer,
 		Params:      "run.schema.json",
 		Narrow:      narrowRun,
+		OpensBlock:  true,
 	},
 	{
 		Name:        "blocks.list",

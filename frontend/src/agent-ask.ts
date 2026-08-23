@@ -269,6 +269,12 @@ export class AgentInputTarget implements InputTarget {
     // appended when it arrives, which is before the deltas the model writes
     // from its result, so it can no longer read as "answered first, ran the
     // command afterwards".
+    //
+    // For a call that OPENS A BLOCK the handle draws no line at all
+    // (nocx-9sqii): the block is the account of that call, and the call's
+    // arrival is what seals the answer fragment so the block can stand in
+    // its place. The routing is identical either way — the flow decides what
+    // the call becomes, from a fact the backend sent.
     this.seams.dispatcher.subscribe('agent.runToolCall', (params: unknown) => {
       const c = params as AgentRunToolCall
       const handle = this.runs.get(c.runId)
@@ -282,6 +288,12 @@ export class AgentInputTarget implements InputTarget {
         // wants "absent", and the two must not be confused into a resource
         // with an empty half.
         resource: c.resource ?? undefined,
+        // Whether the call's work becomes a top-level block of its own — the
+        // tool table's fact, off the wire and never derived from the name
+        // here (nocx-9sqii). It is what tells the flow to seal the fragment
+        // it is writing and let the block stand at the point the call
+        // happened, instead of drawing a line that restates it.
+        opensBlock: c.opensBlock,
       })
     })
     // The model's thinking, into its own note and never into the answer

@@ -314,6 +314,28 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		return onEvent(e)
 	}
 
+	// The answer as it stands, and the ONE tally of it (nocx-9sqii). It was
+	// already accumulated for the "did this endpoint actually answer" check
+	// below; the middleware now reads its LENGTH to anchor every cause it
+	// records — how much of the answer had been written when the call
+	// happened. One string, one counter: a second tally in the middleware
+	// would disagree with this one on the first chunk either of them missed.
+	//
+	// Its own mutex rather than emitMu: the reader is the tool node's
+	// goroutine, which calls in while emit is not held, and taking emitMu
+	// there would make a ledger write block the stream.
+	//
+	// UTF-16 CODE UNITS, because the reader slices a JavaScript string —
+	// see content.CausePayload.At.
+	var answerMu sync.Mutex
+	var text strings.Builder
+	answerAt := 0
+	answerLen := func() int {
+		answerMu.Lock()
+		defer answerMu.Unlock()
+		return answerAt
+	}
+
 	var declared []tool.BaseTool
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
@@ -340,7 +362,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			if p.Classifier != nil {
 				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, answerLen, func(call ToolCall) error {
 				return emit(AskEvent{Kind: AskToolCall, Call: &call})
 			})
 			if err != nil {
@@ -355,10 +377,12 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	var text strings.Builder
 	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, func(e AskEvent) error {
 		if e.Kind == AskAnswer {
+			answerMu.Lock()
 			text.WriteString(e.Text)
+			answerAt += utf16Len(e.Text)
+			answerMu.Unlock()
 		}
 		return emit(e)
 	})
@@ -448,4 +472,23 @@ func (d *declaredTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (d *declaredTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
 	return "", fmt.Errorf("tool %q is declared but not executable: nocx-lndv wires execution", d.info.Name)
+}
+
+// utf16Len is the length of s in UTF-16 code units — what a JavaScript
+// string's `.length` and `.slice()` count in, which is the unit a cause's
+// prose anchor is stored in (content.CausePayload.At says why).
+//
+// Every rune outside the basic plane is a surrogate pair and counts twice;
+// everything else counts once, so this is the rune count for the Cyrillic,
+// Greek and CJK text the byte count would have split mid-character.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		if r > 0xFFFF {
+			n += 2
+		} else {
+			n++
+		}
+	}
+	return n
 }

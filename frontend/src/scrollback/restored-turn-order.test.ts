@@ -1,28 +1,31 @@
 // @vitest-environment jsdom
 //
 // Restore reproduces the live arrangement, and the comparison is against a
-// LIVE turn's DOM (nocx-h1l4o, criterion 3).
+// LIVE turn's DOM (nocx-h1l4o criterion 3, nocx-9sqii criterion 9).
 //
 // Not against a fixture this file wrote: a fixture is what the author of the
 // restore path believed the live path draws, and the two agree exactly where
 // nobody looked. So both sides are built here, through their real owners —
-// BlockManager for the live flow, restoredBlock plus arrangedByCause for the
+// BlockManager for the live flow, restoredTurn plus arrangedByCause for the
 // restored one — and the assertion is that the two DOMs read the same.
 //
 // WHAT IS COMPARED, and it is stated because "the same" needs a definition:
-// the sequence of blocks in the scrollback, and inside a turn the sequence of
-// its flow elements. Not the live block's chrome — a restored block carries
-// data-restored and offers nothing that needs a process (ADR-0019 §3), which
-// is a difference the product REQUIRES.
+// the sequence of blocks in the scrollback, and inside each fragment of the
+// turn the sequence of its flow elements. Not the live block's chrome — a
+// restored block carries data-restored and offers nothing that needs a
+// process (ADR-0019 §3), which is a difference the product REQUIRES.
 //
-// WHAT IS DELIBERATELY NOT REPRODUCED: the reasoning note, which ADR-0036
-// does not persist at all, and the exact offset within the prose at which a
-// call arrived, which is not a stored fact — the answer is one artifact, not
-// a timeline. See RestoredBlockFacts.calls.
+// WHAT WAS DELIBERATELY NOT REPRODUCED AND NOW IS. nocx-h1l4o put a restored
+// turn's calls at the HEAD of its flow, because the offset a call arrived at
+// was not a stored fact — the answer was one artifact and not a timeline.
+// nocx-9sqii made the turn a timeline and the offset a stored fact
+// (`caused.at`), so a restored call now sits where the live one sat and this
+// file asserts it. The reasoning note is still not reproduced: ADR-0036 does
+// not persist it at all.
 
 import { describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
-import { restoredBlock } from './restored-block'
+import { restoredBlock, restoredTurn } from './restored-block'
 import { arrangedByCause, type RestorableBlock, type RestoredCause } from '../restore-client'
 import { DEFAULT_SNAPSHOT } from './serializer'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -41,13 +44,16 @@ function newManager() {
   return { inner, manager }
 }
 
-/** The flow inside one turn, as "kind:text" in DOM order — the same reading
- *  the live flow's own tests take, so the two sides are read identically. */
+/** The flow inside one turn fragment, as "kind:text" in DOM order — the same
+ *  reading the live flow's own tests take, so the two sides are read
+ *  identically. */
 function flowOf(el: HTMLElement): string[] {
   const body = el.querySelector('[data-answer-body]')
   return Array.from(body?.children ?? []).map((c) => {
     if (c.classList.contains('ui-tool-call'))
       return `call:${c.querySelector('.ui-tool-call__tool')?.textContent ?? ''}`
+    if (c.classList.contains('ui-tool-calls'))
+      return `calls:${c.querySelectorAll('.ui-tool-call').length}`
     if (c.classList.contains('term-line')) return `text:${c.textContent ?? ''}`
     return c.className
   })
@@ -62,63 +68,47 @@ function documentOrder(root: HTMLElement): string[] {
   )
 }
 
+/** Every fragment of a turn, in DOM order, as its index and its flow. */
+function fragmentFlows(root: HTMLElement): string[][] {
+  return Array.from(root.querySelectorAll('[data-turn-fragment]')).map((f) =>
+    flowOf(f as HTMLElement),
+  )
+}
+
 // The turn under test, in one description both sides are built from: the
-// assistant is asked something, reaches for two tools — the second of them
-// `run`, which opens a real block — and then answers.
+// assistant is asked something, reads a file, says what it is about to do,
+// runs a command — which opens a real block — and answers from its output.
 const QUESTION = 'what went wrong?'
-const ANSWER = 'line 3 is wrong'
+const BEFORE = 'let me look at the file. '
+const AFTER = 'line 3 is wrong'
+const ANSWER = BEFORE + AFTER
 const COMMAND = 'cat -n a.txt'
-const CALLS = [
-  { tool: 'files.read', effect: 'observe' as const, resource: { kind: 'path', id: '/repo/a.txt' } },
-  { tool: 'run', effect: 'mutate-destructive' as const },
-]
 
 describe('a restored turn reads the same as the live one it came from', () => {
-  it('draws the same flow inside the turn — the calls it made, then its prose', () => {
-    const { manager } = newManager()
-    const live = manager.addAnswerBlock(QUESTION, '/repo')
-    for (const c of CALLS) live.toolCall({ callId: c.tool, ...c })
-    live.append(ANSWER)
-    live.close('success')
-
-    const restored = restoredBlock(
-      {
-        id: 1,
-        command: QUESTION,
-        cwd: '/repo',
-        location: '',
-        durationMs: 0,
-        exitCode: null,
-        status: 'success',
-        body: ANSWER,
-        author: 'agent',
-        kind: 'ask',
-        entryId: 'turn-1',
-        calls: CALLS,
-      },
-      S,
-      () => document.createElement('div'),
-      () => {},
-      new CommandSnapshotStore(),
-    )
-
-    expect(flowOf(restored)).toEqual(flowOf(live.el))
-    // And the flow is not trivially equal by being empty on both sides.
-    expect(flowOf(live.el)).toEqual(['call:files.read', 'call:run', `text:${ANSWER}`])
-  })
-
-  it('puts the command the turn ran where the live path put it: after the turn', () => {
-    // LIVE. The answer block is opened when the question is asked; the run
-    // tool's command opens its own block, which the scrollback appends after
-    // it. The block owns the command, the line owns when — the ownership
-    // submitAgentCommand states.
+  /** The live turn, driven through the manager exactly as the ask surface
+   *  drives it: the calls arrive over the wire, the command is submitted
+   *  through the ordinary path, and the answer streams around both. */
+  function liveTurn() {
     const { inner, manager } = newManager()
     const live = manager.addAnswerBlock(QUESTION, '/repo')
-    live.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive' })
+    live.el.dataset.entryId = 'turn-1'
+    live.toolCall({
+      callId: 'c0',
+      tool: 'files.read',
+      effect: 'observe',
+      resource: { kind: 'path', id: '/repo/a.txt' },
+      opensBlock: false,
+    })
+    live.append(BEFORE)
+    live.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
     manager.startBlock(COMMAND, '/repo', 0, 0, 'agent')
-    live.append(ANSWER)
+    live.append(AFTER)
     live.close('success')
-    const liveOrder = documentOrder(inner)
+    return inner
+  }
+
+  it('draws the same blocks in the same order, and the same flow inside each fragment', () => {
+    const live = liveTurn()
 
     // RESTORED. The page comes back in ledger order — and here the command
     // does NOT immediately follow its turn, because a person typed something
@@ -130,22 +120,90 @@ describe('a restored turn reads the same as the live one it came from', () => {
       block('cmd-1', COMMAND, 'agent'),
     ]
     const causes: Record<string, RestoredCause[]> = {
-      'turn-1': [shellCause('cmd-1', 0)],
+      'turn-1': [
+        actionCause('act-0', 0, 'files.read', 0, { kind: 'path', id: '/repo/a.txt' }),
+        // The `run` call and the command it opened, at the same anchor: the
+        // point in the prose where the assistant reached for the shell.
+        actionCause('act-1', 1, 'run', BEFORE.length, null, true),
+        shellCause('cmd-1', 2, BEFORE.length),
+      ],
     }
-    const arranged = arrangedByCause(page, (id) => causes[id] ?? [])
-    const restoredRoot = draw(arranged, { 'turn-1': ['run'] })
+    const restored = draw(page, (id) => causes[id] ?? [], ANSWER)
 
-    // The turn and the command it ran are adjacent, in that order, exactly
-    // as they were live — and the block a person typed keeps its own place.
-    expect(documentOrder(restoredRoot)).toEqual([
-      `ask:${QUESTION}`,
-      `command:${COMMAND}`,
-      'command:git status',
-    ])
-    expect(documentOrder(restoredRoot).slice(0, 2)).toEqual(liveOrder)
+    expect(documentOrder(restored)).toEqual(documentOrder(live).concat('command:git status'))
+    expect(fragmentFlows(restored)).toEqual(fragmentFlows(live))
+    // …and neither side is trivially equal by being empty.
+    expect(fragmentFlows(live)).toEqual([['call:files.read', `text:${BEFORE}`], [`text:${AFTER}`]])
   })
 
-  // ── criterion 4, in the DOM: the three ways the relation is not there ───
+  it('the fragments of one turn carry one identity on both sides', () => {
+    const live = liveTurn()
+    const page: RestorableBlock[] = [
+      block('turn-1', QUESTION, 'agent'),
+      block('cmd-1', COMMAND, 'agent'),
+    ]
+    const restored = draw(
+      page,
+      (id) =>
+        id === 'turn-1'
+          ? [
+              actionCause('act-1', 0, 'run', BEFORE.length, null, true),
+              shellCause('cmd-1', 1, BEFORE.length),
+            ]
+          : [],
+      ANSWER,
+    )
+    const identity = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll('[data-turn-fragment]')).map(
+        (f) => `${(f as HTMLElement).dataset.entryId}#${(f as HTMLElement).dataset.turnFragment}`,
+      )
+    expect(identity(restored)).toEqual(['turn-1#0', 'turn-1#1'])
+    expect(identity(restored)).toEqual(identity(live))
+  })
+
+  it('two commands in a row leave no empty fragment between them, on either side', () => {
+    // Nothing was written between the two calls, so live there is no
+    // continuation there — a fragment is opened by CONTENT. The restored
+    // side must not invent one.
+    const { inner, manager } = newManager()
+    const live = manager.addAnswerBlock(QUESTION, '/repo')
+    live.el.dataset.entryId = 'turn-1'
+    live.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    manager.startBlock('ls', '/repo', 0, 0, 'agent')
+    live.toolCall({ callId: 'c2', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    manager.startBlock('pwd', '/repo', 0, 0, 'agent')
+    live.append(AFTER)
+    live.close('success')
+
+    const page: RestorableBlock[] = [
+      block('turn-1', QUESTION, 'agent'),
+      block('cmd-1', 'ls', 'agent'),
+      block('cmd-2', 'pwd', 'agent'),
+    ]
+    const restored = draw(
+      page,
+      (id) =>
+        id === 'turn-1'
+          ? [
+              actionCause('act-1', 0, 'run', 0, null, true),
+              shellCause('cmd-1', 1, 0),
+              actionCause('act-2', 2, 'run', 0, null, true),
+              shellCause('cmd-2', 3, 0),
+            ]
+          : [],
+      AFTER,
+    )
+    expect(documentOrder(restored)).toEqual(documentOrder(inner))
+    expect(documentOrder(inner)).toEqual([
+      `ask:${QUESTION}`,
+      'command:ls',
+      'command:pwd',
+      `ask:${QUESTION}`,
+    ])
+    expect(fragmentFlows(restored)).toEqual(fragmentFlows(inner))
+  })
+
+  // ── the three ways the relation is not there, in the DOM ────────────────
 
   it('with no relation the command is an independent agent block in ledger order', () => {
     const page: RestorableBlock[] = [
@@ -153,10 +211,7 @@ describe('a restored turn reads the same as the live one it came from', () => {
       block('typed-1', 'git status', 'shell'),
       block('cmd-1', COMMAND, 'agent'),
     ]
-    const root = draw(
-      arrangedByCause(page, () => []),
-      {},
-    )
+    const root = draw(page, () => [], ANSWER)
     expect(documentOrder(root)).toEqual([
       `ask:${QUESTION}`,
       'command:git status',
@@ -167,6 +222,8 @@ describe('a restored turn reads the same as the live one it came from', () => {
     const agentBlocks = Array.from(root.querySelectorAll('[data-author="agent"]'))
     expect(agentBlocks.length).toBeGreaterThan(0)
     expect(root.querySelector('.ui-tool-call')).toBeNull()
+    // One turn, one fragment: nothing split it, because nothing caused it to.
+    expect(root.querySelectorAll('[data-turn-fragment]')).toHaveLength(1)
   })
 
   it('an unreadable relation draws the same as none, and never guesses a parent', () => {
@@ -176,31 +233,36 @@ describe('a restored turn reads the same as the live one it came from', () => {
       block('turn-1', QUESTION, 'agent'),
       block('cmd-1', COMMAND, 'agent'),
     ]
-    const root = draw(
-      arrangedByCause(page, () => []),
-      {},
-    )
+    const root = draw(page, () => [], ANSWER)
     expect(documentOrder(root)).toEqual([`ask:${QUESTION}`, `command:${COMMAND}`])
     expect(root.querySelector('.ui-tool-call')).toBeNull()
   })
 
-  it('a dangling cause costs the turn that fragment and nothing else', () => {
+  it('a dangling cause costs the turn that block and nothing else', () => {
     // The command is older than the page limit, or retention took it. The
-    // turn still draws the call line it made, and every block the page DOES
-    // hold is still drawn.
+    // turn still draws the call line it made and both of its fragments, and
+    // every block the page DOES hold is still drawn.
     const page: RestorableBlock[] = [
       block('turn-1', QUESTION, 'agent'),
       block('typed-1', 'git status', 'shell'),
     ]
-    const causes: Record<string, RestoredCause[]> = {
-      'turn-1': [shellCause('evicted-1', 0), shellCause('cmd-gone', 1)],
-    }
     const root = draw(
-      arrangedByCause(page, (id) => causes[id] ?? []),
-      { 'turn-1': ['run'] },
+      page,
+      (id) =>
+        id === 'turn-1'
+          ? [
+              actionCause('act-0', 0, 'readScreen', 0, null),
+              shellCause('evicted-1', 1, BEFORE.length),
+            ]
+          : [],
+      ANSWER,
     )
-    expect(documentOrder(root)).toEqual([`ask:${QUESTION}`, 'command:git status'])
-    expect(root.querySelector('.ui-tool-call__tool')?.textContent).toBe('run')
+    expect(documentOrder(root)).toEqual([
+      `ask:${QUESTION}`,
+      `ask:${QUESTION}`,
+      'command:git status',
+    ])
+    expect(root.querySelector('.ui-tool-call__tool')?.textContent).toBe('readScreen')
   })
 })
 
@@ -219,41 +281,89 @@ function block(entryId: string, command: string, author: 'shell' | 'agent'): Res
   }
 }
 
-function shellCause(entryId: string, position: number): RestoredCause {
-  return { entryId, position, kind: 'shell', intent: 'cmd', effect: null, resource: null }
+function shellCause(entryId: string, position: number, at: number): RestoredCause {
+  return {
+    entryId,
+    position,
+    at,
+    kind: 'shell',
+    intent: 'cmd',
+    effect: null,
+    resource: null,
+    opensBlock: false,
+  }
 }
 
-/** Draw a restored page the way the pane does: one block per row, with the
- *  turn's own calls placed in its flow. */
-function draw(page: RestorableBlock[], calls: Record<string, string[]>): HTMLElement {
+function actionCause(
+  entryId: string,
+  position: number,
+  intent: string,
+  at: number,
+  resource: { kind: string; id: string } | null,
+  opensBlock = false,
+): RestoredCause {
+  return {
+    entryId,
+    position,
+    at,
+    kind: 'action',
+    intent,
+    effect: opensBlock ? 'mutate-destructive' : 'observe',
+    resource: resource,
+    opensBlock,
+  }
+}
+
+/** Draw a restored page the way the pane does (terminal-content.restorePast):
+ *  the relation places, a turn becomes its fragments with the blocks it
+ *  caused between them, and a block a turn placed is not drawn twice. */
+function draw(
+  page: RestorableBlock[],
+  causesOf: (entryId: string) => RestoredCause[],
+  answer: string,
+): HTMLElement {
   const root = document.createElement('div')
   const store = new CommandSnapshotStore()
-  for (const b of page) {
-    root.appendChild(
-      restoredBlock(
-        {
-          id: 0,
-          command: b.command,
-          cwd: b.cwd,
-          location: b.host,
-          durationMs: b.durationMs,
-          exitCode: b.exitCode,
-          status: b.status,
-          body: b.author === 'agent' && b.entryId.startsWith('turn') ? ANSWER : 'out',
-          author: b.author,
-          kind: b.entryId.startsWith('turn') ? 'ask' : 'command',
-          entryId: b.entryId,
-          calls: (calls[b.entryId] ?? []).map((tool) => ({
-            tool,
-            effect: 'mutate-destructive' as const,
-          })),
-        },
-        S,
-        () => document.createElement('div'),
-        () => {},
-        store,
-      ),
-    )
+  const container = () => document.createElement('div')
+  const byID = new Map(page.map((b) => [b.entryId, b]))
+  let id = 100
+  const isTurn = (b: RestorableBlock) => b.entryId.startsWith('turn')
+  const factsOf = (b: RestorableBlock) => ({
+    command: b.command,
+    cwd: b.cwd,
+    location: b.host,
+    durationMs: b.durationMs,
+    exitCode: b.exitCode,
+    status: b.status,
+    body: isTurn(b) ? answer : 'out',
+    author: b.author,
+    kind: isTurn(b) ? ('ask' as const) : ('command' as const),
+    entryId: b.entryId,
+  })
+  const placed = new Set<string>()
+  for (const b of arrangedByCause(page, causesOf)) {
+    if (placed.has(b.entryId)) continue
+    placed.add(b.entryId)
+    if (!isTurn(b)) {
+      root.appendChild(restoredBlock({ ...factsOf(b), id: id++ }, S, container, () => {}, store))
+      continue
+    }
+    for (const el of restoredTurn(
+      { ...factsOf(b), causes: causesOf(b.entryId) },
+      S,
+      () => id++,
+      container,
+      () => {},
+      store,
+      (entryId) => {
+        const caused = byID.get(entryId)
+        if (!caused || placed.has(entryId)) return null
+        placed.add(entryId)
+        return restoredBlock({ ...factsOf(caused), id: id++ }, S, container, () => {}, store)
+      },
+    )) {
+      root.appendChild(el)
+    }
   }
   return root
 }

@@ -169,6 +169,7 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 		CallID        string `json:"callId"`
 		ActionEntryID string `json:"actionEntryId"`
 		Effect        string `json:"effect"`
+		OpensBlock    bool   `json:"opensBlock"`
 		Resource      *struct {
 			Kind string `json:"kind"`
 			ID   string `json:"id"`
@@ -185,6 +186,47 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Resource == nil || got.Resource.Kind != "path" || got.Resource.ID != "/repo/a.txt" {
 		t.Fatalf("resource = %+v, want the path the call named", got.Resource)
+	}
+	// files.read opens no block, so its LINE is the only thing that says the
+	// call happened (nocx-9sqii) — and the fact is on the wire either way,
+	// so the renderer never has to know which tools open blocks.
+	if got.OpensBlock {
+		t.Fatalf("files.read announced opensBlock=true: %s", raw)
+	}
+}
+
+// The other value of the same fact, off the same socket: `run` submits a
+// command, so the block that command opens is the account of the call and
+// the flow draws no line beside it (nocx-9sqii). Asserted here because a
+// boolean asserted in one state is a field nobody has checked.
+func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "agent.runToolCall.schema.json")
+	client := &scriptedEventClient{events: []assistant.AskEvent{
+		{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
+			Tool: "run", CallID: "call_r", EntryID: "entry-action-r",
+			Effect: content.EffectMutateDestructive, OpensBlock: true,
+		}},
+		{Kind: assistant.AskAnswer, Text: "41G free"},
+	}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-1", "sessionId": sid, "question": "how much disk is left?", "cwd": "/repo",
+	}, 1); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.runToolCall", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.runToolCall params (a call that opens a block)")
+	var got struct {
+		Tool       string `json:"tool"`
+		OpensBlock bool   `json:"opensBlock"`
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Tool != "run" || !got.OpensBlock {
+		t.Fatalf("payload = %s, want run announcing opensBlock=true", raw)
 	}
 }
 

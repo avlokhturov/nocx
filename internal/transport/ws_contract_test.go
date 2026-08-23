@@ -5304,14 +5304,16 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 		ID: "01924f9c-0000-7000-8000-0000000000aa", Client: "agent",
 		EnvironmentID: localEnvironmentID(), Cwd: "/", Kind: content.EntryAction,
 		Intent: "files.read",
-		Payload: `{"tool":"files.read","effect":"observe",` +
+		Payload: `{"tool":"files.read","effect":"observe","opensBlock":true,` +
 			`"resource":{"kind":"path","id":"/repo/go.mod"}}`,
 	}
 	if _, err := led.Submit(context.Background(), action); err != nil {
 		t.Fatalf("submit the action entry: %v", err)
 	}
-	for _, caused := range []string{action.ID, "wire-2"} {
-		if _, err := led.AddCause(context.Background(), "wire-1", caused); err != nil {
+	for i, caused := range []string{action.ID, "wire-2"} {
+		// Distinct anchors, so "the anchor came off the socket" cannot pass
+		// on a zero the mapping never set (nocx-9sqii).
+		if _, err := led.AddCause(context.Background(), "wire-1", caused, i*17); err != nil {
 			t.Fatalf("AddCause(%s): %v", caused, err)
 		}
 	}
@@ -5322,11 +5324,13 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 	validateJSON(t, getSchema, withCauses.Result, "ledger.get result (an entry that caused two others)")
 	var body struct {
 		Caused []struct {
-			EntryID  string `json:"entryId"`
-			Position int    `json:"position"`
-			Kind     string `json:"kind"`
-			Effect   *string
-			Resource *content.GrantScope
+			EntryID    string `json:"entryId"`
+			Position   int    `json:"position"`
+			At         int    `json:"at"`
+			Kind       string `json:"kind"`
+			OpensBlock bool   `json:"opensBlock"`
+			Effect     *string
+			Resource   *content.GrantScope
 		} `json:"caused"`
 	}
 	if err := json.Unmarshal(withCauses.Result, &body); err != nil {
@@ -5353,6 +5357,20 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
 		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
 	}
+	// The two facts a turn drawn in fragments is placed by (nocx-9sqii),
+	// off the real socket: where in the prose each cause sat, and whether
+	// its work became a block of its own. A command entry never claims to
+	// have opened one — it IS one.
+	if body.Caused[0].At != 0 || body.Caused[1].At != 17 {
+		t.Fatalf("the anchors off the socket = %d, %d; want 0, 17",
+			body.Caused[0].At, body.Caused[1].At)
+	}
+	if !body.Caused[0].OpensBlock {
+		t.Fatalf("the action's opensBlock off the socket = false, want the stored true")
+	}
+	if body.Caused[1].OpensBlock {
+		t.Fatalf("a command came back saying it opened a block: %+v", body.Caused[1])
+	}
 }
 
 // The negative for the causal flow: the schema refuses what it must, or the
@@ -5378,6 +5396,16 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
 		"an undeclared field on a cause": body(
 			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
+		// The anchor and the block fact are required for the same reason
+		// the position is: a cause that carries neither is a cause a
+		// restored turn cannot place, and "absent" and "0" must not be the
+		// same thing on the wire (nocx-9sqii).
+		"a cause with no anchor": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		"a negative anchor": body(
+			`[{"entryId":"b","position":0,"at":-1,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		"a cause that will not say whether it opened a block": body(
+			`[{"entryId":"b","position":0,"at":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
 	}
 	for name, raw := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -5388,8 +5416,8 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	}
 	// And the shape it must ACCEPT, so the refusals above are a contract
 	// and not an accident of a schema that refuses everything.
-	ok := body(`[{"entryId":"b","position":0,"kind":"action","intent":"files.read",` +
-		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"}}]`)
+	ok := body(`[{"entryId":"b","position":0,"at":12,"kind":"action","intent":"files.read",` +
+		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(ok)); err != nil {
 		t.Fatalf("the schema refused a well-formed cause: %v", err)
 	}

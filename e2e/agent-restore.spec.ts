@@ -226,6 +226,27 @@ async function finished(page: Page, text: string): Promise<void> {
   })
 }
 
+/**
+ * Every block in the active pane, in DOCUMENT ORDER, as
+ * `kind|fragment|header` (nocx-9sqii).
+ *
+ * Document order IS the claim the product makes — in a terminal, vertical
+ * position is a claim about time — so the assertion is taken off the order
+ * itself rather than off "the block exists somewhere". The fragment index is
+ * in the row because a turn that ran a command is drawn as several blocks,
+ * and "which fragment" is half of what a reader has to be able to tell.
+ */
+async function flowRows(page: Page): Promise<string[]> {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('.pane.active .cmd-block')).map((b) => {
+      const el = b as HTMLElement
+      return `${el.dataset.blockKind ?? 'command'}|${el.dataset.turnFragment ?? ''}|${
+        el.querySelector('.cmd-header-text')?.textContent ?? ''
+      }`
+    }),
+  )
+}
+
 test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
@@ -298,6 +319,30 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
 
     const liveAgentBlock = blockFor(page, AGENT_COMMAND).first()
     await expect(liveAgentBlock).toBeVisible({ timeout: 30_000 })
+
+    // ── The turn reads in the order it happened (nocx-9sqii, criterion 1) ─
+    // The owner's report was this sequence inverted: the answer finished
+    // above the evidence it was distilled from, and the `▸ run` line that
+    // stood in the answer's place carried neither the command nor its
+    // output. So the assertion is document order across the whole flow —
+    // question, the command's OWN block, the answer written from it.
+    const liveOrder = (await flowRows(page)).filter(
+      (r) => r.includes(SECOND_QUESTION) || r.includes(AGENT_COMMAND),
+    )
+    expect(liveOrder).toEqual([
+      `ask|0|${SECOND_QUESTION}`,
+      `command||${AGENT_COMMAND}`,
+      `ask|1|${SECOND_QUESTION}`,
+    ])
+    // The answer written from the output is BELOW the block, in the turn's
+    // continuation — and the continuation says it is one.
+    const continuation = blockFor(page, SECOND_QUESTION).last()
+    await expect(continuation.locator('[data-answer-body]')).toContainText('Plenty.')
+    await expect(continuation.locator('[data-turn-continuation]')).toHaveText('continued')
+    // Criterion 2: no surface restates the command. The `run` call left no
+    // line at all — the block is the account of it — and this pane's other
+    // turn made no calls, so nothing anywhere claims one.
+    await expect(page.locator('.pane.active .ui-tool-call')).toHaveCount(0)
     // It says so BEFORE the restart too — otherwise a restore that painted
     // no badge anywhere would pass the assertion below by matching a live
     // surface that never had one either.
@@ -347,5 +392,15 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     // And the sentence reserved for a body retention has evicted is NOT what
     // a turn whose answer is right there gets (ADR-0019 §7).
     await expect(turn).not.toHaveAttribute('data-output-evicted', 'true')
+
+    // The turn that RAN something comes back arranged as it was drawn
+    // (nocx-9sqii, criterion 9): the relation and the prose anchor are
+    // stored, so the restored view of one turn agrees with the live one it
+    // came from — the same rows, in the same order.
+    const restoredOrder = (await flowRows(page)).filter(
+      (r) => r.includes(SECOND_QUESTION) || r.includes(AGENT_COMMAND),
+    )
+    expect(restoredOrder).toEqual(liveOrder)
+    await expect(page.locator('.pane.active .ui-tool-call')).toHaveCount(0)
   })
 })

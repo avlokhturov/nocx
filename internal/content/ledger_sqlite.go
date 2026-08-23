@@ -1148,7 +1148,7 @@ func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 // call on top of the calls before it. Reading the maximum in a separate
 // statement would have the same fault against a concurrent writer, one
 // transaction narrower.
-func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (int, error) {
+func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string, at int) (int, error) {
 	pos := 0
 	err := s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -1169,6 +1169,10 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (
 			if err = json.Unmarshal([]byte(existing), &p); err != nil {
 				return fmt.Errorf("content: caused-by %s -> %s: stored position: %w", causedID, turnID, err)
 			}
+			// The stored anchor is kept with the stored position, and for
+			// the same reason: the replay is looking at an answer that has
+			// grown since, and taking its `at` would move this cause below
+			// prose it actually happened above.
 			pos = p.Pos
 			return tx.Commit()
 		case !errors.Is(err, sql.ErrNoRows):
@@ -1184,7 +1188,7 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (
 		if highest.Valid {
 			pos = int(highest.Int64) + 1
 		}
-		body, err := json.Marshal(CausePayload{Pos: pos})
+		body, err := json.Marshal(CausePayload{Pos: pos, At: at})
 		if err != nil {
 			return err
 		}
@@ -1216,7 +1220,8 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (
 // row.
 func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT e.from_id, COALESCE(json_extract(e.payload, '$.pos'), 0), n.kind, n.intent, n.payload
+		`SELECT e.from_id, COALESCE(json_extract(e.payload, '$.pos'), 0),
+		        COALESCE(json_extract(e.payload, '$.at'), 0), n.kind, n.intent, n.payload
 		 FROM edges e JOIN entries n ON n.id = e.from_id
 		 WHERE e.to_id = ? AND e.rel = ?
 		 ORDER BY json_extract(e.payload, '$.pos'), e.from_id`,
@@ -1229,7 +1234,7 @@ func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEnt
 	for rows.Next() {
 		var c CausedEntry
 		var payload string
-		if err := rows.Scan(&c.EntryID, &c.Position, &c.Kind, &c.Intent, &payload); err != nil {
+		if err := rows.Scan(&c.EntryID, &c.Position, &c.At, &c.Kind, &c.Intent, &payload); err != nil {
 			return nil, err
 		}
 		// The tool facts belong to an ACTION row and are read from nowhere
@@ -1242,6 +1247,7 @@ func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEnt
 			}
 			c.Effect = facts.Effect
 			c.Resource = facts.Resource
+			c.OpensBlock = facts.OpensBlock
 		}
 		out = append(out, c)
 	}

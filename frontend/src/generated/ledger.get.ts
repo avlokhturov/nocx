@@ -263,6 +263,14 @@ export interface Caused {
    */
   position: number
   /**
+   * Where in the turn's ANSWER this happened: how much of the answer text had been written when the cause was recorded, counted in UTF-16 code units — the unit a JavaScript string's own indices count in, so the renderer's cut is exact on the Cyrillic and CJK text a byte offset would split mid-character (nocx-9sqii). `position` orders the causes; this PLACES them, which is what a turn drawn as fragments around the blocks it caused needs and what nocx-h1l4o deliberately deferred. 0 is the ordinary turn that reaches for its tools before it has said anything, and it is also what a cause recorded before this field existed reads as: above the prose, which is where such a call belongs.
+   */
+  at: number
+  /**
+   * Whether this cause's work became a TOP-LEVEL BLOCK of its own — the tool declaration's fact (internal/agenttools Declaration.OpensBlock), stored on the ACTION row with its attempt and read back here. True only for an action entry whose tool opens a block (`run`): the command's block, its output and its exit status are the account of that call, so the turn draws no line beside it, and a line would restate what the block already shows. False for every other action, whose line is the only trace it left, and false for a shell entry — a command a turn ran IS a block and does not also say it opened one. Read rather than matched on `intent`, so a reader is never a second copy of the tool table.
+   */
+  opensBlock: boolean
+  /**
    * What kind of entry it is. Closed set, mirroring the store's CHECK constraint.
    */
   kind: 'shell' | 'agent' | 'action'

@@ -897,6 +897,29 @@ type Edge struct {
 // place inside a turn rather than a number the store hands out.
 type CausePayload struct {
 	Pos int `json:"pos"`
+	// At is WHERE IN THE ANSWER'S PROSE this happened: how much of the
+	// turn's answer text had been written when the cause was recorded,
+	// counted in UTF-16 code units (nocx-9sqii).
+	//
+	// The position above orders the causes; it does not say where any of
+	// them sat in what the model wrote. A turn is drawn as fragments around
+	// the blocks it caused, so a reader that knows only the order puts every
+	// call at the head of the flow while the live view interleaves them —
+	// the deliberate gap nocx-h1l4o left, closed here.
+	//
+	// UTF-16 CODE UNITS, AND THE UNIT IS THE POINT. The one reader is a
+	// renderer that slices a JavaScript string, whose indices are UTF-16
+	// code units; a byte offset would split «41G свободно» mid-character on
+	// the first Cyrillic answer, and a rune count would disagree on an
+	// emoji. Stored in the unit the reader cuts with, so the cut is exact.
+	//
+	// UNLIKE Pos, THIS IS THE CALLER'S. The store cannot know how much of
+	// an answer has been written — only the run that is writing it can — so
+	// AddCause takes it, while Pos stays the store's for the reasons its own
+	// doc gives. A caller that has no answer to give passes 0, which draws
+	// the cause above the prose and is exactly right for the ordinary turn
+	// that reaches for its tools before it says anything.
+	At int `json:"at"`
 }
 
 // ActionFacts is the part of an ACTION entry's payload the ledger reads
@@ -911,6 +934,16 @@ type CausePayload struct {
 type ActionFacts struct {
 	Tool   string `json:"tool"`
 	Effect Effect `json:"effect"`
+	// OpensBlock is the tool declaration's own fact
+	// (agenttools.Declaration.OpensBlock), written with the attempt: the
+	// call's work became a TOP-LEVEL BLOCK, so that block — its command, its
+	// output, its exit status — is the account of the call and a line beside
+	// it would restate the same command twice (nocx-9sqii).
+	//
+	// Stored rather than matched on Tool by the reader, for the reason
+	// Effect is stored: a reader holding its own list of which tools open
+	// blocks is a second copy of the tool table.
+	OpensBlock bool `json:"opensBlock,omitempty"`
 	// Resource is what the call named, derived ONCE at the moment the gate
 	// decided about the call and stored with it. Absent when the tool names
 	// no resource in its parameters at all.
@@ -931,7 +964,12 @@ type CausedEntry struct {
 	EntryID string
 	// Position is the causal index the turn assigned (CausePayload.Pos).
 	Position int
-	Kind     EntryKind
+	// At is how much of the turn's answer had been written when this
+	// happened, in UTF-16 code units (CausePayload.At) — where the reader
+	// cuts the prose to draw this cause between the text before it and the
+	// text written from its result.
+	At   int
+	Kind EntryKind
 	// Intent is the caused row's own intent: the command line for a shell
 	// entry, the tool name for an action.
 	Intent string
@@ -946,6 +984,10 @@ type CausedEntry struct {
 	// rather than re-derived because re-deriving it in a reader would be a
 	// second answer to a question that already has an owner.
 	Resource *GrantScope
+	// OpensBlock says this call's work became a block of its own
+	// (ActionFacts.OpensBlock). False on every non-action kind: a command a
+	// turn ran IS a block and does not also say it opened one.
+	OpensBlock bool
 }
 
 // LedgerEntrySummary is one row of the timeline: enough to page and render
@@ -1369,7 +1411,14 @@ type LedgerRepository interface {
 	// `caused-by` edge can never dangle in the store — the reader's
 	// dangling case is an id whose ROW is not in the page it is drawing,
 	// which is a different thing and handled there.
-	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// `at` is the ONE thing the caller supplies: how much of the turn's
+	// answer text had been written when this happened, in UTF-16 code
+	// units. The store cannot know it, and a reader that has to draw the
+	// turn as fragments around its blocks cannot do without it — see
+	// CausePayload.At. It is kept on the REPLAY too: the resume re-records
+	// a cause against an answer that has since grown, and taking the new
+	// value would move a call below the prose it happened above.
+	AddCause(ctx context.Context, turnID, causedID string, at int) (int, error)
 	// Caused returns everything entryID caused, in stored causal position
 	// order, each resolved into what a reader draws it with. Empty — never
 	// an error — for an entry that caused nothing and for an id no row

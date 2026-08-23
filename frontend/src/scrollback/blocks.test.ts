@@ -1840,6 +1840,7 @@ describe('BlockManager.addAnswerBlock', () => {
       tool: 'files.read',
       effect: 'observe',
       resource: { kind: 'path', id: '/repo/a.txt' },
+      opensBlock: false,
     })
     h.append('line 3 is wrong')
     // Not "a call appears somewhere in the block": the call sits BETWEEN
@@ -1859,6 +1860,7 @@ describe('BlockManager.addAnswerBlock', () => {
       tool: 'readScreen',
       effect: 'observe',
       resource: { kind: 'session', id: 'sess-9bb9' },
+      opensBlock: false,
     })
     const res = h.el.querySelector('.ui-tool-call__resource')
     expect(res?.textContent).toBe('home/dev')
@@ -1868,12 +1870,20 @@ describe('BlockManager.addAnswerBlock', () => {
   it('renders one line per call id, however many times the backend announces it', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    const call = { callId: 'call_1', tool: 'run', effect: 'mutate-destructive' as const }
+    // A call that opens NO block, so the line is what a repeat announcement
+    // could duplicate — a `run` call draws no line at all now (nocx-9sqii),
+    // and this test is about the idempotence, not about which tool it was.
+    const call = {
+      callId: 'call_1',
+      tool: 'files.read',
+      effect: 'observe' as const,
+      opensBlock: false,
+    }
     h.toolCall(call)
     // An approved egress resume puts the SAME call through the pipeline a
     // second time, so the same announcement arrives twice.
     h.toolCall(call)
-    expect(flowOf(h)).toEqual(['call:run'])
+    expect(flowOf(h)).toEqual(['call:files.read'])
   })
 
   it('puts the thinking in its own note and never in the answer text', () => {
@@ -1928,7 +1938,7 @@ describe('BlockManager.addAnswerBlock', () => {
   it('a call retires the typing dots but leaves the header reporting work', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe' })
+    h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe', opensBlock: false })
     // The body has content now, so the stand-in for text goes...
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
     // ...and the corner keeps saying the run is working, because it is: the
@@ -2563,5 +2573,102 @@ describe('the visual freeze parks the durable bodies', () => {
     const lines = [new BufferLine('hi', false)]
     const rec = noDims.freezeBlock((y) => lines[y] ?? undefined, 0, 0)
     expect(rec?.captured).toBeUndefined()
+  })
+})
+
+// ── a block is a block, whoever submitted it (nocx-9sqii, criterion 3) ────
+//
+// The assistant's command stays an ORDINARY top-level block. That claim is
+// only worth something if it is checked by the SAME assertions a person's
+// block is checked by — a separate "and the agent's block also works" test
+// is written from the implementation and passes for whatever was built.
+//
+// So this runs one set over both authors. What differs between them is the
+// author badge and nothing else, and that difference is asserted here too so
+// the sameness is not sameness by accident.
+describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
+  const build = (parent: HTMLElement, command = 'cat -n a.txt') =>
+    createCommandBlock(
+      'command',
+      1,
+      command,
+      '/repo',
+      '',
+      '<span class="term-line">     1\tfirst</span><span class="term-line">     2\tsecond</span>',
+      120,
+      0,
+      'success',
+      makeContainer(parent),
+      noopSelect,
+      freshStore(),
+      author,
+    )
+
+  it('is selectable by clicking it', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    parent.appendChild(el)
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+    el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
+    expect(el.classList.contains('cmd-block-selected')).toBe(true)
+    parent.remove()
+  })
+
+  it('says what was run — the "what did I run" reading, off the block itself', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    expect(blockCommandText(el)).toBe('cat -n a.txt')
+    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('cat -n a.txt')
+    parent.remove()
+  })
+
+  it('gives its output back with the line breaks put back — the copy path', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    expect(blockOutputText(el)).toBe('     1\tfirst\n     2\tsecond')
+    parent.remove()
+  })
+
+  it('offers the overflow menu, with the same items', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    parent.appendChild(el)
+    const btn = el.querySelector('.cmd-overflow-btn') as HTMLElement
+    expect(btn).not.toBeNull()
+    btn.click()
+    const items = Array.from(
+      document.body.querySelectorAll('.cmd-overflow-menu .cmd-overflow-menu-item'),
+    ).map((i) => i.textContent)
+    expect(items).toContain('Copy command')
+    expect(items).toContain('Copy output')
+    expect(items).toContain('Copy all')
+    document.body.querySelector('.cmd-overflow-menu')?.remove()
+    parent.remove()
+  })
+
+  it('is a top-level block of the ordinary kind — never nested inside a turn', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    parent.appendChild(el)
+    expect(el.classList.contains('cmd-block')).toBe(true)
+    expect(el.dataset.blockKind).toBe('command')
+    expect(el.parentElement).toBe(parent)
+    expect(el.closest('[data-answer-body]')).toBeNull()
+    parent.remove()
+  })
+
+  it('carries the author mark when it is not the human, and none when it is', () => {
+    const parent = document.createElement('div')
+    document.body.appendChild(parent)
+    const el = build(parent)
+    const mark = el.querySelector<HTMLElement>('.ui-badge[data-author]')
+    if (author === 'shell') expect(mark).toBeNull()
+    else expect(mark?.dataset.author).toBe('agent')
+    parent.remove()
   })
 })

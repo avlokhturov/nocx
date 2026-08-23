@@ -270,10 +270,15 @@ describe('restore-client — blocks arranged by the relation', () => {
   const cause = (entryId: string, position: number) => ({
     entryId,
     position,
+    // Where in the prose it happened (nocx-9sqii). Irrelevant to the
+    // arrangement asserted here — this module places a caused block next to
+    // its turn; where inside the turn it lands is the flow's projection.
+    at: 0,
     kind: 'shell' as const,
     intent: entryId,
     effect: null,
     resource: null,
+    opensBlock: false,
   })
 
   it('places a turn’s commands after it, in the causal order it assigned', () => {
