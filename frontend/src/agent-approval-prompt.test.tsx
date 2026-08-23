@@ -140,7 +140,7 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
     const { container } = renderPrompt({ ask: POLICY_ASK, sessionWhere: () => HERE })
     const text = container.textContent ?? ''
     expect(text).not.toContain('home/dev')
-    expect(text).not.toContain('working directory')
+    expect(text).not.toContain('cwd')
     // The path argument itself is still a row, named as the model named it.
     const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
       (r) => r.textContent,
@@ -347,7 +347,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     })
     const named = rows(container).map(([name]) => name)
     // Nothing is dropped, and the order is the model's own.
-    expect(named).toEqual(['sessionId', 'region', 'why', 'working directory'])
+    expect(named).toEqual(['sessionId', 'region', 'why', 'cwd'])
     expect(rows(container)[1][1]).toBe('{"start":0,"end":24}')
     expect(rows(container)[2][1]).toBe('because')
   })
@@ -381,7 +381,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
 
   it('names the working directory the shell confirmed, and says the shell confirmed it', () => {
     const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
-    const row = rows(container).find(([name]) => name === 'working directory')
+    const row = rows(container).find(([name]) => name === 'cwd')
     expect(row?.[1]).toContain('/home/dev')
     const note = container.querySelector('.ui-fact-list__note')?.textContent ?? ''
     expect(note).toContain('reported by the shell')
@@ -396,7 +396,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       ask: SESSION_ASK,
       sessionWhere: () => ({ ...HERE, cwd: '~/Documents', cwdVerified: false }),
     })
-    const row = rows(container).find(([name]) => name === 'working directory')
+    const row = rows(container).find(([name]) => name === 'cwd')
     expect(row?.[1]).toContain('~/Documents')
     const note = container.querySelector('.ui-fact-list__note')?.textContent ?? ''
     expect(note).toContain('has not confirmed')
@@ -432,13 +432,13 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     // And the directory is added beside it. The two arguments the sentence
     // already states are not repeated as rows — where a call lands has one
     // owner on this surface, not two.
-    expect(rows(container)).toEqual([['working directory', '/home/dev']])
+    expect(rows(container)).toEqual([['cwd', '/home/dev']])
   })
 
   it('puts the decision facts before the policy prose', () => {
     const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
     const text = container.textContent ?? ''
-    const facts = text.indexOf('working directory')
+    const facts = text.indexOf('cwd')
     const effect = text.indexOf('This call can')
     const covers = text.indexOf('Approving covers this call')
     const lasts = text.indexOf('An answer in this session lasts')

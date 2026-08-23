@@ -39,6 +39,13 @@ not carry. The owner, shown this: «вопрос — это команда. А �
 artifact on the turn's own run execution. There is no answer entry and no `caused-by` edge
 between them.
 
+> **Amended 2026-08-23 by [ADR-0037](0037-a-block-is-a-node-in-an-ordered-tree.md).** The
+> first sentence stands: a turn is one entry, and that entry is its IDENTITY — the id the
+> deltas route by, the grant hangs off, and copy and the conversation address. The second
+> no longer does. **A turn's answer is not an artifact of its own; the turn's body is its
+> CHILDREN**, one `kind = text` block per run of prose, ordered among the calls and
+> commands the turn made. See the second amendment at the foot of this file.
+
 **The turn is anchored to its pane, and the transport is what anchors it.** The renderer
 does not send a `paneId`: the backend already resolved which pane a session is the pipe
 of, and `ledger.open` states in its own comment why a second copy on the wire is wrong —
@@ -151,3 +158,31 @@ re-litigation without amending this ADR again.**
 - **Hoisting the command above the question.** In a terminal, vertical position is a
   claim about time, and that claim would be that the command preceded the intent that
   caused it.
+
+## Amendment, 2026-08-23 (second) — the answer is not one artifact; the turn's body is its children ([ADR-0037](0037-a-block-is-a-node-in-an-ordered-tree.md))
+
+The first amendment above bought the interleaving with an ANCHOR: `caused-by`'s payload
+carries `at`, the offset into the answer where each cause sat, and the renderer cuts the
+stored answer at those offsets. ADR-0037 removes both the cut and the offset, and the
+reason is this ADR's own: it retired the separate answer entry because that entry "was only
+ever an ADDRESS for the deltas". `at` is the same shape one layer down — a coordinate that
+exists only because the unit that is DRAWN (a run of prose) and the unit that is STORED
+(the whole answer) were different things.
+
+**What is dropped.** The answer artifact on the turn's run; the `caused-by` edge and its
+`{pos, at}` payload; the fragment arrangement this file's first amendment recorded, along
+with the `continued` badge and the per-fragment identity that came with it.
+
+**What survives.** A turn is one entry and one block — more firmly than before, since it is
+no longer drawn as several. One id on the wire. The pane anchor, and the transport as what
+anchors it. The answer as an artifact with provenance rather than a string in a map — there
+are simply several of them now, one per prose block, each owned by the block it is the body
+of.
+
+**Both arrangements this file rejected stay rejected, and one of them for a re-read reason.**
+Hoisting the command above the question still claims the command preceded the intent that
+caused it. Nesting is subtler: what was rejected was nesting a VT grid _inside reflowing
+prose_, and that is still refused. A child block in an ordered tree is not that — it is a
+sibling of the prose rather than a hole inside it, held to exactly the rules any block is
+held to, so `nocx-juau` binds it unchanged and it reaches its far end by the horizontal
+scroll `.cmd-output` already has.

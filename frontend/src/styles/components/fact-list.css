@@ -10,16 +10,23 @@
 
 .ui-fact-list {
   display: grid;
-  gap: var(--space-2);
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  align-items: baseline;
   margin: 0;
+  min-width: 0;
 }
 
+/* The row is a grouping element for the DOM and for screen readers, and it
+   must not be one for the LAYOUT: a grid on the row computes `max-content`
+   from that row's own name, so every row gets a column of its own width and
+   the values step raggedly down the list — which is the one thing this
+   component exists to prevent. `display: contents` lifts the dt and dd into
+   the list's grid, where the name column is the longest name in the LIST.
+   The comment above used to describe this and the code did not do it
+   (nocx-n7xha follow-up). */
 .ui-fact-list__row {
-  display: grid;
-  grid-template-columns: max-content 1fr;
-  gap: var(--space-1) var(--space-3);
-  align-items: baseline;
-  min-width: 0;
+  display: contents;
 }
 
 /* The name is the quiet half: a person scans the values and reads a name

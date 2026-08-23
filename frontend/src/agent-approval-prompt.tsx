@@ -269,7 +269,15 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     const pane = where()
     if (pane !== null && pane.cwd !== '') {
       rows.push({
-        name: 'working directory',
+        // `cwd`, not "working directory": this column is ONE vocabulary or
+        // it is none. Every other row is an argument under the model's own
+        // key — `sessionId`, `path` — in mono, and a spaced English phrase
+        // beside them reads as a different kind of thing and pulls the eye
+        // off the values, which are what a person is deciding on. `cwd` is
+        // also the word nocx already uses for this fact everywhere else:
+        // the block header's chip, the ledger's own column, SubmitEntry.
+        // (nocx-n7xha follow-up.)
+        name: 'cwd',
         value: pane.cwd,
         // Two wordings, because nocx knows the difference and this window
         // is where pretending otherwise costs most (AD-5). Both say "as of
