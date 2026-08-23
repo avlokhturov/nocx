@@ -75,7 +75,11 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	return nil
 }
 
-func (f *fakeAgentService) OpenProse(_ context.Context, turnID string) (content.ProseBlock, error) {
+func (f *fakeAgentService) PriorTurn(_ context.Context, _, _ string) (*content.PriorTurn, error) {
+	return nil, nil
+}
+
+func (f *fakeAgentService) OpenProse(_ context.Context, turnID string, _ int64) (content.ProseBlock, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.prose++

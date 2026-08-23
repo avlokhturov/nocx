@@ -752,9 +752,22 @@ func proseDigest(turnID string, pos int) string {
 // reads (ledgerWhere): giving prose an anchor would put every paragraph of
 // every answer into the restore as a block of its own, and into the model's
 // own blocks.list beside them.
-func (s *sqliteContent) OpenProse(ctx context.Context, turnID string) (ProseBlock, error) {
+//
+// It DOES carry the run that printed it, in the payload (ProseFacts). The run
+// is resolved in the same transaction and must be an agent-lane execution of
+// this turn: a run id from another turn would seat prose here and attribute
+// it there, which is the one way this column could make a reader worse off
+// than no column at all.
+func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int64) (ProseBlock, error) {
 	if turnID == "" {
 		return ProseBlock{}, errors.New("content: open prose: turn id is required — prose is somebody's child")
+	}
+	if runID <= 0 {
+		return ProseBlock{}, errors.New("content: open prose: run id is required — prose belongs to the run that printed it")
+	}
+	facts, factsErr := json.Marshal(ProseFacts{RunID: runID})
+	if factsErr != nil {
+		return ProseBlock{}, factsErr
 	}
 	var out ProseBlock
 	err := s.run(ctx, func(ctx context.Context) error {
@@ -778,6 +791,26 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string) (ProseBloc
 		}
 		if err != nil {
 			return err
+		}
+
+		// The run must be THIS turn's, and an agent-lane one: the prose it
+		// prints is assembled into this turn's message, so a run belonging
+		// to another block would put one turn's sentences into another's
+		// context. Refused by name rather than by a foreign key, which would
+		// accept any execution in the table.
+		var lane sql.NullString
+		err = tx.QueryRowContext(ctx,
+			`SELECT lane FROM executions WHERE id = ? AND entry_id = ?`, runID, turnID).Scan(&lane)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: open prose under %s: run %d is not a run of that turn: %w",
+				turnID, runID, ErrNoSuchRun)
+		}
+		if err != nil {
+			return err
+		}
+		if lane.String != agentLane {
+			return fmt.Errorf("content: open prose under %s: execution %d is not an agent run: %w",
+				turnID, runID, ErrNoSuchRun)
 		}
 
 		var highest sql.NullInt64
@@ -804,9 +837,9 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string) (ProseBloc
 		if _, err = tx.ExecContext(ctx, `INSERT INTO entries
 			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, intent,
 			 phase, status, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', '', 'closed', 'success', ?, 'normal', '{}')`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', '', 'closed', 'success', ?, 'normal', ?)`,
 			entryID, seq, client, proseDigest(turnID, pos), envID, turnID, pos, cwd,
-			time.Now().UnixMilli()); err != nil {
+			time.Now().UnixMilli(), string(facts)); err != nil {
 			return err
 		}
 

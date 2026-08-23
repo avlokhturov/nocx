@@ -445,7 +445,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	}
 	// The paired success, so "none" is not passing because the read is
 	// broken: a run of prose opened under this turn IS there, with a body.
-	prose, err := led.OpenProse(ctx, res.EntryID)
+	prose, err := led.OpenProse(ctx, res.EntryID, res.RunID)
 	if err != nil {
 		t.Fatalf("OpenProse under the fresh turn: %v", err)
 	}
@@ -913,7 +913,7 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 	}
 	// The paired success on the same store: the run's first piece of prose
 	// opens under this turn perfectly well.
-	if _, err := led.OpenProse(ctx, res.EntryID); err != nil {
+	if _, err := led.OpenProse(ctx, res.EntryID, res.RunID); err != nil {
 		t.Fatalf("OpenProse under a general question: %v", err)
 	}
 }
@@ -1033,7 +1033,7 @@ func TestAnAskIsOneEntryWhoseBodyIsItsProseChildren(t *testing.T) {
 	// run of prose is an ARTIFACT with provenance, text/plain and never
 	// application/vt, which is exactly what tells a restored block to render
 	// prose rather than a grid.
-	prose, err := led.OpenProse(ctx, ask.EntryID)
+	prose, err := led.OpenProse(ctx, ask.EntryID, ask.RunID)
 	if err != nil {
 		t.Fatalf("OpenProse: %v", err)
 	}

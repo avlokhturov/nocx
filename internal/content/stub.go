@@ -202,9 +202,14 @@ func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFr
 	return CaptureFrameResult{}, ErrNotImplemented
 }
 
-func (s *ledgerStub) OpenProse(_ context.Context, turnID string) (ProseBlock, error) {
-	s.log.Info("content stub: LedgerRepository.OpenProse", "turn", turnID)
+func (s *ledgerStub) OpenProse(_ context.Context, turnID string, runID int64) (ProseBlock, error) {
+	s.log.Info("content stub: LedgerRepository.OpenProse", "turn", turnID, "run", runID)
 	return ProseBlock{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) PriorTurn(_ context.Context, paneID, beforeEntryID string) (*PriorTurn, error) {
+	s.log.Info("content stub: LedgerRepository.PriorTurn", "pane", paneID, "before", beforeEntryID)
+	return nil, ErrNotImplemented
 }
 
 func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {

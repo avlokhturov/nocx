@@ -34,8 +34,15 @@ type AgentService interface {
 	// OpenProse opens one run of assistant prose under the turn: a `text`
 	// child at the next free seat with an artifact of its own (ADR-0037).
 	// The stream calls it on the first delta after a call — the backend owns
-	// where one run of prose begins, so the renderer never decides it.
-	OpenProse(ctx context.Context, turnID string) (content.ProseBlock, error)
+	// where one run of prose begins, so the renderer never decides it. runID
+	// is the run printing it, recorded on the block so a turn with more than
+	// one attempt can be read back one attempt at a time.
+	OpenProse(ctx context.Context, turnID string, runID int64) (content.ProseBlock, error)
+	// PriorTurn is the conversation read: the agent turn preceding
+	// beforeEntryID in paneID, with the prose of the run that answered it,
+	// already arranged (ADR-0037 — the conversation is assembled from the
+	// children, in pos order, per run). Nil when nothing precedes it.
+	PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*content.PriorTurn, error)
 	// SealProse seals one prose block's body: the boundary arrived (the next
 	// tool call) and nothing more may be appended to it.
 	SealProse(ctx context.Context, entryID string) error
@@ -103,11 +110,18 @@ func (s *agentService) FinishAgentRun(ctx context.Context, runID int64, in conte
 	return s.ledger.FinishAgentRun(ctx, runID, in)
 }
 
-func (s *agentService) OpenProse(ctx context.Context, turnID string) (content.ProseBlock, error) {
+func (s *agentService) OpenProse(ctx context.Context, turnID string, runID int64) (content.ProseBlock, error) {
 	if err := s.guard.check(); err != nil {
 		return content.ProseBlock{}, err
 	}
-	return s.ledger.OpenProse(ctx, turnID)
+	return s.ledger.OpenProse(ctx, turnID, runID)
+}
+
+func (s *agentService) PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*content.PriorTurn, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.PriorTurn(ctx, paneID, beforeEntryID)
 }
 
 func (s *agentService) SealProse(ctx context.Context, entryID string) error {

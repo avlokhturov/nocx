@@ -65,6 +65,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -817,6 +818,115 @@ type ProseBlock struct {
 	ArtifactID string
 }
 
+// ProseFacts is the part of a TEXT entry's payload the ledger reads back:
+// WHICH RUN printed this piece of prose (ADR-0037's "the conversation is
+// assembled from the children, in pos order, per run").
+//
+// It is a payload key rather than a column because it is what ONE kind has —
+// the distinction ADR-0037 drew when it rejected an attributes table: "a
+// column is what every kind has and the database must check, and payload is
+// what one kind has". And it is deliberately not artifacts.execution_id: that
+// column says which ATTEMPT produced a body, and a run of prose was printed
+// rather than attempted — the store writes it NULL for prose and a test
+// asserts it (TestAnAskIsOneEntryWhoseBodyIsItsProseChildren).
+//
+// What it buys is the retry case and only the retry case. A turn with one
+// agent run needs nothing recorded: every `text` child of that turn is that
+// run's prose, because there is no other run it could belong to. A turn with
+// SEVERAL agent-lane executions cannot be read that way — sorting its
+// children by pos alone splices two attempts into one incoherent message —
+// and this is the fact that separates them.
+type ProseFacts struct {
+	// RunID is the agent execution that opened this block. Zero — an absent
+	// key — means the block records no run, which is what a `text` row
+	// written by anything other than OpenProse looks like.
+	RunID int64 `json:"runId"`
+}
+
+// ProseFactsOf decodes a TEXT entry's payload. It is the one reader of that
+// key, beside ShellExitCodeOf and EntryMaskingOf: one decoder per key, and it
+// is the one that already exists.
+//
+// A payload that is not JSON, or carries no runId, is NOT an error: it is a
+// block that records no run, and saying so is the honest answer. The error
+// return is kept for the malformed-JSON case a caller may want to log.
+func ProseFactsOf(payload string) (ProseFacts, error) {
+	var f ProseFacts
+	if strings.TrimSpace(payload) == "" {
+		return f, nil
+	}
+	if err := json.Unmarshal([]byte(payload), &f); err != nil {
+		return ProseFacts{}, fmt.Errorf("content: decode prose facts: %w", err)
+	}
+	return f, nil
+}
+
+// TurnProse is one turn's answer as a reader must be told it: the prose of
+// ONE run, in seat order, or the honest statement that it is gone.
+//
+// WHICH RUN, stated on the value rather than left to the caller to work out
+// (the brief's trap 2: "be explicit about which run's prose the assembled
+// message is"). It is the turn's LATEST agent-lane execution — the attempt
+// whose text is the one a person just read, and therefore the one a follow-up
+// question is asked about. An earlier attempt's prose is not in Text and is
+// not counted in Blocks; it is not a hole either, because an attempt that was
+// superseded is not part of the answer that stands.
+//
+// Today a turn has exactly one agent run: SubmitAgentAsk writes attempt 1 and
+// the approval resume drives that SAME execution to completion (the resume is
+// a real checkpoint resume — internal/transport askRunContext.nextSeq). So
+// the selection is a no-op on every path the product has, and it exists
+// because `executions` permits a second agent-lane row per entry by design
+// (ADR-0020 decision 4) and a reader that ignored the possibility would
+// interleave two attempts the day one arrived.
+type TurnProse struct {
+	// RunID and Attempt are the execution this prose is of — the answer to
+	// "which run", carried so a caller never has to re-derive it.
+	RunID   int64
+	Attempt int
+	// State is that run's own state, and it is what decides whether Text is
+	// a finished answer or an unfinished attempt (the brief's trap 3). The
+	// presence of `text` children cannot answer that: a run interrupted
+	// halfway leaves exactly the same rows as one that finished.
+	State RunState
+	// Blocks is how many runs of prose Text was joined from — zero when the
+	// run printed nothing, and zero when retention took what it printed.
+	Blocks int
+	// Text is those blocks' bodies, in pos order, concatenated. The order is
+	// the whole meaning: a sentence written before a call explains why the
+	// call was made, and a sentence written after it is a conclusion drawn
+	// from its output.
+	Text string
+	// Evicted says retention took the bodies of this run's prose (ADR-0037's
+	// retention rule: the prose of one run is evicted as a unit). It is read
+	// off the SAME receipt LedgerEntry.ProseEvicted reads — the sweep's mark
+	// on the body — narrowed to this run's blocks, so there is one stored
+	// fact and one reading of it.
+	//
+	// It is the reason Text being empty is not ambiguous. Evicted with empty
+	// Text is "there was an answer and it is no longer kept"; not evicted
+	// with empty Text is "this run printed nothing". A reader that could not
+	// tell them apart would have to either invent text or leave a hole, and
+	// both are worse than the sentence that says which it is.
+	Evicted bool
+}
+
+// PriorTurn is the turn that came before another one in the same pane: the
+// question that was asked and the answer that stands to it.
+//
+// The pane is the thread. A turn is anchored to a pane and not to a session
+// (nocx-4em1z: a session is gone by the time a restore runs), so "what did we
+// just say" is a pane-scoped question, and it is the same scope the restore
+// reads and the block tools list.
+type PriorTurn struct {
+	// EntryID is that turn's block — the id a caller can go on to read.
+	EntryID string
+	// Question is its intent: what was asked, exactly as it was recorded.
+	Question string
+	// Prose is what the run answered, already arranged (see TurnProse).
+	Prose TurnProse
+}
+
 // The ask's reference-validation failures — reachable from the renderer (an
 // unknown id, a frame from another tab, an out-of-bounds rectangle) and
 // refused, never truncated or silently re-scoped. They are invalid params,
@@ -1446,7 +1556,13 @@ type LedgerRepository interface {
 	// it), so the renderer never has to. ErrNoSuchEntry when nothing carries
 	// turnID — a body seated under a parent that is not there is the one
 	// answer worse than an error.
-	OpenProse(ctx context.Context, turnID string) (ProseBlock, error)
+	//
+	// runID is the agent-lane execution that is printing this prose, and it
+	// is recorded on the block (ProseFacts). The store REFUSES a run that is
+	// not an agent-lane execution of turnID: prose attributed to another
+	// turn's run is worse than prose attributed to none, because it would be
+	// assembled into that turn's message.
+	OpenProse(ctx context.Context, turnID string, runID int64) (ProseBlock, error)
 	// SealProse seals one prose block's body: nothing may be appended to it
 	// again. Called when the boundary arrives — the tool call that ends this
 	// run of prose — and by the run's terminal close for whatever was still
@@ -1519,4 +1635,31 @@ type LedgerRepository interface {
 	// children and for an id no row carries: "what is inside this" has an
 	// honest answer either way.
 	Caused(ctx context.Context, entryID string) ([]CausedEntry, error)
+	// PriorTurn returns the agent turn that precedes beforeEntryID in paneID
+	// — the question that was asked and the prose of the run that answered
+	// it, already arranged (PriorTurn, TurnProse). Nil, and no error, when
+	// nothing precedes it: "there is no earlier turn in this pane" is an
+	// honest answer, and the caller's next question ("so send no history")
+	// is answered by it.
+	//
+	// THE JOIN IS HERE, and that is the point (AD-8). It is three questions —
+	// which turn came before this one, which of its runs is the one that
+	// stands, and what that run printed in what order — and each of them has
+	// exactly one right answer. A caller that stitched them from a children
+	// read would be a second owner of the arrangement, in the surface with
+	// the least idea what it means, which is the defect ADR-0037 exists to
+	// remove.
+	//
+	// beforeEntryID names the turn to look BEFORE, and it is resolved to that
+	// row's ingest_seq inside the read — the same rule LedgerQuery.BeforeID
+	// states, and for the same reason: a UUIDv7 sorts by the moment a client
+	// minted it, which is not the moment the backend accepted it. An id no
+	// row carries is refused with ErrNoSuchEntry rather than answered with
+	// the newest turn in the pane, which would be a different turn's answer
+	// presented as this one's context.
+	//
+	// An empty paneID answers nil: a session that is the pipe of no recorded
+	// pane has no thread to read, and inventing one out of every pane's turns
+	// would put another tab's conversation into this one.
+	PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*PriorTurn, error)
 }

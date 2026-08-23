@@ -689,6 +689,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		headers:    headers,
 		runID:      askRes.RunID,
 		entryID:    askRes.EntryID,
+		paneID:     in.PaneID,
 		question:   in.Question,
 		references: in.References,
 		endpoint:   endpoint,
@@ -793,6 +794,14 @@ type askRunContext struct {
 	headers []assistant.Header
 	runID   int64
 	entryID string
+	// paneID is the pane this turn is anchored to — the THREAD the earlier
+	// turns of this conversation are read from (PriorTurn). It is the same
+	// value the turn was recorded with, carried from the ask rather than
+	// re-resolved on the stream: the session may be gone by then, and the
+	// anchor is what outlives it (nocx-4em1z). Nil when the session is the
+	// pipe of no recorded pane, which costs the conversation context and
+	// nothing else.
+	paneID *string
 	// prose is the run of prose currently OPEN — the `text` child the next
 	// delta appends to, and the artifact its text lands in (ADR-0037). The
 	// zero value is "no block is open", which is the state a run starts in
@@ -914,11 +923,40 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// reference list, never a constant: no references, no claim.
 	promptFacts := rc.promptFacts
 	promptFacts.AttachedContent = len(rc.references) > 0
-	msgs := make([]assistant.Message, 0, 2+len(rc.references))
+	msgs := make([]assistant.Message, 0, 4+len(rc.references))
 	msgs = append(msgs, assistant.Message{
 		Role:    "system",
 		Content: assistant.SystemPrompt(promptFacts),
 	})
+	// THE CONVERSATION, and it is read from the ledger rather than remembered
+	// in this process (ADR-0037's closing consequence). The turn before this
+	// one in this pane is what "what did we just say" means: its question, and
+	// the prose of the run that answered it, in seat order and as ONE message.
+	//
+	// It is one turn and not the whole thread on purpose — the whole
+	// conversation assembled from the ledger is nocx-0s2gh.2, and it is the
+	// same read at a larger scale rather than a second one. What this must not
+	// do is grow a second assembler beside that; the arrangement stays in the
+	// ledger (PriorTurn), and what happens here is only the mapping from a
+	// stored turn to two Messages.
+	//
+	// A FAILED READ IS NOT FATAL, and it is the one place in this assembly
+	// that is so. A referenced frame that cannot be read terminalizes the run
+	// below, because the person pointed at it and an answer about something
+	// else is worse than none. Nobody pointed at the previous turn: it is
+	// context the backend added, so losing it degrades the answer instead of
+	// invalidating the question. It is logged rather than swallowed —
+	// a conversation that silently stopped being multi-turn is the failure
+	// that would take longest to notice.
+	if prior, priorErr := h.priorTurn(ctx, rc); priorErr != nil {
+		h.log.Warn("the previous turn could not be read; answering without it",
+			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
+	} else if prior != nil {
+		msgs = append(msgs, assistant.Message{Role: "user", Content: prior.Question})
+		if answer, ok := priorAnswerMessage(prior.Prose); ok {
+			msgs = append(msgs, assistant.Message{Role: "assistant", Content: answer})
+		}
+	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
 	for _, ref := range rc.references {
 		var text string
@@ -1065,7 +1103,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// what was recorded.
 		if prose.EntryID == "" {
 			if openErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-				opened, e := svc.OpenProse(ctx, rc.entryID)
+				opened, e := svc.OpenProse(ctx, rc.entryID, rc.runID)
 				if e == nil {
 					prose = opened
 				}
@@ -1857,6 +1895,71 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, string) {
 		})
 	}
 	return in, ""
+}
+
+// priorTurn reads the turn before this one in this run's pane — the
+// conversation the follow-up question is a follow-up TO. Nil, and no error,
+// when there is nothing before it, and nil when the session is the pipe of no
+// recorded pane: a turn with no anchor has no thread, and answering from every
+// pane's turns would put another tab's conversation into this one.
+//
+// The read goes through the operation like every other store touch on this
+// path — one short acquisition, the gate never held across the stream.
+func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*content.PriorTurn, error) {
+	if rc.paneID == nil || *rc.paneID == "" {
+		return nil, nil
+	}
+	var prior *content.PriorTurn
+	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		var e error
+		prior, e = svc.PriorTurn(ctx, *rc.paneID, rc.entryID)
+		return e
+	})
+	if err != nil {
+		return nil, err
+	}
+	return prior, nil
+}
+
+// proseGoneNotice is what an earlier turn says instead of its answer when
+// retention has taken the text. It is a STATED ABSENCE and not a hole: the
+// question above it is in the conversation either way, so leaving the answer
+// out entirely would read as "that question was never answered", and inventing
+// or paraphrasing one would be worse still. AGENTS.md: a soft degrade must be
+// visible, not silent — and the surface it has to be visible on here is the
+// model's own context, because that is who reads this message.
+const proseGoneNotice = "[the text of this answer is no longer stored: retention evicted it]"
+
+// proseCutShortNotice marks a partial answer AS partial. Which it is — a real
+// message or an unfinished attempt — is a fact about the run's state and never
+// about how much text there is: an interrupted run leaves exactly the rows a
+// finished one leaves, so a reader with only the text cannot tell.
+const proseCutShortNotice = "[this answer was cut short: the run did not finish]"
+
+// priorAnswerMessage is one earlier turn's answer as the model is told it, and
+// the bool is whether there is anything to tell. It is the whole of the
+// mapping from a stored turn to a Message — the ARRANGEMENT (which run, what
+// order, whether the text survives) is the ledger's and has already happened.
+//
+// Four states, and each is said rather than inferred:
+//
+//   - the run finished and printed prose → the prose, whole, in seat order.
+//   - the run printed prose and did NOT finish → the prose, marked partial.
+//   - the prose was evicted → the sentence that says so, never a hole.
+//   - the run printed nothing → nothing. Not a degrade and not a loss: an
+//     answer that was never written has no text to miss, and a marker there
+//     would claim one was.
+func priorAnswerMessage(p content.TurnProse) (string, bool) {
+	if p.Evicted {
+		return proseGoneNotice, true
+	}
+	if p.Text == "" {
+		return "", false
+	}
+	if p.State == content.RunCompleted {
+		return p.Text, true
+	}
+	return p.Text + "\n\n" + proseCutShortNotice, true
 }
 
 // sliceFrameText narrows a frame's durable text to the rows a reference

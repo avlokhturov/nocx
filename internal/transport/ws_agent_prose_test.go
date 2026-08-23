@@ -384,6 +384,24 @@ func TestAgentRunDelta_CarriesItsBlockOverTheWire(t *testing.T) {
 	}
 }
 
+// runOf is a turn's agent run — the execution the store recorded with the ask.
+// The tests below open prose by hand, and a run of prose belongs to the run
+// that printed it, so they have to name one.
+func runOf(t *testing.T, led content.LedgerRepository, turnID string) int64 {
+	t.Helper()
+	entry, err := led.Entry(context.Background(), turnID)
+	if err != nil || entry == nil {
+		t.Fatalf("Entry(%s): %v (nil=%v)", turnID, err, entry == nil)
+	}
+	for _, ex := range entry.Executions {
+		if ex.State != nil {
+			return ex.ID
+		}
+	}
+	t.Fatalf("the turn %s carries no agent run: %+v", turnID, entry.Executions)
+	return 0
+}
+
 // ── acceptance 7: the store refuses what it must, and succeeds otherwise ──
 
 // OpenProse under a parent that is not there is refused with the answer this
@@ -398,7 +416,7 @@ func TestOpenProse_RefusesAParentThatIsNotThereAndOpensOneThatIs(t *testing.T) {
 	led := h.db.Ledger()
 	ctx := context.Background()
 
-	if _, err := led.OpenProse(ctx, "no-such-turn"); err == nil {
+	if _, err := led.OpenProse(ctx, "no-such-turn", 1); err == nil {
 		t.Fatal("prose opened under a turn that does not exist")
 	}
 	// And on an ordinary turn it succeeds — at the seat after the one the run
@@ -408,7 +426,7 @@ func TestOpenProse_RefusesAParentThatIsNotThereAndOpensOneThatIs(t *testing.T) {
 	if len(before) != 1 {
 		t.Fatalf("the run left %+v, want the one block it wrote", before)
 	}
-	opened, err := led.OpenProse(ctx, turn)
+	opened, err := led.OpenProse(ctx, turn, runOf(t, led, turn))
 	if err != nil {
 		t.Fatalf("OpenProse on an ordinary turn: %v", err)
 	}
@@ -437,7 +455,7 @@ func TestSealProse_IsANoOpOnABodilessBlockAndSealsARealOne(t *testing.T) {
 	}
 	// The paired success: a block that DOES carry a body seals, and the state
 	// on disk says so.
-	opened, err := led.OpenProse(ctx, turn)
+	opened, err := led.OpenProse(ctx, turn, runOf(t, led, turn))
 	if err != nil {
 		t.Fatalf("OpenProse: %v", err)
 	}
