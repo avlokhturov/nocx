@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.runResolved.schema.json",
   "title": "AgentRunResolved",
-  "description": "Params of the agent.runResolved RPC (nocx-tjppv, design §4.1): the renderer's answer to an agent.runRequest — a closed outcome. outcome=completed carries the run body: the entry id the command was accepted under (minted at submit by the ordinary path), the exit status of the completed block (null when it froze without one — an entered environment; status names it honestly), the block's output line count and the span of the window actually returned with its text (a long output is clamped, never truncated silently — total says how much more the block holds). outcome=failed carries why, so a renderer that cannot submit (a session it does not know, a lane not prompt-ready) answers honestly instead of hanging the run. requestId is the broker-minted id from the request, echoed back.",
+  "description": "Params of the agent.runResolved RPC (nocx-tjppv, design §4.1): the renderer's answer to an agent.runRequest — a closed outcome. outcome=completed carries the run body: the store's id for the entry the command was recorded as, empty when the store wrote no row, the exit status of the completed block (null when it froze without one — an entered environment; status names it honestly), the block's output line count and the span of the window actually returned with its text (a long output is clamped, never truncated silently — total says how much more the block holds). outcome=failed carries why, so a renderer that cannot submit (a session it does not know, a lane not prompt-ready) answers honestly instead of hanging the run. requestId is the broker-minted id from the request, echoed back.",
   "type": "object",
   "additionalProperties": false,
   "required": ["requestId", "outcome"],
@@ -23,8 +23,7 @@
     },
     "entryId": {
       "type": "string",
-      "minLength": 1,
-      "description": "The entry id the command was accepted under, minted at submit by the ordinary path."
+      "description": "The STORE's id for the entry this command was recorded as — the id the ledger carries, which is the only one the backend can join the command to the turn that ran it by (the caused-by edge is a foreign key into entries). Empty when the store wrote no row at all: History is off, or the record was dropped. Empty is a real answer and not a malformed one — the command ran, its output is the tool's result, and only the arrangement is lost."
     },
     "exitCode": {
       "type": ["integer", "null"],

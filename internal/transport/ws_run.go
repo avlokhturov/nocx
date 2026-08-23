@@ -80,6 +80,12 @@ type runRequestParams struct {
 // applied to a relation instead of an anchor, and for the same reason stated
 // there: a second copy on the wire would put one fact under a second owner,
 // and the renderer's copy would be the one nobody checked.
+// THE ENTRY ID IS THE STORE'S (nocx-9sqii). A command the renderer submits
+// becomes a ledger row when its record is written, and that row's id is the
+// only id anything here can use: the caused-by edge above is a foreign key
+// into entries, so an id minted anywhere else is refused by the store and
+// the relation is lost in a log line. Empty is the honest answer when the
+// store wrote no row at all.
 type runResolvedParams struct {
 	RequestID string `json:"requestId"`
 	Outcome   string `json:"outcome"` // "completed" | "failed"
@@ -167,8 +173,16 @@ func validateRunResolvedRaw(raw json.RawMessage) string {
 		if p.Error != "" {
 			return "a completed outcome carries no error"
 		}
-		if p.EntryID == "" || utf8.RuneCountInString(p.EntryID) > maxIDRunes {
-			return "a completed outcome requires an entry id within the id length bound"
+		// An EMPTY entry id is a real answer, not a malformed one: the
+		// store wrote no row for this command (History is off, or the
+		// record was dropped), so the renderer has no entry to name
+		// (nocx-9sqii). The command ran either way and its output is the
+		// tool's result; refusing the resolution here would leave the
+		// request pending to the broker's timeout and fail a command that
+		// had already executed, over a relation that is an arrangement.
+		// What must stay bounded is an id that IS there.
+		if utf8.RuneCountInString(p.EntryID) > maxIDRunes {
+			return "an entry id must be within the id length bound"
 		}
 		switch p.Status {
 		case "success", "failure", "entered", "unknown":

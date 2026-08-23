@@ -475,6 +475,15 @@ export class TerminalContent extends BasePaneContent {
       reject: (reason: unknown) => void
     }
   >()
+  /** The store's entry id for an agent run's record, keyed by the renderer's
+   *  own record id: opened at the submit (only a run needs one), filled by
+   *  the history.record ack, and removed when the run resolves. `entryId` is
+   *  null until the store has answered; '' is the store's answer that it
+   *  wrote no row (nocx-9sqii). */
+  private readonly runEntryIds = new Map<
+    number,
+    { entryId: string | null; waiting: ((entryId: string) => void) | null }
+  >()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
@@ -2103,6 +2112,12 @@ export class TerminalContent extends BasePaneContent {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
             }
+            // What the store made of this record, for whoever is waiting on
+            // it: the entry id it minted, or '' when it wrote no row (a
+            // dropped record answers null, which is the same fact). An
+            // agent run's resolution names this id and nothing else can
+            // (nocx-9sqii).
+            this.settleStoredEntry(rec.id, ack?.entryId ?? '')
             return ack
           }),
       )
@@ -4058,6 +4073,10 @@ export class TerminalContent extends BasePaneContent {
       return promise
     }
     this.agentRuns.set(block, { ledgerId, resolve, reject })
+    // The slot the store's answer lands in. Opened HERE, at the submit,
+    // because the ack can arrive before the block finishes freezing and a
+    // slot created at the freeze would miss it.
+    this.runEntryIds.set(ledgerId, { entryId: null, waiting: null })
     return promise
   }
 
@@ -4081,18 +4100,84 @@ export class TerminalContent extends BasePaneContent {
       if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
       chars = next
     }
-    waiter.resolve({
-      entryId: String(waiter.ledgerId),
+    const body = {
       exitCode: rec.exitCode,
       // The hook fires on the visual freeze, when the block is logically
       // frozen too — the type union still admits 'running', which a frozen
       // block can never be; the honest mapping is 'unknown'.
-      status: rec.status === 'running' ? 'unknown' : rec.status,
+      status: rec.status === 'running' ? ('unknown' as const) : rec.status,
       total: lines.length,
       start: 0,
       end,
       text: lines.slice(0, end).join('\n'),
+    }
+    // THE ENTRY ID IS THE STORE'S (nocx-9sqii). Everything outside this tab
+    // that can do anything with it — the backend joining the command to the
+    // turn that ran it, the model naming the block later — resolves it
+    // against the ledger, and the renderer's own record number is not an
+    // entry there. So the resolution waits for the id the store minted,
+    // which arrives with the history.record ack a completion sends.
+    //
+    // A freeze with nothing to record answers immediately and honestly with
+    // no id: an ABANDONED block never persists (LifecycleProjections only
+    // persists a completed attempt), and an ENTERED one has not completed
+    // yet — the far session is still alive. Waiting on either would hang the
+    // model's tool call until the broker's timeout for a row that is not
+    // coming.
+    if (rec.status !== 'success' && rec.status !== 'failure') {
+      this.runEntryIds.delete(waiter.ledgerId)
+      waiter.resolve({ entryId: '', ...body })
+      return
+    }
+    void this.storedEntryId(waiter.ledgerId).then((entryId) => {
+      waiter.resolve({ entryId, ...body })
     })
+  }
+
+  /**
+   * The STORE's entry id for one of this pane's own records, waited for.
+   *
+   * The renderer mints a record at submit and the STORE mints the row at the
+   * completion (history.record, ADR-0021's receipt round), so the two ids
+   * exist at different moments and only the second one means anything to
+   * anybody else. The ack may land before the visual freeze or after it —
+   * the record goes out on the authenticated completion while the freeze
+   * waits for its fence — so this is a rendezvous rather than a read.
+   *
+   * Resolves with '' when the store wrote no row: History is off, or the
+   * record was dropped. That is a real state and it is not an error — the
+   * command ran — so it is answered as "no entry" and the relation that
+   * would have hung off it is simply not written.
+   *
+   * It always settles, which is what makes the wait safe: recordCommand
+   * answers the ack or null (the outbox keeps a record it could not send and
+   * answers null now), and a socket too dead to carry the ack is one too
+   * dead to carry the resolution this feeds.
+   */
+  private storedEntryId(ledgerId: number): Promise<string> {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return Promise.resolve('')
+    if (slot.entryId !== null) {
+      this.runEntryIds.delete(ledgerId)
+      return Promise.resolve(slot.entryId)
+    }
+    return new Promise<string>((done) => {
+      slot.waiting = (entryId: string) => {
+        this.runEntryIds.delete(ledgerId)
+        done(entryId)
+      }
+    })
+  }
+
+  /** The store answered for one of this pane's records: the entry id it
+   *  minted, or '' when it wrote no row. Only an agent run has a slot here
+   *  — a person's command needs no id on the wire — so this is a no-op for
+   *  every other record, which is also what keeps the map bounded. */
+  private settleStoredEntry(ledgerId: number, entryId: string): void {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return
+    slot.entryId = entryId
+    slot.waiting?.(entryId)
   }
 
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────

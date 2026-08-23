@@ -67,6 +67,39 @@ func runResolvedWire(rid, entryID string, exitCode int, status string, total, st
 	}
 }
 
+// A completed resolution may name NO entry, and the ingress must let it
+// through (nocx-9sqii).
+//
+// The renderer answers with the id the STORE minted for the command — the
+// only id the backend can join anything to, since the caused-by edge is a
+// foreign key into entries. That id is minted when the record is written, so
+// when the store writes no row (History is off, or the record was dropped)
+// there is honestly none to send. Refusing the resolution there would leave
+// the request pending until the broker's timeout and fail a command that had
+// already run, over a relation that is an arrangement.
+//
+// The length bound is unchanged: an id that is present is still bounded.
+func TestRunResolved_ACompletedOutcomeMayNameNoEntry(t *testing.T) {
+	none := runResolvedWire("req-1", "", 0, "success", 1, 0, 1, "ok")
+	raw, err := json.Marshal(none)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if msg := validateRunResolvedRaw(raw); msg != "" {
+		t.Fatalf("a completed resolution naming no entry was refused: %s", msg)
+	}
+	// And the bound still bites: an id longer than the ledger's is refused
+	// exactly as it was.
+	long := runResolvedWire("req-1", strings.Repeat("x", maxIDRunes+1), 0, "success", 1, 0, 1, "ok")
+	raw, err = json.Marshal(long)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if msg := validateRunResolvedRaw(raw); msg == "" {
+		t.Fatal("an over-long entry id was accepted")
+	}
+}
+
 // TestRun_EndToEndOverTheRealSocket is criterion 1's backend half: a run
 // whose grant permits the tool on a live session submits the command
 // through the broker, the renderer's resolution crosses the socket, and the

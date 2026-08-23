@@ -376,14 +376,20 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	if decodeErr := json.Unmarshal(body, &b); decodeErr != nil {
 		return "", fmt.Errorf("run: resolved body: %w", decodeErr)
 	}
-	if b.EntryID == "" {
-		return "", errors.New("run: the renderer's resolution carried no entry id")
-	}
 	// The command exists now and is joined now — before the window is
 	// checked, because a window this function refuses is a corrupt
 	// resolution about a command that really ran, and a block with no place
 	// in its turn is exactly what this closes.
-	if caused != nil {
+	//
+	// AN EMPTY ENTRY ID IS A REAL ANSWER: the store wrote no row for this
+	// command (History is off, or the record was dropped), so there is
+	// nothing to name and nothing to join. It used to be refused here, which
+	// read the store's honest "no row" as a corrupt resolution and failed a
+	// command that had already run — over a relation that is an arrangement
+	// (nocx-9sqii). The id the renderer answers with is the STORE's, which
+	// is the only id this join can be written against: the ledger's foreign
+	// key refuses anything else.
+	if caused != nil && b.EntryID != "" {
 		caused(b.EntryID)
 	}
 
