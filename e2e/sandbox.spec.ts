@@ -74,7 +74,7 @@ test.describe('sandbox shield', () => {
     await expect(page.getByText('Sandboxed shell…', { exact: true })).toHaveCount(0)
     await page.keyboard.press('Escape')
 
-    await page.getByRole('button', { name: 'More' }).click()
+    await page.getByRole('button', { name: 'More', exact: true }).click()
     await expect(page.getByText('New sandboxed tab', { exact: true })).toHaveCount(0)
     await page.keyboard.press('Escape')
 

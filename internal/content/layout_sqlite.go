@@ -1251,21 +1251,23 @@ func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGra
 	if s.closed.Load() {
 		return ErrClosed
 	}
-	result, err := s.db.ExecContext(ctx,
-		`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
-		 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
-		grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload, grant.PaneID)
-	if err != nil {
-		return err
-	}
-	n, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if n == 0 {
-		return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
-	}
-	return nil
+	return s.run(ctx, func(ctx context.Context) error {
+		result, err := s.db.ExecContext(ctx,
+			`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
+			 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
+			grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload, grant.PaneID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
+		}
+		return nil
+	})
 }
 
 func (s *sqliteContent) SandboxGrantExists(ctx context.Context, paneID string) (bool, error) {

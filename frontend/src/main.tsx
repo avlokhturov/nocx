@@ -39,7 +39,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, ShieldIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon, ShieldIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -53,12 +53,24 @@ import {
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
-import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
+import {
+  PortsPanel,
+  createPortsFilter,
+  createPortsFilterControl,
+  createPortsPanelServices,
+  createPortsPauseControl,
+} from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { uploadSurfaceFor } from './files/upload-surface'
+import { uploadOperations } from './files/upload-operations'
+import { downloadSurfaceFor } from './files/download-surface'
+import { downloadOperations } from './files/download-operations'
+import { createOperationsModel } from './operations/operations'
+import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
@@ -84,7 +96,7 @@ import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
 import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
 import { NotesClient } from './notes/notes-client'
 import { NotesStore } from './notes/notes-store'
-import { NotesPanel } from './notes/notes-panel'
+import { createNotesView } from './notes/notes-view'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
 import { createOverviewController } from './overview/overview-controller'
@@ -141,6 +153,9 @@ async function main() {
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
   const dispatcher = new Dispatcher()
+  // What build this is, for the About page (nocx-8bbp). Constructed here with
+  // every other client: the page is registered unconditionally, so the client
+  // has to exist for it to have anything to read.
   const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
   // Connection notice — the transport's condition, stated where a person is
@@ -501,12 +516,22 @@ async function main() {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
+  const uploadSurface = uploadSurfaceFor(dispatcher)
+  const downloadSurface = downloadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
+    upload: uploadSurface,
+    download: downloadSurface,
   })
+
+  const operations = createOperationsModel([
+    uploadOperations(uploadSurface.store),
+    downloadOperations(downloadSurface.store),
+  ])
+  const operationsView = createOperationsView(operations)
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -725,10 +750,12 @@ async function main() {
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
   const portsPause = createPortsPauseControl()
+  const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    filter: createPortsFilter(portsFilter),
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
     // nothing to protect a host from; what a user actually wants is to ask
     // again after starting something.
@@ -754,6 +781,7 @@ async function main() {
         services={portsServices}
         visible={props.visible}
         pause={portsPause}
+        filter={portsFilter}
       />
     ),
     order: 0,
@@ -764,22 +792,13 @@ async function main() {
   // point of the feature (design §6.3).
   const notesStore = new NotesStore(new NotesClient(dispatcher))
   registerNotesSurface(tm, notesStore)
-  const NOTES_VIEW: SidebarViewDescriptor = {
-    id: 'notes',
-    title: 'Notes',
-    icon: TextQuoteIcon,
-    view: (props) => (
-      <NotesPanel
-        store={notesStore}
-        visible={props.visible()}
-        onOpen={(id) => openNote(id, '')}
-        onCreate={() => void createAndOpenNote()}
-      />
-    ),
-    order: 1,
-  }
+  const notesView = createNotesView({
+    store: notesStore,
+    onOpen: (id) => openNote(id, ''),
+    onCreate: () => void createAndOpenNote(),
+  })
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, notesView, operationsView].sort(
     (a, b) => a.order - b.order,
   )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
