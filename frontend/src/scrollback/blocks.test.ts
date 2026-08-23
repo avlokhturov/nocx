@@ -2672,3 +2672,171 @@ describe.each(['shell', 'agent'] as const)('a %s-authored block', (author) => {
     parent.remove()
   })
 })
+
+// ── ONE OWNER FOR THE HEADER'S RIGHT-HAND GROUP (nocx-hoeq3) ───────────────
+//
+// The owner put a `df` block and an assistant turn side by side and asked why
+// the chips differ — their number, their placement — when nothing about a
+// header is supposed to be per-kind except the WORDS (nocx-ex636).
+//
+// Two constructions were standing. The command's exit chip was built in
+// createHeader and carried `cmd-header-exit-ok`/`-fail`; the turn's was built
+// again in the answer flow's close and carried neither. And a turn was handed
+// `durationMs = null` at build and never given one afterwards, so its group
+// held one chip where a command's holds two.
+//
+// So the assertions below are COMPARISONS between the two kinds rather than
+// snapshots of either: a second construction cannot agree with the first by
+// accident, and a chip that only one kind emits shows up as a difference in
+// the group.
+describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
+  beforeAll(async () => {
+    await shellHighlightReady
+  })
+
+  /** A manager whose clock is ours, so a turn's duration is a number this
+   *  test chose rather than however long jsdom took. */
+  function newManager(now: () => number = () => 0) {
+    const inner = document.createElement('div')
+    const xtermContainer = document.createElement('div')
+    inner.appendChild(xtermContainer)
+    document.body.appendChild(inner)
+    const manager = new BlockManager(inner, xtermContainer, {
+      snapshotStore: freshStore(),
+      now,
+    })
+    return { inner, manager }
+  }
+
+  /** A settled command block, built the way the freeze path builds one. */
+  function settledCommand(durationMs: number, exitCode: number): HTMLElement {
+    return createCommandBlock(
+      'command',
+      1,
+      'df -h',
+      '/home/dev',
+      '',
+      '<span class="term-line">out</span>',
+      durationMs,
+      exitCode,
+      exitCode === 0 ? 'success' : 'failure',
+      () => document.createElement('div'),
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+  }
+
+  /** A turn driven to its close, on a clock that makes it take `ms`. */
+  function closedTurn(ms: number, status: 'success' | 'failure' = 'success') {
+    let t = 0
+    const { manager } = newManager(() => t)
+    const turn = manager.addAnswerBlock('how much disk is free?', '/home/dev')
+    turn.append('41G free')
+    t = ms
+    turn.close(status, status === 'failure' ? 'the model did not answer' : undefined)
+    return turn.el
+  }
+
+  /** The right-hand group's contents, as the class list of each child in DOM
+   *  order. The class list is the whole identity — the tone, the shared chip
+   *  appearance and the identity class an e2e spec reads are all in it — so
+   *  two kinds whose groups read the same here are carrying the same chips,
+   *  built by the same code, in the same order. */
+  function rightGroup(el: HTMLElement): string[] {
+    const right = el.querySelector('.cmd-header-right')!
+    return Array.from(right.children).map((c) => c.className)
+  }
+
+  it('the class list of a command’s terminal chip and a turn’s is the same list', () => {
+    // Criterion 1. Not "both contain cmd-header-exit": the ASSERTION is
+    // equality, so a second construction anywhere — one modifier missing, one
+    // class added — fails here rather than the day somebody styles
+    // `.cmd-header-exit-ok` and only one kind moves.
+    const okCmd = settledCommand(27, 0).querySelector('.cmd-header-exit')!
+    const okTurn = closedTurn(1200, 'success').querySelector('.cmd-header-exit')!
+    expect(okTurn.className).toBe(okCmd.className)
+    expect(okCmd.className).toBe('nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok')
+
+    const failCmd = settledCommand(27, 2).querySelector('.cmd-header-exit')!
+    const failTurn = closedTurn(1200, 'failure').querySelector('.cmd-header-exit')!
+    expect(failTurn.className).toBe(failCmd.className)
+    expect(failCmd.className).toBe('nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail')
+  })
+
+  it('the WORDS stay the kind’s own — a turn is completed, a command is ok', () => {
+    // The other half of criterion 1, and the line nocx-ex636 drew: one chip,
+    // two vocabularies. An answer is not a command's output and must not
+    // borrow its words, so sharing the construction must not share the text.
+    expect(settledCommand(27, 0).querySelector('.cmd-header-exit')?.textContent).toBe('ok')
+    expect(settledCommand(27, 2).querySelector('.cmd-header-exit')?.textContent).toBe('exit 2')
+    expect(closedTurn(1200, 'success').querySelector('.cmd-header-exit')?.textContent).toBe(
+      'completed',
+    )
+    expect(closedTurn(1200, 'failure').querySelector('.cmd-header-exit')?.textContent).toBe(
+      'failed',
+    )
+  })
+
+  it('each kind declares what its right group holds, in the rules table', () => {
+    // Criterion 2: the decision is beside the other per-kind rules, so a
+    // third kind declares its group or fails loudly — it never inherits the
+    // command's group by being built through the same builder.
+    expect(blockKindRules('command').headerRight.chips).toEqual(['duration', 'terminal'])
+    expect(blockKindRules('ask').headerRight.chips).toEqual(['duration', 'terminal'])
+  })
+
+  it('a finished turn says how long it took, in the same chip a command uses', () => {
+    // Criterion 3. A turn HAS a duration — the model took time, and that is
+    // as worth knowing as `df` taking 27ms. Same chip, same formatter.
+    const turn = closedTurn(1234)
+    const dur = turn.querySelector('.cmd-header-duration')!
+    expect(dur.textContent).toBe('1.2s')
+    expect(dur.className).toBe(
+      settledCommand(27, 0).querySelector('.cmd-header-duration')!.className,
+    )
+    // The same formatter, asserted at a second magnitude so an agreement at
+    // one number is not mistaken for an agreement about formatting.
+    expect(closedTurn(27).querySelector('.cmd-header-duration')?.textContent).toBe('27ms')
+  })
+
+  it('the two headers agree on their right group: same chips, same order, same ⋮ last', () => {
+    // Criterion 4, off the DOM. The right edge and the gap to the ⋮ are one
+    // CSS rule (.cmd-header-right: margin-left auto, gap 8px) applied to one
+    // element class, so what geometry actually turns on is WHAT IS IN THE
+    // GROUP — which is what this reads.
+    const cmd = settledCommand(27, 0)
+    const turn = closedTurn(1234)
+    expect(rightGroup(turn)).toEqual(rightGroup(cmd))
+    expect(rightGroup(cmd)).toEqual([
+      'nocx-chip nocx-chip-muted cmd-header-duration',
+      'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
+      'cmd-overflow-btn',
+    ])
+    // …and neither group is trivially equal by being empty or by hanging off
+    // a different container.
+    expect(turn.querySelector('.cmd-header-right')).not.toBeNull()
+  })
+
+  it('a continuation fragment keeps its deliberate emptiness until the turn closes on it', () => {
+    // Criterion 5. The turn's outcome belongs where the turn ENDED. A
+    // fragment above the block that split it states nothing — no duration and
+    // no terminal chip — or a reader is told the turn finished halfway down
+    // itself.
+    let t = 0
+    const { inner, manager } = newManager(() => t)
+    const turn = manager.addAnswerBlock('how much disk is free?', '/repo')
+    turn.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    manager.startBlock('df -h', '/repo', 0, 0, 'agent')
+    turn.append('41G free')
+    t = 900
+    turn.close('success')
+
+    const fragments = Array.from(inner.querySelectorAll<HTMLElement>('[data-turn-fragment]'))
+    expect(fragments).toHaveLength(2)
+    expect(fragments[0].querySelector('.cmd-header-duration')).toBeNull()
+    expect(fragments[0].querySelector('.cmd-header-exit')).toBeNull()
+    expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
+    expect(fragments[1].querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+  })
+})

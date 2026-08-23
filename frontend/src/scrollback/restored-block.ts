@@ -40,7 +40,10 @@ export interface RestoredBlockFacts {
    *  to where the turn ended, not halfway down it (nocx-9sqii). */
   durationMs: number | null
   exitCode: number | null
-  status: FrozenStatus
+  /** Where the block ended — or `settled`, which is a fragment of a turn
+   *  that ended further down: finished, with no outcome of its own
+   *  (nocx-hoeq3). */
+  status: FrozenStatus | 'settled'
   /**
    * The stored SGR body, or NULL when there is none to show.
    *
@@ -276,7 +279,10 @@ export function restoredTurn(
             // never told the turn finished halfway down it.
             durationMs: last ? facts.durationMs : null,
             exitCode: last ? facts.exitCode : null,
-            status: last ? facts.status : 'success',
+            // `settled`, not `success`: an earlier fragment is finished and
+            // its outcome is elsewhere, and the header reads that status to
+            // decide whether to say how the turn ended (nocx-hoeq3).
+            status: last ? facts.status : 'settled',
             // Only the first fragment says the output was evicted: one turn,
             // one sentence about its missing prose.
             body: i === 0 ? facts.body : '',
