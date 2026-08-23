@@ -296,12 +296,21 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID,
 		&e.ParentID, &e.Pos, &e.Cwd,
 		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
-		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.Payload,
+		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.Payload, &e.ProseEvicted,
 	}
+	// ProseEvicted is asked of the RUN and answered ONCE, whatever the run
+	// was cut into: EXISTS over the receipts retention left on the bodies of
+	// this block's `text` children (retention.go). It is a subquery rather
+	// than a stored column because there is one stored fact — the receipt on
+	// the body — and a second copy of it on the turn would be a second
+	// answer to drift from the first.
 	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
 		e.environment_id, e.pane_id, e.session_id, e.parent_id, e.pos, e.cwd, e.kind, e.intent,
 		e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
-		e.sensitivity, e.payload, `+environmentColumns+`
+		e.sensitivity, e.payload,
+		EXISTS (SELECT 1 FROM entries c JOIN artifacts a ON a.entry_id = c.id
+		         WHERE c.parent_id = e.id AND c.kind = 'text'
+		           AND `+bodyEvictedExpr("a")+`), `+environmentColumns+`
 		FROM entries e `+environmentJoin+` WHERE e.id = ?`, id).
 		Scan(append(dest, env.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1163,16 +1172,21 @@ func (s *sqliteContent) artifactByID(ctx context.Context, id string) (*Artifact,
 	var a Artifact
 	var gapsJSON string
 	var stream, truncated sql.NullString
+	// The eviction receipt is read here, next to byte_len, because the two
+	// are only meaningful together: zero bytes is what a body retention took
+	// and a capture that held nothing BOTH look like, and this is the column
+	// that tells them apart.
 	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.entry_id, a.execution_id, a.media_type,
 		a.derived_from,
 		a.state, a.byte_len, (SELECT count(*) FROM artifact_chunks c WHERE c.artifact_id = a.id),
 		a.pinned, a.truncated, a.capture_method, a.capture_version, a.terminal_cols,
-		a.terminal_rows, a.stream, a.byte_offset, a.byte_end, a.encoding, a.gaps, a.payload
+		a.terminal_rows, a.stream, a.byte_offset, a.byte_end, a.encoding, a.gaps, a.payload,
+		`+bodyEvictedExpr("a")+`
 		FROM artifacts a WHERE a.id = ?`, id).Scan(
 		&a.ID, &a.EntryID, &a.ExecutionID, &a.MediaType, &a.DerivedFrom, &a.State, &a.ByteLen,
 		&a.ChunkCount, &a.Pinned, &truncated, &a.CaptureMethod, &a.CaptureVersion,
 		&a.TerminalCols, &a.TerminalRows, &stream, &a.ByteOffset, &a.ByteEnd, &a.Encoding,
-		&gapsJSON, &a.Payload)
+		&gapsJSON, &a.Payload, &a.Evicted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

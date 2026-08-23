@@ -135,6 +135,11 @@ func (s *ledgerStub) EvictEntries(_ context.Context, req EvictionRequest) (Evict
 	return EvictionResult{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) EvictBodies(_ context.Context, req BodyEvictionRequest) (BodyEvictionResult, error) {
+	s.log.Info("content stub: LedgerRepository.EvictBodies", "keep", req.KeepBytes, "max", req.Max)
+	return BodyEvictionResult{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
 	s.log.Info("content stub: LedgerRepository.Watermark")
 	return RetentionWatermark{}, ErrNotImplemented

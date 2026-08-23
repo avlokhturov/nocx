@@ -33,13 +33,14 @@ package content
 // which is the only form that answers this question — see the note below
 // about -filter.
 //
-// EvictEntries and Watermark are the third category, and it is written down
-// rather than rounded to either of the other two: no production caller
-// reaches the INTERFACE METHOD, and the behaviour behind it is nonetheless
-// live on every submit — evictOnWrite calls the unexported evictEntries
-// directly (retention.go), and the query path reads the unexported watermark
-// inside its own transaction. So "no caller" here means the seam is untested
-// in production, not that retention is asleep.
+// EvictEntries, EvictBodies and Watermark are the third category, and it is
+// written down rather than rounded to either of the other two: no production
+// caller reaches the INTERFACE METHOD, and the behaviour behind it is
+// nonetheless live on every submit — evictOnWrite calls the unexported
+// evictEntries and evictBodies directly (retention.go), and the query path
+// reads the unexported watermark inside its own transaction. So "no caller"
+// here means the seam is untested in production, not that retention is
+// asleep.
 //
 // RewriteRedaction stopped being the awkward case when command_history went
 // (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
@@ -1171,7 +1172,6 @@ type LedgerEntry struct {
 	DurationMs  *int64
 	Sensitivity Sensitivity
 	Payload     string
-	Executions  []Execution
 	// Artifacts are the entry's OWN bodies — the ones no execution produced
 	// (ADR-0037 decision 3: an artifact belongs to its block, and which
 	// attempt made it is a second, weaker fact that a `text` block does not
@@ -1185,6 +1185,21 @@ type LedgerEntry struct {
 	// the moment either list is filtered. Metadata only, like the others —
 	// the recall read never hauls bytes.
 	Artifacts []Artifact
+	// ProseEvicted says the prose of THIS RUN is no longer kept: retention
+	// took the bodies of its `text` children (ADR-0037's retention rule,
+	// ADR-0019 §7). It is the ONE place a reader asks that question, and it
+	// is a fact about the RUN because the run is the unit — the prose of one
+	// run is retained or evicted together, so a turn cut into seven pieces
+	// and a turn written in one report the same single answer, and a reader
+	// drawing the turn has one sentence to say rather than one per hole.
+	//
+	// Derived, never stored: it is EXISTS over the receipts the sweep leaves
+	// on the bodies themselves (Artifact.Evicted), so there is one stored
+	// fact and one reading of it. False on every kind that has no prose,
+	// which includes a command whose own terminal body was evicted — that
+	// block says its own sentence, and a turn does not say it for it.
+	ProseEvicted bool
+	Executions   []Execution
 }
 
 // Execution is one run: lease bounds, interactivity policy, process group,
@@ -1244,8 +1259,15 @@ type Artifact struct {
 	ByteEnd        *int64
 	Encoding       string
 	Gaps           []Gap
-	Payload        string
-	Chunks         [][]byte
+	// Evicted says the store HAD this body and retention took it, as
+	// distinct from a capture that never held anything: both are zero bytes
+	// over zero chunks, and "this command printed nothing" and "this output
+	// is no longer kept" are different sentences that must stay different.
+	// The row survives the eviction precisely to carry this — §7 evicts
+	// bodies and leaves everything that says what was there.
+	Evicted bool
+	Payload string
+	Chunks  [][]byte
 }
 
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
@@ -1333,6 +1355,25 @@ type LedgerRepository interface {
 	// deletion without its watermark would silently narrow what the store
 	// can answer while it went on claiming full coverage.
 	EvictEntries(ctx context.Context, req EvictionRequest) (EvictionResult, error)
+	// EvictBodies is the SIZE-driven sweep: it frees the oldest bodies the
+	// retention budget no longer covers and leaves every entry, every
+	// artifact row and every chunk of accounting behind it (ADR-0019 §7).
+	// Oldest-first by the owning block's ingest_seq, the same total order
+	// EvictEntries walks, and a pinned body is exempt for the same reason.
+	//
+	// IT EVICTS UNITS, NOT ARTIFACTS. The prose of one assistant run is one
+	// unit (ADR-0037): a pass that takes one `text` body of a run takes all
+	// of them, and a pin on any piece exempts the whole run. Everything else
+	// is its own unit, so a command's terminal body still evicts
+	// independently of the prose around it. Max bounds the pass in bodies
+	// and is measured BETWEEN units — a pass overruns it to finish a run
+	// rather than tear one in half.
+	//
+	// The retention watermark does not move. It answers what ROWS this store
+	// has lost and how far back it can speak for them, and a stripped body
+	// leaves every row in place; the loss is reported where a reader meets
+	// it, on the block itself (Artifact.Evicted, LedgerEntry.ProseEvicted).
+	EvictBodies(ctx context.Context, req BodyEvictionRequest) (BodyEvictionResult, error)
 	// Watermark reports what this store has ever lost to eviction: the
 	// running count and the horizon its knowledge is complete after. Both
 	// are read from the watermark alone — that they are underivable from
