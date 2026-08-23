@@ -105,16 +105,15 @@ const (
 type AskEvent struct {
 	Kind AskEventKind
 	// Text is the chunk, for AskAnswer and AskReasoning. Empty for a tool
-	// call — a call is not text, and the raw arguments blob is deliberately
-	// not what a person reads.
+	// call — a call is not text.
 	Text string
 	// Call is the call, for AskToolCall only.
 	Call *ToolCall
 }
 
 // ToolCall is the fact a person is shown when the assistant does something:
-// WHICH tool, and WHAT it touched. Deliberately NOT the arguments blob and
-// deliberately NOT the result.
+// WHICH tool, WHAT IT ASKED FOR, and what it touched. Deliberately NOT the
+// result.
 //
 // The result is left off because it already has an owner. The attempt's
 // outcome is in the ledger (design §6.4), the run tool's output is in the
@@ -123,6 +122,14 @@ type AskEvent struct {
 // be a second egress path this bead did not decide. EntryID is the handle a
 // later "show me what it returned" reaches through; it is not a second copy
 // of the bytes.
+//
+// The ARGUMENTS used to be left off too, on the argument that the derived
+// resource is the readable half. It is — when it differs between calls, and
+// for every session-scoped tool it does not: readScreen, blocks.list and
+// blocks.read all name the pane, so one turn announced four calls a person
+// could not tell apart, two of them reads of different finished commands
+// (ADR-0037). What separates two calls of one tool is what the model asked
+// for, so that is what is announced.
 type ToolCall struct {
 	// Tool is the declared tool name, e.g. "files.read".
 	Tool string
@@ -130,6 +137,15 @@ type ToolCall struct {
 	// so a call that is announced twice — an approved egress resume passes
 	// the same call through the pipeline again — renders once.
 	CallID string
+	// Args is what the model asked for, AS VALIDATED against the tool's own
+	// schema — the object the call actually ran on, never the raw string the
+	// model emitted. It is what NAMES the call on screen, and it is the same
+	// object the attempt's payload already stores (openAttempt writes the raw
+	// form of it), so announcing it publishes no fact the ledger did not
+	// already record. Never nil: a tool that takes no arguments validates to
+	// an empty object, and absent and empty are the same sentence about a
+	// call.
+	Args map[string]any
 	// EntryID is the ledger action entry the attempt was recorded under
 	// (openAttempt): the thread joining question, run, attempt and answer.
 	EntryID string

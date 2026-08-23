@@ -786,7 +786,7 @@ type AgentAsk struct {
 // the entry's intent, and its BODY IS ITS CHILDREN (ADR-0037, amending
 // ADR-0036). The answer used to be an entry of its own joined by a caused-by
 // edge (assistant design §5) and nothing needed it to be — its id was a
-// routing ADDRESS for deltas, reasoning, tool-call lines and copy, and the
+// routing ADDRESS for deltas, reasoning, tool calls and copy, and the
 // turn's own id addresses all four.
 //
 // NO ANSWER ARTIFACT IS OPENED HERE, and the absence is the change. The ask
@@ -1039,19 +1039,28 @@ type Edge struct {
 // back: what the call was, what the gate classed it as, and what it named.
 //
 // The row is written by internal/assistant (policy.go openAttempt and
-// recordProposal), whose payload carries more than this — the raw arguments,
-// the run id, the approval binding, the classifier's verdict — none of which
-// a restored turn draws. This declares the part with a READER, so the
-// contract between the two sides is a type rather than three string literals
-// in two packages.
+// recordProposal), whose payload carries more than this — the run id, the
+// approval binding, the classifier's verdict — none of which a restored turn
+// draws. This declares the part with a READER, so the contract between the
+// two sides is a type rather than three string literals in two packages.
 type ActionFacts struct {
 	Tool   string `json:"tool"`
 	Effect Effect `json:"effect"`
+	// Args is what the model asked for, as the tool's schema validated it —
+	// written with the attempt and read back here so a RESTORED call can be
+	// named the same way the live one was.
+	//
+	// It has a reader now, and that is the change (ADR-0037). Two calls of
+	// one session-scoped tool have the same tool name and the same derived
+	// resource; what separates them is the arguments, so a restore without
+	// them would say strictly less than the live announcement did — the
+	// defect this ADR was written against, arriving one restart later.
+	Args map[string]any `json:"args,omitempty"`
 	// OpensBlock is the tool declaration's own fact
 	// (agenttools.Declaration.OpensBlock), written with the attempt: the
-	// call's work became a TOP-LEVEL BLOCK, so that block — its command, its
-	// output, its exit status — is the account of the call and a line beside
-	// it would restate the same command twice (nocx-9sqii).
+	// call's work became a BLOCK of its own, so that block — its command, its
+	// output, its exit status — is the account of the call, and a second child
+	// beside it would restate the same command twice (ADR-0037).
 	//
 	// Stored rather than matched on Tool by the reader, for the reason
 	// Effect is stored: a reader holding its own list of which tools open
@@ -1095,6 +1104,12 @@ type CausedEntry struct {
 	// back off that row's payload. Empty on every other kind — a command a
 	// turn ran is not a tool call and has no effect class.
 	Effect Effect
+	// Args is what the call asked for, off the same row's payload
+	// (ActionFacts.Args). Nil on every other kind — a command a turn ran
+	// asked for nothing — and nil for an action whose row predates the
+	// field, which reads as a call named by its tool alone rather than as an
+	// error.
+	Args map[string]any
 	// Resource is what the call named, as the backend derived it at the
 	// moment it decided about the call (internal/assistant namedResource is
 	// the ONE derivation). Nil when the tool names no resource in its

@@ -261,19 +261,23 @@ export class AgentInputTarget implements InputTarget {
       // block — a mismatch is a stale or misrouted notification and must
       // not append to the wrong one.
       if (handle.el.dataset.entryId !== d.entryId) return
-      handle.append(d.text)
+      // …and the block id says WHERE in the turn: the `text` child this run
+      // of prose is, opened by the backend on the first delta after a call
+      // and sealed when the next one arrives (ADR-0037). The renderer never
+      // works the boundary out — that is what the anchor did, and the live
+      // path and the restore each computed it and could drift.
+      handle.append(d.text, d.blockId)
     })
-    // A tool call is an element of THIS answer's flow (nocx-shxv0), so it is
-    // routed exactly as a delta is — same two ids, same mismatch rule — and
-    // handed to the same handle. That is the whole ordering fix: the call is
-    // appended when it arrives, which is before the deltas the model writes
-    // from its result, so it can no longer read as "answered first, ran the
+    // A tool call is a CHILD of this turn (ADR-0037), so it is routed
+    // exactly as a delta is — same two ids, same mismatch rule — and handed
+    // to the same handle. That is the whole ordering fix: the call takes its
+    // seat when it arrives, which is before the deltas the model writes from
+    // its result, so it can no longer read as "answered first, ran the
     // command afterwards".
     //
-    // For a call that OPENS A BLOCK the handle draws no line at all
-    // (nocx-9sqii): the block is the account of that call, and the call's
-    // arrival is what seals the answer fragment so the block can stand in
-    // its place. The routing is identical either way — the flow decides what
+    // For a call that OPENS A BLOCK the handle draws no child of its own:
+    // the block the command opened is the account of that call, and it takes
+    // the seat. The routing is identical either way — the turn decides what
     // the call becomes, from a fact the backend sent.
     this.seams.dispatcher.subscribe('agent.runToolCall', (params: unknown) => {
       const c = params as AgentRunToolCall
@@ -284,15 +288,18 @@ export class AgentInputTarget implements InputTarget {
         callId: c.callId,
         tool: c.tool,
         effect: c.effect,
+        // What the model asked for, as the tool's schema validated it: the
+        // half that tells two calls of one tool apart, which the tool name
+        // and the derived resource cannot (ADR-0037).
+        args: c.args,
         // The wire says `null` for a tool that names no resource; the flow
         // wants "absent", and the two must not be confused into a resource
         // with an empty half.
         resource: c.resource ?? undefined,
-        // Whether the call's work becomes a top-level block of its own — the
-        // tool table's fact, off the wire and never derived from the name
-        // here (nocx-9sqii). It is what tells the flow to seal the fragment
-        // it is writing and let the block stand at the point the call
-        // happened, instead of drawing a line that restates it.
+        // Whether the call's work becomes a block of its own — the tool
+        // table's fact, off the wire and never derived from the name here.
+        // It is what tells the turn to let that block take the next seat
+        // instead of drawing a child that restates it.
         opensBlock: c.opensBlock,
       })
     })

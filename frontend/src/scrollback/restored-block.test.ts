@@ -1,8 +1,13 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect } from 'vitest'
-import { restoredBlock, restoredTurn, bodyToHTML, type RestoredTurnFacts } from './restored-block'
-import type { TurnCause } from './turn-flow'
+import {
+  restoredBlock,
+  restoredTurn,
+  bodyToHTML,
+  type RestoredCause,
+  type RestoredTurnFacts,
+} from './restored-block'
 import { DEFAULT_SNAPSHOT, serializeRange, serializeRangeSGR } from './serializer'
 import { BufferLine, lineWith, XTERM_CM_P16 } from './test-helpers'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -189,15 +194,18 @@ describe('a block built from the store', () => {
   })
 })
 
-// ── a restored turn comes back as the turn it was (nocx-h1l4o, nocx-9sqii) ──
+// ── a restored turn and what it caused ─────────────────────────────────────
 //
-// ADR-0036's last sentence: an action was anchored to nothing at all, so a
-// restored turn came back without the calls it made. The `caused-by` relation
-// joins them, and this is the drawing half — the lines are built by the SAME
-// kit component the live flow places, from the facts the ledger stored, and
-// the turn is drawn as the same fragments the live path drew.
+// THIS SURFACE IS MID-MOVE, AND THESE TESTS SAY SO. ADR-0037 makes a turn ONE
+// block that CARRIES its children in seat order, and the live path draws
+// exactly that. The restore cannot yet: it needs a body per `text` child,
+// which is a read the page does not do, so the turn is drawn with the prose it
+// has and its caused blocks after it. What is asserted here is what that
+// arrangement really claims — no anchors, no fragments, no repeated question —
+// and the tests that asserted the anchor-and-fragments arrangement are gone
+// with it, because they described a mechanism rather than a property.
 describe('a restored turn and what it caused', () => {
-  const turn = (causes: TurnCause[], over: Partial<RestoredTurnFacts> = {}) => {
+  const turn = (causes: RestoredCause[], over: Partial<RestoredTurnFacts> = {}) => {
     let n = 100
     return restoredTurn(
       {
@@ -232,124 +240,58 @@ describe('a restored turn and what it caused', () => {
     )
   }
 
-  const call = (over: Partial<TurnCause> = {}): TurnCause => ({
-    entryId: 'act-1',
-    at: 0,
-    kind: 'action',
-    intent: 'files.read',
-    effect: 'observe',
-    resource: null,
-    opensBlock: false,
-    ...over,
-  })
-
-  it('draws one tool-call line per call, in the causal order the ledger gave', () => {
-    const [el] = turn([
-      call({ resource: { kind: 'path', id: '/repo/a.txt' } }),
-      call({ entryId: 'act-2', intent: 'git.status' }),
-    ])
-    const lines = Array.from(el.querySelectorAll('.ui-tool-call__tool')).map((n) => n.textContent)
-    expect(lines).toEqual(['files.read', 'git.status'])
-  })
-
-  it('paints the effect the backend decided, never one derived from the name', () => {
-    const [el] = turn([call({ intent: 'rm', effect: 'mutate-destructive' })])
-    expect(el.querySelector<HTMLElement>('.ui-tool-call')?.dataset.effect).toBe(
-      'mutate-destructive',
-    )
-  })
-
-  it('shows the resource the backend derived, and nothing when it derived none', () => {
-    const [named] = turn([call({ resource: { kind: 'path', id: '/repo/a.txt' } })])
-    expect(named.querySelector('.ui-tool-call__resource')?.textContent).toBe('/repo/a.txt')
-    const [bare] = turn([call({ intent: 'git.status' })])
-    expect(bare.querySelector('.ui-tool-call__resource')).toBeNull()
-  })
-
-  it('places the calls inside the turn’s own body, above the prose it preceded', () => {
-    const [el] = turn([call()])
-    const body = el.querySelector('[data-answer-body]')
-    const kinds = Array.from(body?.children ?? []).map((c) =>
-      c.classList.contains('ui-tool-call') ? 'call' : 'text',
-    )
-    expect(kinds).toEqual(['call', 'text'])
-  })
-
-  it('cuts the prose where the call happened, so a call mid-answer stays mid-answer', () => {
-    const [el] = turn([call({ at: 'line 3'.length })])
-    const body = el.querySelector('[data-answer-body]')
-    const flow = Array.from(body?.children ?? []).map((c) =>
-      c.classList.contains('ui-tool-call') ? 'call' : `text:${c.textContent ?? ''}`,
-    )
-    expect(flow).toEqual(['text:line 3', 'call', 'text: is wrong'])
-  })
-
-  it('a turn with no causes is ONE block, exactly what it drew before the relation existed', () => {
+  it('a turn with no causes is ONE block with its prose', () => {
     const els = turn([])
     expect(els).toHaveLength(1)
-    expect(els[0].querySelector('.ui-tool-call')).toBeNull()
     expect(els[0].querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
-    expect(els[0].querySelector('[data-turn-continuation]')).toBeNull()
   })
 
-  it('a turn whose answer is gone still says the calls it made happened', () => {
-    // Retention takes bodies and leaves entries (ADR-0019 §7). The calls are
-    // entries of their own, so they survive the loss of the prose — and the
-    // block must not go silent about work that really happened.
-    const [el] = turn([call()], { body: null })
-    expect(el.textContent).toContain('Output is no longer kept')
-    expect(el.querySelector('.ui-tool-call__tool')?.textContent).toBe('files.read')
-  })
-
-  it('a COMMAND block never grows a call line, whatever it is handed', () => {
-    // An action has no block and no command line; a call belongs to the turn
-    // that made it, and a second owner of that fact is the defect.
-    const el = restoredBlock(
-      facts({ pieces: [{ kind: 'call', call: { tool: 'files.read', effect: 'observe' } }] }),
-      S,
-      container,
-      () => {},
-      store(),
-    )
-    expect(el.querySelector('.ui-tool-call')).toBeNull()
-  })
-
-  // ── the fragments (nocx-9sqii) ───────────────────────────────────────────
-
-  it('puts the command the turn ran BETWEEN the prose before it and the prose from it', () => {
+  it('the question appears exactly once, however many blocks the turn caused', () => {
+    // The `continued` badge and the repeated header are gone with the
+    // fragments (ADR-0037): a restored turn says its question once, like a
+    // live one.
     const els = turn([
-      call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 'line 3'.length }),
-      call({
-        entryId: 'cmd-1',
-        kind: 'shell',
-        intent: 'cat -n a.txt',
-        effect: null,
-        at: 'line 3'.length,
-      }),
+      { entryId: 'cmd-1', kind: 'shell' },
+      { entryId: 'cmd-2', kind: 'shell' },
     ])
-    expect(els).toHaveLength(3)
-    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('line 3')
+    const headers = els.flatMap((e) =>
+      Array.from(e.querySelectorAll('.cmd-header-text')).map((h) => h.textContent ?? ''),
+    )
+    expect(headers.filter((h) => h === 'what went wrong?')).toHaveLength(1)
+    expect(els.some((e) => e.querySelector('[data-turn-continuation]') !== null)).toBe(false)
+  })
+
+  it('the blocks it caused are drawn in the seat order the ledger gave', () => {
+    const els = turn([
+      { entryId: 'cmd-1', kind: 'shell' },
+      { entryId: 'cmd-2', kind: 'shell' },
+    ])
+    expect(els.map((e) => e.querySelector('.cmd-header-text')?.textContent)).toEqual([
+      'what went wrong?',
+      'cmd cmd-1',
+      'cmd cmd-2',
+    ])
+  })
+
+  it('a DANGLING cause costs the turn that block and nothing else', () => {
+    // The command is older than the page limit, or retention took it.
+    // Nothing is invented to stand in for it.
+    const els = turn([
+      { entryId: 'gone', kind: 'shell' },
+      { entryId: 'cmd-2', kind: 'shell' },
+    ])
+    expect(els.map((e) => e.querySelector('.cmd-header-text')?.textContent)).toEqual([
+      'what went wrong?',
+      'cmd cmd-2',
+    ])
+  })
+
+  it('a turn whose answer is gone says so rather than pretending the model said nothing', () => {
+    // Retention takes bodies and leaves entries (ADR-0019 §7). The blocks it
+    // caused are entries of their own and survive the loss of the prose.
+    const els = turn([{ entryId: 'cmd-1', kind: 'shell' }], { body: null })
+    expect(els[0].textContent).toContain('Output is no longer kept')
     expect(els[1].querySelector('.cmd-header-text')?.textContent).toBe('cmd cmd-1')
-    expect(els[2].querySelector('[data-answer-body]')?.textContent).toBe(' is wrong')
-    // The run call left NO line: the block is the account of it.
-    expect(els[0].querySelector('.ui-tool-call')).toBeNull()
-    expect(els[2].querySelector('.ui-tool-call')).toBeNull()
-  })
-
-  it('every fragment carries the turn’s stored identity, and a continuation says so', () => {
-    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
-    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
-    expect(fragments.map((f) => f.dataset.entryId)).toEqual(['turn-1', 'turn-1'])
-    expect(fragments.map((f) => f.dataset.turnFragment)).toEqual(['0', '1'])
-    expect(fragments[0].querySelector('[data-turn-continuation]')).toBeNull()
-    expect(fragments[1].querySelector('[data-turn-continuation]')?.textContent).toBe('continued')
-  })
-
-  it('the turn’s outcome is on the fragment where the turn ENDED, not halfway down it', () => {
-    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
-    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
-    expect(fragments[0].querySelector('.cmd-header-duration')).toBeNull()
-    expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
   })
 
   // ── the turn's terminal chip, restored (nocx-hoeq3) ──────────────────────
@@ -365,17 +307,15 @@ describe('a restored turn and what it caused', () => {
   // The chip is the KIND's now: an ask block reads its terminal word from the
   // block's status, which is what a turn's outcome actually is.
   it('a restored turn says it completed, from its status and never from an exit code', () => {
-    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
-    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
-    // The fragment the turn ENDED on carries it; the one above states nothing.
-    expect(fragments[0].querySelector('.cmd-header-exit')).toBeNull()
-    expect(fragments[1].querySelector('.cmd-header-exit')?.textContent).toBe('completed')
-    expect(fragments[1].querySelector('.cmd-header-exit')?.className).toBe(
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }])
+    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    expect(el.querySelector('.cmd-header-exit')?.className).toBe(
       'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
     )
+    expect(el.querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
   })
 
-  it('a turn that failed says so in its own word, not in the shell’s', () => {
+  it('a turn that failed says so in its own word, not in the shell\u2019s', () => {
     const [el] = turn([], { status: 'failure' })
     expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
     expect(el.querySelector('.cmd-header-exit')?.className).toBe(
@@ -383,76 +323,11 @@ describe('a restored turn and what it caused', () => {
     )
   })
 
-  it('a turn handed an exit code still speaks its own vocabulary, never “ok”', () => {
+  it('a turn handed an exit code still speaks its own vocabulary, never \u201cok\u201d', () => {
     // The store cannot send one today, and the point is that the header does
     // not depend on that staying true: an answer is not a command's output
     // (nocx-ex636), so the ask kind's chip never reads the shell's code.
     const [el] = turn([], { exitCode: 0 })
     expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
-  })
-
-  it('a command at the very START of the answer still opens the fragment the prose from it goes in', () => {
-    // The shape the e2e drives (criterion 9): the turn reached for the tool
-    // before it said anything, so BOTH causes are anchored at 0. The first
-    // fragment is the question with an empty body, the block stands where
-    // the call happened, and the prose written from its output is the
-    // continuation below it — never the first fragment's body, which would
-    // put the answer above the evidence again.
-    const els = turn(
-      [
-        call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 0 }),
-        call({ entryId: 'cmd-1', kind: 'shell', intent: 'echo hi', effect: null, at: 0 }),
-      ],
-      { body: 'Plenty.' },
-    )
-    expect(els.map((e) => e.dataset.turnFragment ?? 'block')).toEqual(['0', 'block', '1'])
-    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('')
-    expect(els[1].querySelector('.cmd-header-text')?.textContent).toBe('cmd cmd-1')
-    expect(els[2].querySelector('[data-answer-body]')?.textContent).toBe('Plenty.')
-  })
-
-  it('the same turn with NO prose after the command opens no continuation at all', () => {
-    // The paired end, and the reason the case above is worth a test of its
-    // own: the two differ ONLY in whether the turn wrote anything after the
-    // command, and the arrangement must differ with them. A continuation
-    // opened here would be an empty block on screen; a continuation MISSING
-    // above would be the answer drawn above the evidence it came from.
-    const els = turn(
-      [
-        call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 0 }),
-        call({ entryId: 'cmd-1', kind: 'shell', intent: 'echo hi', effect: null, at: 0 }),
-      ],
-      { body: '' },
-    )
-    expect(els.map((e) => e.dataset.turnFragment ?? 'block')).toEqual(['0', 'block'])
-    expect(els[0].querySelector('[data-turn-continuation]')).toBeNull()
-  })
-
-  it('a turn whose last act was a command opens no empty fragment under it', () => {
-    const els = turn([
-      call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 99 }),
-    ])
-    expect(els).toHaveLength(2)
-    expect(els[1].dataset.turnFragment).toBeUndefined()
-  })
-
-  it('a DANGLING cause costs the turn that block and nothing else', () => {
-    // The command is older than the page limit, or retention took it. Every
-    // fragment the turn does have is still drawn, in order.
-    const els = turn([call({ entryId: 'gone', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
-    expect(els.map((e) => e.dataset.turnFragment)).toEqual(['0', '1'])
-    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('line')
-    expect(els[1].querySelector('[data-answer-body]')?.textContent).toBe(' 3 is wrong')
-  })
-
-  it('five calls compact into one expandable line here too, as they do live', () => {
-    const [el] = turn(
-      ['readScreen', 'blocks.list', 'blocks.read', 'files.read', 'git.status'].map((intent, i) =>
-        call({ entryId: `act-${i}`, intent }),
-      ),
-    )
-    expect(el.querySelectorAll('[data-answer-body] > .ui-tool-call')).toHaveLength(0)
-    const group = el.querySelector('.ui-tool-calls')
-    expect(group?.querySelectorAll('.ui-tool-call')).toHaveLength(5)
   })
 })

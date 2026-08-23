@@ -245,10 +245,10 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
  *
  * WHAT IT DOES NOT DECIDE, and where that decision lives. This puts a turn's
  * caused blocks next to it, in causal order. WHERE inside the turn each one
- * goes — a turn is drawn as fragments with its blocks between them
- * (nocx-9sqii) — is the flow's projection, off the anchor each cause carries,
- * and it lives in scrollback/turn-flow.ts. The drawer consumes the blocks a
- * turn placed rather than drawing them again at their own row.
+ * goes is the drawer's, and since ADR-0037 there is nothing left to work out:
+ * a turn CARRIES its children in the seats the store gave them, so the
+ * drawer places what it is handed. The drawer consumes the blocks a turn
+ * placed rather than drawing them again at their own row.
  *
  * THIS DECIDES NOTHING, which is the same promise the module header makes.
  * The causal order is the store's — `caused` arrives sorted by the position

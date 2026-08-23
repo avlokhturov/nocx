@@ -1814,21 +1814,50 @@ describe('BlockManager.addAnswerBlock', () => {
     return { inner, manager }
   }
 
-  // ── the answer's own flow (nocx-shxv0, nocx-s92so) ──────────────────
+  // ── the turn's children, in order (ADR-0037, nocx-s92so) ────────────
 
-  /** The body's children in DOM order, each as "kind:text" — the ORDER is
-   *  the property these tests are about, so nothing is queried by class in
-   *  isolation. */
+  /** Everything a reader meets inside a turn, in DOM order, each as
+   *  "kind:text" — the ORDER is the property these tests are about, so
+   *  nothing is queried by class in isolation.
+   *
+   *  A turn's children are BLOCKS now, and a run of prose is one of them, so
+   *  this flattens a `text` block into the rows it holds: what a person meets
+   *  is a row of prose, not the box around it. */
   function flowOf(h: { el: HTMLElement }): string[] {
-    const body = h.el.querySelector('[data-answer-body]')
-    return Array.from(body?.children ?? []).map((c) => {
-      if (c.classList.contains('ui-tool-call'))
-        return `call:${c.querySelector('.ui-tool-call__tool')?.textContent ?? ''}`
-      if (c.classList.contains('ui-reasoning'))
-        return `thinking:${c.querySelector('.ui-reasoning__body')?.textContent ?? ''}`
-      if (c.classList.contains('term-line')) return `text:${c.textContent ?? ''}`
-      return c.className
-    })
+    const out: string[] = []
+    const piece = (c: Element): void => {
+      if (c.classList.contains('ui-reasoning')) {
+        out.push(`thinking:${c.querySelector('.ui-reasoning__body')?.textContent ?? ''}`)
+        return
+      }
+      if (c.classList.contains('term-line')) {
+        out.push(`text:${c.textContent ?? ''}`)
+        return
+      }
+      out.push(c.className)
+    }
+    const box = h.el.querySelector(':scope > .cmd-children')
+    for (const child of Array.from(box?.children ?? [])) {
+      const el = child as HTMLElement
+      if (!el.classList.contains('cmd-block')) {
+        piece(el)
+        continue
+      }
+      const kind = el.dataset.blockKind ?? 'command'
+      const header = el.querySelector(':scope > .cmd-header .cmd-header-text')?.textContent ?? ''
+      if (kind === 'tool') {
+        out.push(`call:${header}`)
+        continue
+      }
+      if (kind !== 'text') {
+        out.push(`${kind}:${header}`)
+        continue
+      }
+      for (const row of Array.from(el.querySelector('[data-answer-body]')?.children ?? [])) {
+        piece(row)
+      }
+    }
+    return out
   }
 
   it('draws a tool call WHERE IT ARRIVED, before the text written from it', () => {
@@ -1838,6 +1867,7 @@ describe('BlockManager.addAnswerBlock', () => {
     h.toolCall({
       callId: 'call_1',
       tool: 'files.read',
+      args: { path: '/repo/a.txt' },
       effect: 'observe',
       resource: { kind: 'path', id: '/repo/a.txt' },
       opensBlock: false,
@@ -1847,32 +1877,38 @@ describe('BlockManager.addAnswerBlock', () => {
     // the prose that preceded it and the prose written from its result.
     // That is the defect this fixes — the run tool's block used to land
     // below a finished answer written from its output.
-    expect(flowOf(h)).toEqual(['text:let me look', 'call:files.read', 'text:line 3 is wrong'])
+    expect(flowOf(h)).toEqual([
+      'text:let me look',
+      'call:files.read path=/repo/a.txt',
+      'text:line 3 is wrong',
+    ])
   })
 
   it('names the session a call touched by the PANE\u2019s name, never the id (nocx-vnzek)', () => {
-    // The tab strip's derivation reaches the line through the manager. The
-    // id is on the wire and stays there: what a person reads is the pane.
+    // The tab strip's derivation reaches the call's block through the
+    // manager. The id is on the wire and stays there: what a person reads is
+    // the pane.
     const { manager } = newManager((id) => (id === 'sess-9bb9' ? 'home/dev' : null))
     const h = manager.addAnswerBlock('what is on my screen?', '/')
     h.toolCall({
       callId: 'call_1',
       tool: 'readScreen',
+      args: { sessionId: 'sess-9bb9' },
       effect: 'observe',
       resource: { kind: 'session', id: 'sess-9bb9' },
       opensBlock: false,
     })
-    const res = h.el.querySelector('.ui-tool-call__resource')
-    expect(res?.textContent).toBe('home/dev')
+    expect(flowOf(h)).toEqual(['call:readScreen sessionId=home/dev'])
     expect(h.el.textContent).not.toContain('sess-9bb9')
   })
 
-  it('renders one line per call id, however many times the backend announces it', () => {
+  it('renders one child per call id, however many times the backend announces it', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    // A call that opens NO block, so the line is what a repeat announcement
-    // could duplicate — a `run` call draws no line at all now (nocx-9sqii),
-    // and this test is about the idempotence, not about which tool it was.
+    // A call that opens NO block, so its own child is what a repeat
+    // announcement could duplicate — a `run` call draws none at all
+    // (ADR-0037), and this test is about the idempotence, not about which
+    // tool it was.
     const call = {
       callId: 'call_1',
       tool: 'files.read',
@@ -1931,7 +1967,7 @@ describe('BlockManager.addAnswerBlock', () => {
     h.append('hello world')
     h.close('success')
     expect(h.el.querySelector('.ui-reasoning')).toBeNull()
-    expect(h.el.querySelector('.ui-tool-call')).toBeNull()
+    expect(h.el.querySelector('.cmd-block[data-block-kind="tool"]')).toBeNull()
     expect(flowOf(h)).toEqual(['text:hello world'])
   })
 
@@ -2144,11 +2180,16 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(el.querySelector('.cmd-header-text')?.querySelector('.tok-command')).not.toBeNull()
   })
 
-  it('the answer body carries the ask kind wrapping class', () => {
+  it('a run of prose carries the wrapping class its kind declares', () => {
+    // The body hangs on the `text` child now, not on the turn (ADR-0037) —
+    // and the class still comes from the kind's rules, which own the wrap
+    // policy: prose wraps, a command's grid does not (nocx-juau).
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
-    const body = h.el.querySelector('.cmd-output')
+    h.append('an answer')
+    const body = h.el.querySelector('[data-answer-body]')
     expect(body?.className).toBe('cmd-output cmd-output-ask')
+    expect(body?.closest('.cmd-block')?.getAttribute('data-block-kind')).toBe('text')
   })
 
   it('says it is thinking between submit and the first delta, and stops on the first delta', () => {
@@ -2818,13 +2859,14 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     expect(turn.querySelector('.cmd-header-right')).not.toBeNull()
   })
 
-  it('a continuation fragment keeps its deliberate emptiness until the turn closes on it', () => {
-    // Criterion 5. The turn's outcome belongs where the turn ENDED. A
-    // fragment above the block that split it states nothing — no duration and
-    // no terminal chip — or a reader is told the turn finished halfway down
-    // itself.
+  it('the turn states its outcome once, on its own header, however much it did', () => {
+    // Criterion 5, as ADR-0037 leaves it. The outcome used to be a question
+    // of WHICH FRAGMENT states it — the turn was several blocks and only the
+    // last one had ended. There is one block now, so how long the turn took
+    // and how it ended land on the header that carries the question, and no
+    // child of it says anything about an outcome it does not have.
     let t = 0
-    const { inner, manager } = newManager(() => t)
+    const { manager } = newManager(() => t)
     const turn = manager.addAnswerBlock('how much disk is free?', '/repo')
     turn.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
     manager.startBlock('df -h', '/repo', 0, 0, 'agent')
@@ -2832,12 +2874,15 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     t = 900
     turn.close('success')
 
-    const fragments = Array.from(inner.querySelectorAll<HTMLElement>('[data-turn-fragment]'))
-    expect(fragments).toHaveLength(2)
-    expect(fragments[0].querySelector('.cmd-header-duration')).toBeNull()
-    expect(fragments[0].querySelector('.cmd-header-exit')).toBeNull()
-    expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
-    expect(fragments[1].querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    const own = turn.el.querySelector(':scope > .cmd-header')!
+    expect(own.querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
+    expect(own.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    // Exactly one of each in the whole turn: the command's block is still
+    // running, so nothing else states a duration or an outcome yet.
+    expect(turn.el.querySelectorAll('.cmd-header-exit')).toHaveLength(1)
+    // And a run of prose has no header to state anything with.
+    const prose = turn.el.querySelector('.cmd-block[data-block-kind="text"]')!
+    expect(prose.querySelector('.cmd-header')).toBeNull()
   })
 })
 

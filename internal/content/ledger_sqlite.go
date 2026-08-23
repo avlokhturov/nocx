@@ -1339,6 +1339,7 @@ func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEnt
 				return nil, fmt.Errorf("content: action %s: payload: %w", c.EntryID, err)
 			}
 			c.Effect = facts.Effect
+			c.Args = facts.Args
 			c.Resource = facts.Resource
 			c.OpensBlock = facts.OpensBlock
 		}

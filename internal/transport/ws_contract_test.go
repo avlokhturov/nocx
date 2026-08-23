@@ -5399,6 +5399,16 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 		// the wire.
 		"a cause that will not say whether it opened a block": body(
 			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		// The arguments are required for the reason the resource is: two
+		// calls of one session-scoped tool have the same tool and the same
+		// resource, and a cause that will not say what it ASKED FOR is one a
+		// restored turn cannot tell from its neighbour (ADR-0037). A shell
+		// child says `null` — it asked for nothing — and that is still
+		// saying it.
+		"a cause that will not say what it asked for": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		"arguments that are not an object": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","args":"{\"a\":1}","effect":"observe","resource":null,"opensBlock":false}]`),
 	}
 	for name, raw := range bad {
 		t.Run(name, func(t *testing.T) {
@@ -5410,6 +5420,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	// And the shape it must ACCEPT, so the refusals above are a contract
 	// and not an accident of a schema that refuses everything.
 	ok := body(`[{"entryId":"b","position":0,"kind":"action","intent":"files.read",` +
+		`"args":{"path":"/repo/go.mod"},` +
 		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(ok)); err != nil {
 		t.Fatalf("the schema refused a well-formed cause: %v", err)
@@ -5418,7 +5429,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	// names no intent, has no effect and no resource, and opens no block. The
 	// server sends these now, so a schema that could not express one would be
 	// a contract the wire cannot keep.
-	prose := body(`[{"entryId":"t","position":1,"kind":"text","intent":"",` +
+	prose := body(`[{"entryId":"t","position":1,"kind":"text","intent":"","args":null,` +
 		`"effect":null,"resource":null,"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(prose)); err != nil {
 		t.Fatalf("the schema refused a run of prose: %v", err)

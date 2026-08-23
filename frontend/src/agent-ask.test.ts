@@ -217,18 +217,46 @@ describe('AgentInputTarget', () => {
     dispatcher.emit('agent.runDelta', {
       runId: 7,
       entryId: 'answer-1',
+      blockId: 'text-1',
       seq: 0,
       text: 'hello',
     })
     dispatcher.emit('agent.runDelta', {
       runId: 7,
       entryId: 'answer-1',
+      blockId: 'text-1',
       seq: 1,
       text: ' world',
     })
     expect(handle.append).toHaveBeenCalledTimes(2)
-    expect(handle.append).toHaveBeenNthCalledWith(1, 'hello')
-    expect(handle.append).toHaveBeenNthCalledWith(2, ' world')
+    expect(handle.append).toHaveBeenNthCalledWith(1, 'hello', 'text-1')
+    expect(handle.append).toHaveBeenNthCalledWith(2, ' world', 'text-1')
+  })
+
+  it('hands on the BLOCK the chunk belongs to, so the renderer never cuts prose itself', async () => {
+    // The boundary between two runs of prose is the BACKEND's (ADR-0037):
+    // it opens a `text` child on the first delta after a call and seals it
+    // when the next call arrives. The renderer's only job is to notice that
+    // the id changed — which it cannot do if the id never reaches it.
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('q')
+
+    dispatcher.emit('agent.runDelta', {
+      runId: 7,
+      entryId: 'answer-1',
+      blockId: 'text-1',
+      seq: 0,
+      text: 'before',
+    })
+    dispatcher.emit('agent.runDelta', {
+      runId: 7,
+      entryId: 'answer-1',
+      blockId: 'text-2',
+      seq: 1,
+      text: 'after',
+    })
+    expect(handle.append).toHaveBeenNthCalledWith(1, 'before', 'text-1')
+    expect(handle.append).toHaveBeenNthCalledWith(2, 'after', 'text-2')
   })
 
   it('routes a tool call to the run’s block, ahead of the deltas written from it', async () => {
@@ -242,15 +270,26 @@ describe('AgentInputTarget', () => {
       entryId: 'answer-1',
       callId: 'call_1',
       tool: 'files.read',
+      args: { path: '/repo/a.txt', start: 3 },
       effect: 'observe',
       actionEntryId: 'entry-action-1',
       resource: { kind: 'path', id: '/repo/a.txt' },
     })
-    dispatcher.emit('agent.runDelta', { runId: 7, entryId: 'answer-1', seq: 0, text: 'line 3' })
+    dispatcher.emit('agent.runDelta', {
+      runId: 7,
+      entryId: 'answer-1',
+      blockId: 'text-1',
+      seq: 0,
+      text: 'line 3',
+    })
 
+    // The ARGUMENTS come with it: they are what tells two calls of one tool
+    // apart, and the block that draws the call is named from them
+    // (ADR-0037).
     expect(handle.toolCall).toHaveBeenCalledWith({
       callId: 'call_1',
       tool: 'files.read',
+      args: { path: '/repo/a.txt', start: 3 },
       effect: 'observe',
       resource: { kind: 'path', id: '/repo/a.txt' },
     })
@@ -268,6 +307,7 @@ describe('AgentInputTarget', () => {
       entryId: 'answer-1',
       callId: 'call_9',
       tool: 'git.status',
+      args: {},
       effect: 'observe',
       actionEntryId: 'entry-action-9',
       resource: null,
@@ -275,6 +315,7 @@ describe('AgentInputTarget', () => {
     expect(handle.toolCall).toHaveBeenCalledWith({
       callId: 'call_9',
       tool: 'git.status',
+      args: {},
       effect: 'observe',
       resource: undefined,
     })
@@ -473,10 +514,11 @@ describe('AgentInputTarget approval routing', () => {
     dispatcher.emit('agent.runDelta', {
       runId,
       entryId: 'answer-1',
+      blockId: 'text-1',
       seq: 0,
       text: 'approved answer',
     })
-    expect(handle.append).toHaveBeenCalledWith('approved answer')
+    expect(handle.append).toHaveBeenCalledWith('approved answer', 'text-1')
 
     // The run completes: the block closes once.
     dispatcher.emit('agent.runState', { runId, state: 'completed' })

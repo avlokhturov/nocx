@@ -14,9 +14,9 @@
 //
 // WHAT IT OWNS: the rows, the fence regions and which grammar each row is
 // painted in. WHAT IT DOES NOT: the block, its header, its status chips, the
-// waiting state, and the flow's non-text elements (a tool-call line, the
-// reasoning note) — those are placed THROUGH it, so they land in arrival
-// order, but they are built by their own owners.
+// waiting state, and the elements a turn places through it (the reasoning
+// note is the one today) — those land in arrival order, but they are built
+// by their own owners.
 //
 // CHUNKS, NOT LINES, ARE THE INPUT. `append` takes whatever arrived and
 // keeps the trailing partial row open, because a stream splits mid-line and
@@ -68,9 +68,9 @@ export interface AnswerBody {
   /** Append a chunk. Everything before the last '\n' becomes completed rows;
    *  the remainder stays open for the next call. */
   append(text: string): void
-  /** Place a non-text element of the flow (a tool-call line, the reasoning
-   *  note) where it arrived. Closes the open row first, so text arriving
-   *  afterwards cannot be written into a row that sits BEFORE the element. */
+  /** Place a non-text element (the reasoning note) where it arrived. Closes
+   *  the open row first, so text arriving afterwards cannot be written into a
+   *  row that sits BEFORE the element. */
   insert(node: HTMLElement): void
   /** No more text: drop the trailing empty rows the '\n'-terminated stream
    *  leaves behind, in the body and inside a fence alike. */

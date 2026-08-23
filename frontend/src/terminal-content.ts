@@ -3245,7 +3245,6 @@ export class TerminalContent extends BasePaneContent {
     const arranged = arrangedByCause(blocks, (id) => bodies.get(id)?.caused ?? [])
     const els: HTMLElement[] = []
     const page = new Map(blocks.map((b) => [b.entryId, b]))
-    const deps = { sessionName: (id: string) => this.hooks.sessionName?.(id) ?? null }
     const container = (): HTMLElement =>
       this.scrollback?.scrollbackInner ?? document.createElement('div')
     const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
@@ -3284,47 +3283,24 @@ export class TerminalContent extends BasePaneContent {
             container,
             () => {},
             snapshotStore,
-            deps,
           ),
         )
         continue
       }
-      // A TURN is drawn as FRAGMENTS around the blocks it caused
-      // (nocx-9sqii) — the same arrangement the live path draws, from the
-      // same projection, so the two views of one turn agree. The causal
-      // facts are the ledger's, verbatim: the order, the effect, the
-      // resource, and whether the call opened a block of its own.
+      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0037), and drawing that
+      // tree from the store is the task that owns this surface next: it
+      // needs a body per `text` child, which this page does not read yet.
+      // Until then the turn is drawn with the prose it has and its caused
+      // blocks after it — restoredTurn says the same thing at more length.
       //
-      // THE ANCHOR IS GONE AND ITS REPLACEMENT IS NOT DRAWN YET (ADR-0037).
-      // `at` left the wire with the store that stopped recording it, so
-      // every cause is placed at 0 here and the blocks a turn caused sit at
-      // the head of its prose. That is an honest intermediate state rather
-      // than a guess — there is no offset to lose — and the arrangement that
-      // replaces it, drawing the turn's children in seat order, is the task
-      // that owns this surface next.
-      //
-      // A `text` child is dropped rather than drawn for the same reason: the
-      // flow has no piece for a run of prose yet, so it would become a
-      // 'block' piece naming an entry this page does not hold and dangle.
+      // A `text` child is skipped rather than drawn: there is nothing to
+      // draw it WITH here, and passing it to drawCaused would name an entry
+      // this page does not hold and dangle.
       els.push(
         ...restoredTurn(
           {
             ...factsOf(b),
-            causes: (restored?.caused ?? []).flatMap((c) =>
-              c.kind === 'text'
-                ? []
-                : [
-                    {
-                      entryId: c.entryId,
-                      at: 0,
-                      kind: c.kind,
-                      intent: c.intent,
-                      effect: c.effect,
-                      resource: c.resource,
-                      opensBlock: c.opensBlock,
-                    },
-                  ],
-            ),
+            causes: (restored?.caused ?? []).filter((c) => c.kind !== 'text'),
           },
           snapshot,
           nextId,
@@ -3334,8 +3310,7 @@ export class TerminalContent extends BasePaneContent {
           (entryId) => {
             const caused = page.get(entryId)
             // A cause this page does not hold is DANGLING — older than the
-            // page limit, or evicted. The turn loses that fragment boundary
-            // and nothing else; nothing is invented to stand in for it.
+            // page limit, or evicted. Nothing is invented to stand in for it.
             if (!caused || placed.has(entryId)) return null
             placed.add(entryId)
             return restoredBlock(
@@ -3344,13 +3319,8 @@ export class TerminalContent extends BasePaneContent {
               container,
               () => {},
               snapshotStore,
-              // A session is NAMED, never numbered (nocx-vnzek): the same
-              // derivation the live flow injects, from the pane layer that
-              // owns it.
-              deps,
             )
           },
-          deps,
         ),
       )
     }

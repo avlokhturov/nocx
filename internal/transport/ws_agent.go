@@ -220,27 +220,36 @@ type agentRunDelta struct {
 // LEDGER's action entry for the attempt. Two entries, two jobs, so neither
 // name is doing the other's work.
 //
-// What is deliberately NOT here: the tool's result and the raw arguments
-// blob. The result has an owner already (the ledger's attempt, the run
-// tool's own block) and sending it here would be a second egress path the
-// gate of design §7.1 never screened for this destination; the arguments'
-// readable half is the RESOURCE, derived once by namedResource, which the
-// scope check and the approval ask already share.
+// What is deliberately NOT here: the tool's result. It has an owner already
+// (the ledger's attempt, the run tool's own block) and sending it here would
+// be a second egress path the gate of design §7.1 never screened for this
+// destination.
+//
+// The ARGUMENTS are here, and the field's absence is what this notification
+// was corrected for (ADR-0037). They were left off on the argument that their
+// readable half is the RESOURCE, derived once by namedResource — and the
+// resource IS the readable half exactly while it differs between calls. For a
+// session-scoped tool it never does, so one turn announced readScreen,
+// blocks.list and two blocks.read of different finished commands as four
+// announcements naming one pane. The resource keeps its own job beside them:
+// it says WHICH argument holds the session, so the renderer can put the
+// pane's name in that argument's place without guessing from the key.
 type agentRunToolCall struct {
 	RunID         int64               `json:"runId"`
 	EntryID       string              `json:"entryId"`
 	CallID        string              `json:"callId"`
 	Tool          string              `json:"tool"`
+	Args          map[string]any      `json:"args"`
 	Effect        string              `json:"effect"`
 	ActionEntryID string              `json:"actionEntryId"`
 	Resource      *content.GrantScope `json:"resource,omitempty"`
-	// OpensBlock says the call's work becomes a TOP-LEVEL BLOCK of its own
-	// (nocx-9sqii) — the declaration's fact, sent so the renderer can seal
-	// the answer fragment it is writing and let the block take that
-	// position, rather than drawing a line that restates the command the
-	// block already shows. Never derived here from the tool name, and never
-	// derivable there: it is one more fact of the tool table, like the
-	// effect beside it (ADR-0028 decision 4).
+	// OpensBlock says the call's work becomes a BLOCK of its own — the
+	// declaration's fact, sent so the renderer draws that block in the
+	// turn's next seat rather than a second child restating the command,
+	// the output and the exit status the block already shows. Never derived
+	// here from the tool name, and never derivable there: it is one more
+	// fact of the tool table, like the effect beside it (ADR-0028 decision
+	// 4).
 	OpensBlock bool `json:"opensBlock"`
 }
 
@@ -1054,11 +1063,21 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 					return sealErr
 				}
 			}
+			// The wire declares `args` as an OBJECT and requires it, so a
+			// call that carried none is announced as `{}` rather than as
+			// null: absent and empty are the same sentence about a call, and
+			// a nil map would say neither of them — it would say the wrong
+			// JSON type.
+			callArgs := ev.Call.Args
+			if callArgs == nil {
+				callArgs = map[string]any{}
+			}
 			if err := r.TryNotify("agent.runToolCall", mustMarshal(agentRunToolCall{
 				RunID:         rc.runID,
 				EntryID:       rc.entryID,
 				CallID:        ev.Call.CallID,
 				Tool:          ev.Call.Tool,
+				Args:          callArgs,
 				Effect:        string(ev.Call.Effect),
 				ActionEntryID: ev.Call.EntryID,
 				Resource:      ev.Call.Resource,

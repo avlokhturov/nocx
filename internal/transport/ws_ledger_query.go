@@ -164,10 +164,16 @@ type ledgerCausedWire struct {
 	// they are the same thing now — a run of prose is a `text` child with a
 	// seat of its own — so Position IS the place and there is nothing left
 	// to cut.
-	EntryID    string              `json:"entryId"`
-	Position   int                 `json:"position"`
-	Kind       string              `json:"kind"`
-	Intent     string              `json:"intent"`
+	EntryID  string `json:"entryId"`
+	Position int    `json:"position"`
+	Kind     string `json:"kind"`
+	Intent   string `json:"intent"`
+	// Args is what an ACTION child asked for, and null on every other kind.
+	// A restored call is named from it exactly as the live announcement was
+	// (agent.runToolCall.args): the tool and the derived resource are the
+	// same for two calls of one session-scoped tool, so without this a
+	// restore would say less than the live view did.
+	Args       map[string]any      `json:"args"`
 	Effect     *string             `json:"effect"`
 	Resource   *content.GrantScope `json:"resource"`
 	OpensBlock bool                `json:"opensBlock"`
@@ -182,6 +188,7 @@ func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 		Position:   c.Position,
 		Kind:       string(c.Kind),
 		Intent:     c.Intent,
+		Args:       c.Args,
 		Resource:   c.Resource,
 		OpensBlock: c.OpensBlock,
 	}

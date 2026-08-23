@@ -10,7 +10,7 @@ import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
 import { createSecretChipUnresolved } from '../ui/secret-chip'
-import { type ToolCallEffect } from '../ui/tool-call-line'
+import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
@@ -20,7 +20,7 @@ import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { CommandAuthor } from '../command-ledger'
 import { createAnswerBody, type AnswerBody } from './answer-body'
-import { createToolCallStrip, type ToolCallStrip } from './turn-flow'
+import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
@@ -80,13 +80,13 @@ export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
 /** Where a block is, as its HEADER reports it (nocx-hoeq3).
  *
  *  `settled` is the one that had to be named. It means: this block is
- *  finished and the outcome is NOT HERE — a fragment of a turn that ended
- *  further down. It used to be spelled `success`, on both the live path and
- *  the restored one, because nothing read the value and any settled-looking
- *  status would do. That stops being true the moment the header derives a
- *  terminal chip from the status, which is what the group's one owner below
- *  does: a continuation spelled `success` would state an outcome it does not
- *  have, and tell a reader the turn finished halfway down itself. */
+ *  finished and it has NO OUTCOME OF ITS OWN — a run of prose, a tool call
+ *  announced but not judged here, a restored block whose outcome is stated
+ *  elsewhere. It used to be spelled `success`, because nothing read the
+ *  value and any settled-looking status would do. That stopped being true
+ *  the moment the header derived a terminal chip from the status, which is
+ *  what the group's one owner below does: a block spelled `success` would
+ *  state an outcome it does not have. */
 type HeaderStatus = 'running' | 'waiting' | 'settled' | FrozenStatus
 
 /** The statuses a BUILT block can be handed — everything a header knows
@@ -96,25 +96,48 @@ type BuiltStatus = Exclude<HeaderStatus, 'running'>
 
 // ── Block kind ─────────────────────────────────────────────────────────────
 
-/** A block's content grammar (nocx-ex636). The FRAME — a header, a body,
- *  selection, the overflow menu — is shared by every block; the grammar is
- *  not. A question is prose and a command is a command line, and a fourth
- *  kind must declare itself in the rules table instead of inheriting the
- *  command's rules by accident. */
-export type BlockKind = 'command' | 'ask'
+/** A block's content grammar (nocx-ex636, ADR-0037). The FRAME — a header, a
+ *  body, selection, the overflow menu — is shared by every block; the
+ *  grammar is not. A question is prose and a command is a command line, and a
+ *  fifth kind must declare itself in the rules table instead of inheriting
+ *  the command's rules by accident.
+ *
+ *  `text` and `tool` are what a TURN is made of (ADR-0037): its children are
+ *  the causal sequence, top to bottom, and each one is an ordinary block with
+ *  its own id, its own selection and its own place in the order. A `text`
+ *  block is one run of assistant prose, and a `tool` block is one call that
+ *  opened no block of its own — the command a `run` call opened is not a
+ *  third kind, it is a `command`, because that is what it is. */
+export type BlockKind = 'command' | 'ask' | 'text' | 'tool'
 
 /** The rules the owner named — highlighting, wrapping, the status
  *  vocabulary — read from ONE table, keyed by the kind the block declared.
  *  No call site checks "is this an answer", and no builder defaults to the
  *  command rules. */
 export interface BlockKindRules {
-  /** The header's text is a command line: shell-highlight it. A question
-   *  is prose and never runs through the lexer. */
+  /** Whether the block draws a HEADER at all.
+   *
+   *  A run of prose does not, and that is the point of ADR-0037: there is
+   *  nothing to name it — the intent was the question — and a header
+   *  repeating the question is the `continued` badge this ADR deleted. The
+   *  block is still a real block: it has an id, it selects, and it holds a
+   *  seat in the turn's order. Only the header is not drawn.
+   *
+   *  A kind with no header also has no ⋮, because the ⋮ lives in it. */
+  readonly header: boolean
+  /** The header's text is a command line: shell-highlight it. A question,
+   *  and the name of a tool call, are prose and never run through the lexer. */
   readonly highlightHeader: boolean
   /** The class the body element carries — the CSS owner of the wrap
    *  policy: `.cmd-output` freezes rows at the terminal grid width
-   *  (nocx-juau), `.cmd-output-ask` wraps prose at the block's width. */
-  readonly outputClass: string
+   *  (nocx-juau), `.cmd-output-ask` wraps prose at the block's width.
+   *
+   *  NULL for a kind that has no body at all. A tool call is a header and
+   *  nothing else: its result has an owner already (the ledger's attempt),
+   *  and a body class declared for a body that never exists is a rule
+   *  nobody can check. Handing such a block output is a loud failure, not a
+   *  silent guess at which class to use. */
+  readonly outputClass: string | null
   /** The header's status vocabulary. The command kind has none — its
    *  header states are the record's and render structurally (spinner,
    *  duration, exit chips). The ask kind names its lifecycle with words:
@@ -152,8 +175,8 @@ interface HeaderRightRules {
    *  the order is stable whether one chip is drawn or both. */
   readonly chips: readonly HeaderChipSlot[]
   /** The block's outcome as this kind SAYS it, or null when the block has
-   *  none of its own: still running, still waiting, or a fragment of a turn
-   *  that ended further down.
+   *  none of its own: still running, still waiting, or settled with its
+   *  outcome stated elsewhere.
    *
    *  The two kinds read different facts on purpose, and that is the whole
    *  of what is per-kind here (nocx-ex636). A command's outcome is the
@@ -194,6 +217,7 @@ const ASK_STATUS_CHIPS = {
 
 const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
   command: {
+    header: true,
     highlightHeader: true,
     outputClass: 'cmd-output',
     statusChips: null,
@@ -209,6 +233,7 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     },
   },
   ask: {
+    header: true,
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
     statusChips: ASK_STATUS_CHIPS,
@@ -225,6 +250,34 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
         return null
       },
     },
+  },
+  // One run of assistant prose (ADR-0037). No header — see `header` above —
+  // and the same wrapping body a whole answer used to have, because it IS
+  // that body: what changed is that a turn now has several of them in order
+  // rather than one string with offsets cut into it.
+  text: {
+    header: false,
+    highlightHeader: false,
+    outputClass: 'cmd-output cmd-output-ask',
+    statusChips: null,
+    headerRight: { chips: [], terminal: () => null },
+  },
+  // One tool call that opened no block of its own (ADR-0037). It is a HEADER
+  // and nothing else: the header names the tool and the arguments it ran on,
+  // which is what tells two calls of one tool apart, and the call's result
+  // has an owner already (the ledger's attempt). The name is prose and never
+  // goes through the shell lexer — `blocks.read sessionId=… blockId=…` is
+  // not a command line and colouring it as one would say it is.
+  //
+  // No terminal chip either: the announcement is that the call HAPPENED, and
+  // whether it succeeded belongs to the attempt. A chip here would be a
+  // second, later-arriving owner of an outcome this surface never receives.
+  tool: {
+    header: true,
+    highlightHeader: false,
+    outputClass: null,
+    statusChips: null,
+    headerRight: { chips: [], terminal: () => null },
   },
 }
 
@@ -246,19 +299,32 @@ export function blockKindRules(kind: BlockKind): BlockKindRules {
 export interface AnswerBlockHandle {
   readonly id: number
   readonly el: HTMLElement
-  /** Append one streamed chunk (agent.runDelta text) to the answer body.
+  /** Append one streamed chunk (agent.runDelta text) to the turn's prose.
    *  `this: void` — the target holds the handle and calls the method
-   *  detached from any receiver (unbound-method contract). */
-  append(this: void, text: string): void
-  /** Draw one tool call (agent.runToolCall) in the answer's flow, AT THE
-   *  POSITION IT ARRIVED (nocx-shxv0). Not a top-level block: the call
-   *  belongs to the answer that was streaming when it happened, and that
-   *  is what fixes the ordering the owner saw inverted — a run tool's
-   *  block sitting below the answer written from its output.
+   *  detached from any receiver (unbound-method contract).
+   *
+   *  `blockId` is the `text` child the chunk belongs to — the store's own
+   *  block, off agent.runDelta. A chunk naming a DIFFERENT block than the
+   *  one being written opens the next run of prose, which is how the turn
+   *  gets its several runs; the boundary is the BACKEND's and is never
+   *  worked out here (ADR-0037: while the cut was the renderer's, the live
+   *  path and the restore each computed it and could drift).
+   *
+   *  Omitted for a sentence the RENDERER writes into the flow — the dropped
+   *  -deltas notice is the only one — which continues whatever run is open
+   *  rather than declaring a boundary of its own. */
+  append(this: void, text: string, blockId?: string): void
+  /** Draw one tool call (agent.runToolCall) as a CHILD of the turn, in the
+   *  seat it arrived at (ADR-0037). Never a top-level block: the call
+   *  belongs to the turn that made it, and its position among the turn's
+   *  children is what says when it happened.
+   *
+   *  A call that opened a block draws NO child of its own — the block the
+   *  command opened is the account of it, and it takes the next seat.
    *
    *  Idempotent per `callId`: the backend announces a call once per
    *  EXECUTION, and an approved egress resume puts the same call through
-   *  the pipeline a second time. One call, one line. */
+   *  the pipeline a second time. One call, one child. */
   toolCall(this: void, call: AnswerToolCall): void
   /** Append one chunk of the model's thinking (agent.runReasoning) — into
    *  its own collapsed note, never into the answer text (nocx-s92so). The
@@ -272,21 +338,31 @@ export interface AnswerBlockHandle {
   close(this: void, status: 'success' | 'failure', error?: string, model?: string): void
 }
 
-/** One tool call as the answer flow draws it — the wire's facts
+/** The effect classes the ledger names (content.Effect), read off the wire
+ *  type the schema generates rather than restated here — a second copy of a
+ *  closed set is a set that disagrees with the wire the day one of them
+ *  grows a member. */
+type ToolCallEffect = AgentRunToolCall['effect']
+
+/** One tool call as the turn draws it — the wire's facts
  *  (contracts/agent.runToolCall.schema.json), narrowed to what this surface
- *  needs. Deliberately no result and no raw arguments: see ui/tool-call-line
- *  for why. */
+ *  needs. Deliberately no result: it has an owner already (the ledger's
+ *  attempt, and for the run tool the block the command really opened). */
 export interface AnswerToolCall {
   callId: string
   tool: string
   effect: ToolCallEffect
+  /** What the model asked for, as the tool's schema validated it. This is
+   *  what NAMES the call: the tool and the derived resource are the same for
+   *  two calls of one session-scoped tool, and the arguments are what tell
+   *  them apart (ADR-0037). */
+  args?: Record<string, unknown>
   resource?: { kind: string; id: string }
-  /** Whether this call's work becomes a TOP-LEVEL BLOCK of its own — the
-   *  tool declaration's fact, off the wire (nocx-9sqii). True and the flow
-   *  draws NO line: the block the command opened is the account of the call,
-   *  and the fragment being written stops so the block can stand at the
-   *  point the call happened. False and the line is the only thing that says
-   *  the call occurred.
+  /** Whether this call's work becomes a BLOCK of its own — the tool
+   *  declaration's fact, off the wire (ADR-0037). True and the turn draws
+   *  NO child for the call: the block the command opened is the account of
+   *  it and takes the next seat. False and the call's own child is the only
+   *  thing that says it occurred.
    *
    *  Never derived here from `tool`: which tools open blocks is a fact of
    *  the tool table (internal/agenttools), and a renderer holding its own
@@ -706,39 +782,6 @@ export function blockCommandText(blockEl: HTMLElement): string {
  *  button, whether or not the button exists yet. A kind added later inherits
  *  the order by using this, instead of learning the button's position by
  *  luck. */
-/**
- * Mark one block as a fragment of a turn (nocx-9sqii).
- *
- * A turn is drawn as SEVERAL blocks when it ran commands — the answer stops
- * where a block took its place and continues below it — and a reader has to
- * be able to tell a continuation of one answer from a second answer. Two
- * facts do that, and neither is a colour:
- *
- *  - `data-turn-fragment`, the fragment's index, beside the `data-entry-id`
- *    every fragment of one turn shares. That is the STORED identity: the
- *    ledger entry the question and the answer both belong to.
- *  - the kit's badge reading `continued`, for the person, on every fragment
- *    but the first.
- *
- * ONE OWNER, because the live flow and the restore both mark fragments and
- * two markers would agree until the day one of them changed.
- */
-export function markTurnFragment(el: HTMLElement, index: number): void {
-  el.dataset.turnFragment = String(index)
-  if (index === 0) return
-  const badge = document.createElement('span')
-  badge.className = 'ui-badge'
-  badge.dataset.tone = 'neutral'
-  // Its own identity attribute, so the assertion "this is a continuation"
-  // is on the fact and not on the word — the word can be translated, the
-  // attribute is what the tests and the CSS read.
-  badge.dataset.turnContinuation = ''
-  badge.textContent = 'continued'
-  const chips = el.querySelector('.cmd-header-chips')
-  if (chips) chips.insertBefore(badge, chips.firstChild)
-  else el.prepend(badge)
-}
-
 function placeHeaderChip(right: Element, chip: Element): void {
   right.insertBefore(chip, right.querySelector('.cmd-overflow-btn'))
 }
@@ -1046,18 +1089,32 @@ export function deselectAllBlocks(container: HTMLElement): boolean {
  * Click (mousedown+up without significant movement) selects the block.
  * Drag (mousedown+move) starts text selection and does NOT select the block.
  * @param onSelect callback(id, selected) — notifies the manager of selection changes.
+ *
+ * THE INNERMOST BLOCK OWNS THE CLICK (ADR-0037). A turn CONTAINS the blocks
+ * it caused now, so a click inside a child bubbles through the parent's
+ * listener too, and both would claim it — two surfaces owning one input,
+ * which AGENTS.md forbids whichever one wins by evaluation order. The nearest
+ * `.cmd-block` ancestor of the target is the one that was clicked; every
+ * other listener on the way up stands down.
  */
 function wireBlockSelection(
   blockEl: HTMLElement,
   container: HTMLElement,
-  overflowBtn: HTMLElement,
   blockId: number,
   onSelect: (id: number, selected: boolean) => void,
 ): void {
   let mouseMoved = false
 
+  /** This block is the one the pointer is actually in — not an ancestor of
+   *  it, and not the ⋮ or its menu, which own their own clicks. */
+  const mine = (e: Event): boolean => {
+    const target = e.target as HTMLElement
+    if (target.closest('.cmd-overflow-btn, .cmd-overflow-menu')) return false
+    return target.closest('.cmd-block') === blockEl
+  }
+
   blockEl.addEventListener('mousedown', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if (!mine(e)) return
     mouseMoved = false
   })
 
@@ -1066,7 +1123,7 @@ function wireBlockSelection(
   })
 
   blockEl.addEventListener('mouseup', (e) => {
-    if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    if (!mine(e)) return
     if (mouseMoved) return
 
     // Toggle selection: if already selected, deselect; otherwise select
@@ -1136,36 +1193,46 @@ export function createCommandBlock(
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
   wrapper.setAttribute('data-block-id', String(id))
 
-  const header = createHeader(
-    kind,
-    command,
-    cwd,
-    location,
-    durationMs,
-    exitCode,
-    status,
-    store,
-    author,
-  )
-
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
+    if (!rules.outputClass) {
+      // A kind that declares no body may not be given one. Loud, like
+      // blockKindRules itself: silently choosing a class here would give the
+      // block a wrap policy nobody declared for it (nocx-ex636).
+      throw new Error(`block kind ${kind} has no body, but output was given`)
+    }
     outputEl = document.createElement('div')
     outputEl.className = rules.outputClass
     outputEl.innerHTML = outputHtml
   }
 
-  // Overflow menu (P2-9) — always the LAST element of the header-right
-  // group (owner directive: ⋮ never shifts position). It reads the block's
-  // copyable text from the BLOCK, at click time (nocx-ex636).
-  const overflow = buildOverflowMenu(wrapper, command, answerText)
-  const right = header.querySelector('.cmd-header-right')
-  if (right) right.appendChild(overflow)
-  wrapper.appendChild(header)
+  // A kind that draws no header draws no ⋮ either — the button lives in the
+  // header — and a run of prose is the one that does not (ADR-0037): there
+  // is nothing to name it, because the intent was the question.
+  if (rules.header) {
+    const header = createHeader(
+      kind,
+      command,
+      cwd,
+      location,
+      durationMs,
+      exitCode,
+      status,
+      store,
+      author,
+    )
+    // Overflow menu (P2-9) — always the LAST element of the header-right
+    // group (owner directive: ⋮ never shifts position). It reads the block's
+    // copyable text from the BLOCK, at click time (nocx-ex636).
+    const overflow = buildOverflowMenu(wrapper, command, answerText)
+    const right = header.querySelector('.cmd-header-right')
+    if (right) right.appendChild(overflow)
+    wrapper.appendChild(header)
+  }
   if (outputEl) wrapper.appendChild(outputEl)
 
   // Full-block click-to-select with drag distinction (P1-7, P1-8).
-  wireBlockSelection(wrapper, getContainer(), overflow, id, onSelect)
+  wireBlockSelection(wrapper, getContainer(), id, onSelect)
 
   // Double-click selects a whole token the way xterm does it (nocx-w7h.11,
   // spec v9 §2): xterm's SelectionService.handleMouseDown calls
@@ -1181,6 +1248,10 @@ export function createCommandBlock(
   // intercepted: drag selection and click-to-select keep working.
   wrapper.addEventListener('mousedown', (e: MouseEvent) => {
     if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
+    // The innermost block owns the gesture, for the reason selection does:
+    // a turn contains the blocks it caused, so the same double-click reaches
+    // every ancestor's listener (ADR-0037).
+    if ((e.target as HTMLElement).closest('.cmd-block') !== wrapper) return
     if (e.detail !== 2) return
     e.preventDefault()
     const caret = document.caretRangeFromPoint?.(e.clientX, e.clientY)
@@ -1244,7 +1315,7 @@ export function createRunningBlock(
   if (right) right.appendChild(overflow)
 
   wrapper.appendChild(header)
-  wireBlockSelection(wrapper, getContainer(), overflow, id, onSelect)
+  wireBlockSelection(wrapper, getContainer(), id, onSelect)
 
   return wrapper
 }
@@ -1366,12 +1437,12 @@ export interface BlockManagerOpts {
    *  different rendering, and a reader that cannot tell has to guess. The
    *  manager holds no renderer, so the caller that does supplies it. */
   dimensions?: () => { cols: number; rows: number }
-  /** What a session is called TO A PERSON, for a tool-call line that named
+  /** What a session is called TO A PERSON, for a tool block whose call named
    *  one (nocx-vnzek). The manager holds no pane list, so the caller that
    *  does supplies the tab strip's own derivation
    *  (PaneManager.sessionDisplayName); the paint rule built on it lives in
-   *  ui/tool-call-line.ts. Absent in a bare-bones embedding, and then a
-   *  session simply cannot be named — never rendered as its id. */
+   *  scrollback/tool-call-title.ts. Absent in a bare-bones embedding, and
+   *  then a session simply cannot be named — never rendered as its id. */
   sessionName?: (sessionId: string) => string | null
   /** The durable text of one ANSWER entry, for the copy path (nocx-v13pd).
    *  The manager holds no socket, so the caller that does supplies the
@@ -1421,7 +1492,7 @@ export class BlockManager {
   private _onDeferredFreeze?: () => void
   private _dimensions?: () => { cols: number; rows: number }
   /** The tab strip's answer to "what is this session called to a person",
-   *  handed to every tool-call line this manager draws (nocx-vnzek). */
+   *  handed to every tool block this manager draws (nocx-vnzek). */
   private _sessionName?: (sessionId: string) => string | null
   /** Reader for an answer's durable text — handed to the copy menu of every
    *  answer block this manager frames (nocx-v13pd). */
@@ -1466,6 +1537,19 @@ export class BlockManager {
   /** The fence hex consumed by the last freeze — a replay of it (one seen
    *  for an already-frozen block) does nothing. */
   private _consumedFence: string | null = null
+  /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0037).
+   *
+   *  A turn's `run` call is announced BEFORE the command is submitted, and
+   *  the command is then submitted through the ordinary path — the same
+   *  `startBlock` a person's line takes, because it is the same thing
+   *  happening. So the turn claims the next seat when the call arrives, and
+   *  the block lands in the turn's children instead of at the tail of the
+   *  scrollback.
+   *
+   *  Claimed by exactly one call and released by it: the claim is cleared
+   *  the moment it is used, and the turn drops it at its close, so a `run`
+   *  that never reached a command cannot adopt an unrelated block later. */
+  private _claimedBy: HTMLElement | null = null
 
   constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
@@ -1482,9 +1566,30 @@ export class BlockManager {
 
   /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
    *  goes through here and is remembered, so a new kind of child cannot be
-   *  added without `clearAll` already knowing how to take it away. */
+   *  added without `clearAll` already knowing how to take it away.
+   *
+   */
   private _own(el: HTMLElement, before: ChildNode | null): void {
     this._scrollbackInner.insertBefore(el, before)
+    this._owned.add(el)
+  }
+
+  /** Put a COMMAND block in the next seat: inside the turn that claimed it
+   *  (ADR-0037), or — nobody claimed it — at the tail of the scrollback,
+   *  where every block a person opens goes.
+   *
+   *  A nested block is still remembered by `_owned`: `clearAll` walks one
+   *  list, and removing an element that has already gone with its parent
+   *  does nothing (nocx-0zb1m — a second list to look in would be the same
+   *  defect with a third thing to keep in step). */
+  private _ownNext(el: HTMLElement): void {
+    const claim = this._claimedBy
+    this._claimedBy = null
+    if (!claim) {
+      this._own(el, this._xtermContainer)
+      return
+    }
+    claim.appendChild(el)
     this._owned.add(el)
   }
 
@@ -1674,7 +1779,7 @@ export class BlockManager {
       author,
       this._runningActions,
     )
-    this._own(el, this._xtermContainer)
+    this._ownNext(el)
 
     const rec: BlockRecord = {
       id,
@@ -2005,274 +2110,292 @@ export class BlockManager {
   }
 
   /**
-   * Append an assistant answer block to the flow (nocx-x8s2.2): the
-   * question as the header, the streamed answer text as the body. The
-   * answer is plain text, NOT xterm output — it is rendered as escaped
-   * term-lines at this boundary. The block declares the ask kind, so the
-   * prose grammar (no shell highlight, wrapping body, its own status
-   * words) follows from the kind's rules rather than from command rules
-   * borrowed by accident (nocx-ex636). Returns the handle the ask surface
-   * appends to and closes.
+   * Open a TURN in the scrollback (nocx-x8s2.2, ADR-0037): the question as
+   * its header, and the blocks it causes as its CHILDREN, in order.
    *
-   * A TURN IS DRAWN AS FRAGMENTS (nocx-9sqii), and this is what makes it
-   * one. The block a `run` call opens is submitted through the ordinary
-   * path and lands at the TAIL of the scrollback, which is where every new
-   * block lands; so the only way an answer can read in the order it
-   * happened is for it to stop at that point and continue below the block.
-   * The turn therefore opens more than one block: the first carries the
-   * question, each continuation carries the same stored identity, and every
-   * one of them is an ordinary top-level block with a block's own selection,
-   * copy and header.
+   * A TURN IS ONE BLOCK THAT CARRIES WHAT IT CAUSED. Its children, top to
+   * bottom, are the causal sequence exactly as it happened: a run of prose, a
+   * tool call, more prose, a command with its real output, more prose. There
+   * is no second answer body at the bottom and no fixed arrangement — the
+   * order is the store's, and vertical position in a terminal is a claim
+   * about time.
    *
-   * A turn that ran nothing opens exactly one, and it is the block this
-   * method always returned.
+   * WHAT THIS REPLACES, AND WHY (ADR-0037). The turn used to be drawn as
+   * SEVERAL top-level blocks: the answer was one stored string, a command it
+   * ran landed at the tail of the scrollback, and the only way to read in
+   * order was to CUT the prose at the offset the call happened at and open a
+   * continuation below the block. Every continuation then repeated the
+   * question in its header under a `continued` badge, and the cut existed
+   * only because the unit that was DRAWN (a run of prose) and the unit that
+   * was STORED (the whole answer) disagreed. They are the same unit now: the
+   * store writes `text` children, so the renderer draws the list it is given
+   * and there is nothing left to cut, nothing to repeat, and no threshold at
+   * which a run of calls is compacted — five calls are five blocks.
+   *
+   * Returns the handle the ask surface writes the turn through; nothing else
+   * touches the turn's DOM.
    */
   addAnswerBlock(question: string, cwd: string): AnswerBlockHandle {
-    /** One fragment: the block, its answer body, and the run of tool calls
-     *  currently at the tail of that body. */
-    interface Fragment {
-      id: number
-      el: HTMLElement
-      outputEl: HTMLElement
-      body: AnswerBody
-      strip: ToolCallStrip
-    }
+    const id = this._nextId++
+    const el = createCommandBlock(
+      'ask',
+      id,
+      question,
+      cwd,
+      this._location,
+      '',
+      null,
+      null,
+      // The question is out and no answer has arrived: the header paints the
+      // ask kind's in-progress word ("thinking") beside a live pulse, and the
+      // children show the typing dots — both of which the first delta, or a
+      // terminal close, removes.
+      'waiting',
+      this._getContainer,
+      (bid, sel) => {
+        if (sel) this._onBlockSelected(bid)
+        else this._onBlockDeselected(bid)
+      },
+      this._snapshotStore,
+      // The default author, named because the parameter after it is the one
+      // that matters here: an answer block's copy reads the ledger.
+      'shell',
+      this._answerText,
+    )
+    // WHERE THE TURN'S CHILDREN GO. Its own element, under the header, so the
+    // children are addressable as a list and the header stays exactly one
+    // row of the block whatever the turn grows underneath it.
+    const children = document.createElement('div')
+    children.className = 'cmd-children'
+    el.appendChild(children)
+    this._own(el, this._xtermContainer)
+    this._answerBlocks.push({ id, question, el })
 
-    // Every fragment this turn has drawn, in the order it drew them — the
-    // list the waiting state and the typing dots are retired across, because
-    // both are facts about the TURN and the turn is now in several places.
-    const fragments: HTMLElement[] = []
-    let next = 0
-    // Sealed: a call that opens a block took this position, so the fragment
-    // that was being written is finished and the next content opens a new
-    // one BELOW whatever the scrollback has grown since — which is the
-    // block. Nothing is ever repainted into a position it has left.
-    let sealed = false
+    // The answer says it is being written, WHERE it will be written. The
+    // header chip is in the corner a person checks; this is where they are
+    // already looking, and an empty turn under a finished question is
+    // indistinguishable from a product that did nothing. Removed by the first
+    // thing the turn draws.
+    const typing = document.createElement('span')
+    typing.className = 'cmd-answer-typing'
+    typing.setAttribute('aria-label', blockKindRules('ask').statusChips!.inProgress)
+    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
+    children.appendChild(typing)
+
     // Captured here rather than read off `this` inside the returned handle:
     // the handle's methods are declared `this: void` and are called as bare
-    // functions.
+    // functions, so `this` is genuinely absent inside them. What they need is
+    // named one seam at a time rather than aliased whole: an alias is a second
+    // name for one receiver, which the lint refuses and which hides WHICH of
+    // the manager's facts a closure actually reaches for.
+    const mintId = (): number => this._nextId++
+    const own = (el: HTMLElement): void => {
+      this._owned.add(el)
+    }
+    /** Claim the next block the ordinary submit path opens for this turn's
+     *  region — the seam the `run` tool's command block arrives through. */
+    const claim = (region: HTMLElement | null): void => {
+      this._claimedBy = region
+    }
+    const claimedBy = (): HTMLElement | null => this._claimedBy
+    const store = this._snapshotStore
     const sessionName = this._sessionName
+    const getContainer = this._getContainer
+    const onSelect = (bid: number, sel: boolean): void => {
+      if (sel) this._onBlockSelected(bid)
+      else this._onBlockDeselected(bid)
+    }
     // WHEN THE TURN STARTED. A turn takes time — the model thinks, the tools
     // run — and a person wants to know how long as much as they want to know
     // that `df` took 27ms (nocx-hoeq3). Measured on the RENDERER's clock,
     // from the question being submitted to the run terminalizing, which is
     // exactly how a command's duration is measured a few hundred lines up
-    // (_cmdStartTime); a restored turn shows the store's own figure, and a
-    // restored command already does the same.
+    // (_cmdStartTime); a restored turn shows the store's own figure.
     const now = this._now
     const startedAt = now()
 
-    // The waiting chip says the model has not answered yet; it stops the
-    // moment the first delta lands, and a run that fails before any text
-    // must stop waiting too (the timeout sentence and the waiting state are
-    // two ends of one fact, nocx-ex636).
-    //
-    // The dots stand in for TEXT THAT IS NOT THERE YET, so anything that
-    // puts content in the body retires them — a tool call and the thinking
-    // note both do, and the header's "thinking" chip deliberately does NOT
-    // go with them: the model has done something, and it has not answered.
-    // Retiring the chip there would leave the corner silent while the run is
-    // still working.
-    //
-    // ACROSS EVERY FRAGMENT, because both are facts about the TURN: an
-    // answer whose first prose landed in a continuation would otherwise
-    // leave the dots typing forever under the question.
     const stopTyping = (): void => {
-      for (const el of fragments) el.querySelector('.cmd-answer-typing')?.remove()
+      children.querySelector('.cmd-answer-typing')?.remove()
     }
-
     const stopWaiting = (): void => {
-      for (const el of fragments) {
-        el.querySelector('.cmd-answer-waiting')?.remove()
-        el.querySelector('.cmd-answer-waiting-pulse')?.remove()
-      }
-      // Both ends of one fact: the corner stops reporting work and the body
-      // stops standing in for text. A run that fails before any delta clears
-      // both, or the dots would go on typing an answer that will never
+      el.querySelector('.cmd-header-right .cmd-answer-waiting')?.remove()
+      el.querySelector('.cmd-header-right .cmd-answer-waiting-pulse')?.remove()
+      // Both ends of one fact: the corner stops reporting work and the
+      // children stop standing in for text. A run that fails before any delta
+      // clears both, or the dots would go on typing an answer that will never
       // arrive.
       stopTyping()
     }
 
-    const buildFragment = (index: number): Fragment => {
-      const id = this._nextId++
-      const el = createCommandBlock(
-        'ask',
-        id,
-        question,
-        cwd,
-        this._location,
+    /** The run of prose being written, and the STORE's id for it. */
+    let prose: { body: AnswerBody; blockId: string | null } | null = null
+    let reasoningNote: ReasoningNote | null = null
+    const seenCalls = new Set<string>()
+
+    /** Finish the run of prose being written. The next chunk opens a new one,
+     *  which is what a `text` child is: one run, its own seat. */
+    const endProse = (): void => {
+      if (!prose) return
+      prose.body.finish()
+      prose = null
+    }
+
+    /** The body the next chunk is written into — opening a new `text` child
+     *  when the chunk names a block the open run is not.
+     *
+     *  The boundary is never decided here. The backend opens a `text` block
+     *  on the first delta after a call and seals it when the next call
+     *  arrives, and the id rides every delta; all this does is notice that
+     *  the id changed (ADR-0037: while the cut was the renderer's, the live
+     *  path and the restore each computed it and could drift). */
+    const proseBody = (blockId: string | undefined): AnswerBody => {
+      if (prose && (blockId === undefined || prose.blockId === blockId)) return prose.body
+      endProse()
+      const pid = mintId()
+      const pel = createCommandBlock(
+        'text',
+        pid,
+        '',
+        '',
+        '',
         '',
         null,
         null,
-        // The question is out and no answer has arrived: the header paints
-        // the ask kind's in-progress word ("thinking") beside a live pulse,
-        // and the body shows the typing dots — both of which the first delta
-        // — or a terminal close — removes.
-        //
-        // A CONTINUATION is opened only once the turn is already writing
-        // into it, so it never waits: it is drawn as SETTLED — finished, with
-        // no outcome of its own — and the duration and the terminal chip land
-        // on whichever fragment is last when the turn closes. It used to say
-        // `success` here, which was harmless only while nothing read the
-        // value; the header reads it now, and a continuation claiming an
-        // outcome would tell a reader the turn ended halfway down itself
-        // (nocx-hoeq3).
-        index === 0 ? 'waiting' : 'settled',
-        this._getContainer,
-        (bid, sel) => {
-          if (sel) this._onBlockSelected(bid)
-          else this._onBlockDeselected(bid)
-        },
-        this._snapshotStore,
-        // The default author, named because the parameter after it is the one
-        // that matters here: an answer block's copy reads the ledger.
+        // Printing text can neither run nor fail: a run of prose is born
+        // finished, with no outcome of its own to state. It draws no header
+        // at all, so nothing states one either.
+        'settled',
+        getContainer,
+        onSelect,
+        store,
         'shell',
-        this._answerText,
       )
-      // The turn's stored identity, on every fragment: the ledger entry the
-      // question and the answer both belong to. The ask surface sets it on
-      // the FIRST fragment when agent.ask resolves; a continuation opened
-      // later copies it, so the copy path finds the same stored answer from
-      // any fragment of the turn and a reader can tell one turn's fragments
-      // from a second answer.
-      const first = fragments[0]
-      if (first?.dataset.entryId !== undefined) el.dataset.entryId = first.dataset.entryId
-      if (first?.dataset.answeredBy !== undefined) el.dataset.answeredBy = first.dataset.answeredBy
-      markTurnFragment(el, index)
       const outputEl = document.createElement('div')
-      // The ask kind's body class comes from the kind's rules — the wrap
-      // policy is owned there, never a second copy (nocx-ex636).
-      outputEl.className = blockKindRules('ask').outputClass
+      // The class comes from the kind's rules — the wrap policy is owned
+      // there, never a second copy (nocx-ex636).
+      outputEl.className = blockKindRules('text').outputClass!
       outputEl.dataset.answerBody = ''
-      if (index === 0) {
-        // The answer's body says it is being written, WHERE it will be
-        // written. The header chip is in the corner a person checks; the body
-        // is where they are already looking, and an empty body under a
-        // finished question is indistinguishable from a product that did
-        // nothing. Removed by the first delta, so the dots are replaced by
-        // the text they stood in for.
-        const typing = document.createElement('span')
-        typing.className = 'cmd-answer-typing'
-        typing.setAttribute('aria-label', blockKindRules('ask').statusChips!.inProgress)
-        for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
-        outputEl.appendChild(typing)
-      }
-      el.appendChild(outputEl)
-      this._own(el, this._xtermContainer)
-      this._answerBlocks.push({ id, question, el })
-      fragments.push(el)
+      pel.appendChild(outputEl)
+      children.appendChild(pel)
+      own(pel)
       // The body is drawn by its ONE owner (answer-body.ts) — the same
       // function a RESTORED answer draws through, so a turn that comes back
       // after a restart is painted by the code that painted it live
-      // (nocx-4em1z). What stays here is the block: its header, its chips,
-      // the waiting state, and the elements this flow places through the body
-      // in arrival order.
-      const body = createAnswerBody(outputEl, {
-        store: this._snapshotStore,
-        onContent: stopTyping,
-      })
-      return { id, el, outputEl, body, strip: createToolCallStrip(body, { sessionName }) }
+      // (nocx-4em1z).
+      const body = createAnswerBody(outputEl, { store, onContent: stopTyping })
+      prose = { body, blockId: blockId ?? null }
+      return body
     }
-
-    let current = buildFragment(next++)
-    const head = current.el
-    const headId = current.id
-
-    /** The fragment the turn is writing into — opening a continuation when a
-     *  block has taken the position the last one ended at. */
-    const writable = (): Fragment => {
-      if (!sealed) return current
-      sealed = false
-      current = buildFragment(next++)
-      return current
-    }
-
-    // The flow's non-text elements (nocx-shxv0, nocx-s92so). Both are placed
-    // in the SAME body as the prose, in arrival order, because that order is
-    // the product fact: a call rendered anywhere else stops saying when it
-    // happened.
-    const seenCalls = new Set<string>()
-    let reasoningNote: ReasoningNote | null = null
 
     return {
-      id: headId,
-      el: head,
+      id,
+      el,
       toolCall(call: AnswerToolCall): void {
         if (seenCalls.has(call.callId)) return
         seenCalls.add(call.callId)
+        stopTyping()
+        // The run of prose above ends here whatever the call turns out to be:
+        // the backend sealed its `text` block when this call arrived, and the
+        // next delta names the next one.
+        endProse()
         if (call.opensBlock) {
-          // THE BLOCK IS THE ACCOUNT OF THIS CALL (nocx-9sqii). The command
-          // is submitted through the ordinary path and opens a top-level
-          // block at the tail; a line here would restate the command, the
-          // output and the exit status that block already owns, and it was
-          // the EMPTY half of the two positions one command used to occupy.
-          //
-          // What the line owned is WHEN, and the block owns that too by
-          // standing exactly here: the fragment being written stops, and the
-          // answer continues below the block.
-          current.strip.end()
-          current.body.finish()
-          sealed = true
+          // THE BLOCK IS THE ACCOUNT OF THIS CALL (ADR-0037). The command is
+          // submitted through the ordinary path, and the turn claims the seat
+          // it lands in, so the command's own block — its header, its output,
+          // its exit status, its ⋮ — stands exactly where the call happened.
+          // A child beside it restating the command would be the empty half
+          // of the two positions one command used to occupy.
+          claim(children)
           return
         }
-        const frag = writable()
-        frag.strip.add({ tool: call.tool, effect: call.effect, resource: call.resource })
+        // A call that opened no block: its own child, named by the tool and
+        // the arguments it ran on. The arguments are the whole point — the
+        // tool and the derived resource are identical for two calls of one
+        // session-scoped tool, and `blocks.read blockId=3` and
+        // `blocks.read blockId=4` must read differently (ADR-0037).
+        const cid = mintId()
+        const cel = createCommandBlock(
+          'tool',
+          cid,
+          toolCallTitle(
+            { tool: call.tool, args: call.args, resource: call.resource },
+            {
+              sessionName,
+            },
+          ),
+          '',
+          '',
+          '',
+          null,
+          null,
+          'settled',
+          getContainer,
+          onSelect,
+          store,
+          'shell',
+        )
+        // The effect the BACKEND decided, as a typed attribute: a destructive
+        // call must not look like a read, and the renderer may never derive
+        // an effect from a tool name (ADR-0028 decision 4).
+        cel.dataset.effect = call.effect
+        cel.dataset.tool = call.tool
+        children.appendChild(cel)
+        own(cel)
       },
       reasoning(text: string): void {
         if (text === '') return
-        const frag = writable()
         if (!reasoningNote) {
           // Open or shut as the setting says at the moment the model starts
           // thinking (nocx-y9e88). A note built while the setting was off and
           // then switched on is caught by the applier, which walks what is
           // already on screen — this is the other half of the same rule.
           reasoningNote = createReasoningNote({ expanded: reasoningStartsExpanded() })
-          frag.strip.end()
-          frag.body.insert(reasoningNote.el)
+          // INTO THE OPEN RUN OF PROSE when there is one, so the note lands
+          // where it arrived: the same run goes on being written below it,
+          // and a note parked outside the block would claim a position the
+          // text then wrote past. With no run open it is a child of the turn,
+          // which is where a model that thinks before it speaks belongs.
+          if (prose) prose.body.insert(reasoningNote.el)
+          else {
+            stopTyping()
+            children.appendChild(reasoningNote.el)
+          }
         }
         reasoningNote.append(text)
       },
-      append(text: string): void {
+      append(text: string, blockId?: string): void {
         if (text === '') return
         stopWaiting()
-        const frag = writable()
-        // Prose ends the run of calls above it: a run is CONSECUTIVE, or it
-        // is two runs with something between them.
-        frag.strip.end()
-        frag.body.append(text)
+        proseBody(blockId).append(text)
       },
       close(status: 'success' | 'failure', error?: string, model?: string): void {
         stopWaiting()
-        current.strip.end()
-        current.body.finish()
-        // The terminal state lands on the LAST fragment the turn drew, which
-        // is where the turn ended. A turn sealed by a call that produced no
-        // further prose closes on the fragment above its block — the turn did
-        // stop there, and opening an empty continuation to carry a chip would
-        // put a block on screen with nothing in it.
-        const el = current.el
+        endProse()
+        // A `run` that was announced and never reached a command must not
+        // adopt somebody else's block later: the claim dies with the turn.
+        if (claimedBy() === children) claim(null)
         // The header's right-hand group, from its ONE owner (nocx-hoeq3):
         // how long the turn took and how it ended, as the ask kind's rules
-        // say them. This used to build a chip of its own here — with the
-        // right words and the wrong class list, and no duration beside it —
-        // so a turn's header held one chip where a command's held two.
+        // say them. One header now, so the outcome lands where the question
+        // is and nowhere else.
         const right = el.querySelector('.cmd-header-right')
         if (right) settleHeaderRight(right, 'ask', now() - startedAt, { status, exitCode: null })
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going to
         // look it up. The value is the ask result's pinned model — this run's
-        // fact, never a re-derivation.
+        // fact, never a re-derivation. Last among the children, because it is
+        // a caption on the whole turn rather than a piece of it.
         if (status === 'success' && model) {
           const note = document.createElement('div')
           note.className = 'cmd-answer-provenance'
           note.textContent = `answered by ${model}`
-          current.outputEl.appendChild(note)
+          children.appendChild(note)
         }
         if (error) {
           const note = document.createElement('div')
           note.className = 'cmd-answer-error'
           note.textContent = error
-          current.outputEl.appendChild(note)
+          children.appendChild(note)
         }
       },
     }

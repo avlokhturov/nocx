@@ -6002,8 +6002,10 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         'git status',
         'cat -n a.txt',
       ])
-      // Nothing was attached and nothing was invented: no call line anywhere.
-      expect(inner.querySelector('.ui-tool-call')).toBeNull()
+      // Nothing was attached and nothing was invented: no call block
+      // anywhere, and no turn carrying a child it was never told about.
+      expect(inner.querySelector('.cmd-block[data-block-kind="tool"]')).toBeNull()
+      expect(inner.querySelector('.cmd-children > .cmd-block')).toBeNull()
       // And the assistant's command still says the assistant ran it: the
       // badge is painted from the entry's own kind (nocx-4em1z), which the
       // relation's absence does not touch.

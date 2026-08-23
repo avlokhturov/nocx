@@ -41,8 +41,6 @@
 @import './styles/components/swatch-picker.css';
 @import './styles/components/badge.css';
 @import './styles/components/secret-chip.css';
-@import './styles/components/tool-call-line.css';
-@import './styles/components/tool-call-group.css';
 @import './styles/components/reasoning-note.css';
 @import './styles/components/answer-markdown.css';
 @import './styles/components/mode-indicator.css';
@@ -899,6 +897,78 @@
   margin-top: 6px;
   font-size: var(--font-size-sm);
   color: var(--color-text-muted);
+}
+
+/* ── A turn's children (ADR-0037) ───────────────────────────────────── */
+
+/* WHAT THIS IS. A turn is ONE block that carries the blocks it caused, in
+   order: a run of prose, a tool call, more prose, a command with its real
+   output, more prose. This is where they hang. The order is the store's and
+   nothing here rearranges it — vertical position in a terminal is a claim
+   about time, so the only job of this box is to keep the claim true. */
+.cmd-children {
+  display: flex;
+  flex-direction: column;
+  /* THE CONTAINMENT HAS TO BE VISIBLE, or a child block is a block like any
+     other and nothing says whose it is. A gutter and one rule down the left,
+     drawn once for the whole run rather than per child, so five children read
+     as one group.
+
+     The indent costs a few pixels of visible width and NOTHING ELSE: a frozen
+     `.cmd-output` is `white-space: pre` with its own `overflow-x: auto`
+     (nocx-juau), so a wide grid reaches its far end by the scroll it already
+     had and nothing re-wraps. And the live xterm is not in here at all — it
+     is a sibling of the blocks in `.scrollback-inner` — so the terminal's own
+     `cols` is untouched by any of this. */
+  margin: var(--space-1) 0;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--color-border);
+}
+
+/* A turn that did nothing has no region to draw. The region is created with
+   the block rather than at the first child, so the empty case is the ordinary
+   one and must cost nothing. */
+.cmd-children:empty {
+  display: none;
+}
+
+/* A child is a block and the turn is a block, so without this every child
+   would wear the divider that separates one TOP-LEVEL block from the next —
+   and a divider between the pieces of one answer says "these are separate
+   answers", which is the sentence the `continued` badge used to say and
+   ADR-0037 deleted. The turn's own top border still separates the turn from
+   what came before it. */
+.cmd-children > .cmd-block {
+  border-top: 0;
+}
+
+/* ONE TOOL CALL: a header and nothing else (ADR-0037). The header's bottom
+   padding is the gap between a command and what it printed, and a call
+   prints nothing here — its result belongs to the ledger's attempt, and the
+   command a `run` call opened is a block of its own beside this. */
+.cmd-block[data-block-kind='tool'] .cmd-header {
+  padding-bottom: 2px;
+}
+
+/* It reads as a MARGIN NOTE, not as content: the answer is what the person
+   came for, and a call that shouted would compete with it. Dim and one size
+   below the body — and monospace, which it inherits, because the tool name
+   and its arguments are identifiers a person compares against the same words
+   in the terminal above. */
+.cmd-block[data-block-kind='tool'] .cmd-header-text {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* A call that CHANGES something must not read like a call that looked at
+   something. The variance is the BACKEND's effect class, typed on the block
+   — never derived here from the tool's name (ADR-0028 decision 4). Only the
+   two ends are painted: a reader needs "this only looked" and "this could
+   not be undone" distinguishable at a glance, and giving all seven classes a
+   colour of their own would turn the turn into a legend. */
+.cmd-block[data-block-kind='tool'][data-effect='mutate-destructive'] .cmd-header-text,
+.cmd-block[data-block-kind='tool'][data-effect='privilege-change'] .cmd-header-text {
+  color: var(--color-warning);
 }
 
 .cmd-output {

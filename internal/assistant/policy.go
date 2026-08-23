@@ -474,16 +474,20 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// written after the fact is what the owner saw on 2026-08-22 —
 		// the block sitting below the answer written from it.
 		//
-		// It carries the resource namedResource derived, never the raw
-		// arguments blob, and never the result (see ToolCall's doc for why
-		// the result is left off). Announced once per EXECUTION, so an
-		// approved egress resume — which passes the same call through this
-		// pipeline a second time — announces the same CallID again; the
-		// renderer keys on it and renders one call.
+		// It carries the arguments the tool is about to run on and the
+		// resource namedResource derived from them, and never the result (see
+		// ToolCall's doc for why the result is left off). The arguments are
+		// the VALIDATED object from step 2, not the raw string: what is
+		// announced is what ran, and step 2 is where "what ran" was settled.
+		// Announced once per EXECUTION, so an approved egress resume — which
+		// passes the same call through this pipeline a second time —
+		// announces the same CallID again; the renderer keys on it and
+		// renders one call.
 		if m.onCall != nil {
 			if err := m.onCall(ToolCall{
 				Tool:       decl.Name,
 				CallID:     tCtx.CallID,
+				Args:       args,
 				EntryID:    entryID,
 				Effect:     decl.Effect,
 				Resource:   matchedResource(decl, args),
@@ -1000,9 +1004,9 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 		},
 	}
 	// The resource the call named, derived ONCE (matchedResource, shared
-	// with the scope check, the approval prompt and the visible tool-call
-	// line) and stored with the proposal. A restored turn draws this line
-	// from the record; without the resource on the record the renderer
+	// with the scope check, the approval prompt and the visible announcement
+	// of the call) and stored with the proposal. A restored turn draws the
+	// call from the record; without the resource on the record the renderer
 	// would have to derive it from the raw arguments a second time, which
 	// is the defect AGENTS.md spends a section on. Absent when the tool
 	// names no resource at all — never an empty scope.

@@ -279,13 +279,17 @@ describe('restore-client — blocks arranged by the relation', () => {
 
   const cause = (entryId: string, position: number) => ({
     entryId,
+    // The child's seat among its siblings (ADR-0037). It replaces the `at`
+    // this fixture used to carry — how far the turn's prose had got when the
+    // cause happened — which existed only while a turn's prose was one string
+    // to be cut. Irrelevant to the arrangement asserted here either way: this
+    // module places a caused block next to its turn.
     position,
-    // Where in the prose it happened (nocx-9sqii). Irrelevant to the
-    // arrangement asserted here — this module places a caused block next to
-    // its turn; where inside the turn it lands is the flow's projection.
-    at: 0,
     kind: 'shell' as const,
     intent: entryId,
+    // An ACTION's facts, and null on a shell child: a command a turn ran is
+    // not a tool call and asked for nothing.
+    args: null,
     effect: null,
     resource: null,
     opensBlock: false,

@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -823,8 +824,12 @@ func TestATurnWhoseProseWasEvictedKeepsEveryBlockItHad(t *testing.T) {
 	if len(after) != len(before) {
 		t.Fatalf("the turn has %d children after the sweep, want the %d it had", len(after), len(before))
 	}
+	// reflect.DeepEqual rather than ==: a child carries the arguments the call
+	// asked for (ADR-0037), which is a map, and a struct holding one is not
+	// comparable. The claim is unchanged — the same children, in the same
+	// seats, with the same facts.
 	for i := range before {
-		if after[i] != before[i] {
+		if !reflect.DeepEqual(after[i], before[i]) {
 			t.Fatalf("child %d changed across the sweep: %+v, want %+v", i, after[i], before[i])
 		}
 	}
@@ -876,8 +881,10 @@ func TestATurnSaysItsProseIsGoneOnceNotOncePerPiece(t *testing.T) {
 		t.Fatalf("the tree read changed shape across the sweep: %d children, want %d",
 			len(kidsAfter), len(kidsBefore))
 	}
+	// DeepEqual, for the reason the sweep above uses it: a child carries the
+	// arguments the call asked for, which is a map.
 	for i := range kidsBefore {
-		if kidsAfter[i] != kidsBefore[i] {
+		if !reflect.DeepEqual(kidsAfter[i], kidsBefore[i]) {
 			t.Fatalf("child %d of the tree read changed across the sweep: %+v, want %+v",
 				i, kidsAfter[i], kidsBefore[i])
 		}
