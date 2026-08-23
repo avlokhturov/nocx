@@ -53,10 +53,6 @@ func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credent
 	return credential.NewSecretBytes(buf), nil
 }
 
-func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewOperationResolver(s).Resolve(ctx, id, why)
-}
-
 func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
