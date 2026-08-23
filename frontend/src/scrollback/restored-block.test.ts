@@ -173,3 +173,101 @@ describe('a block built from the store', () => {
     expect(el.dataset.outputEvicted).toBe('true')
   })
 })
+
+// ── a restored turn comes back with the calls it made (nocx-h1l4o) ────────
+//
+// ADR-0036's last sentence: an action was anchored to nothing at all, so a
+// restored turn came back without the calls it made. The `caused-by` relation
+// joins them, and this is the drawing half — the lines are built by the SAME
+// kit component the live flow places, from the facts the ledger stored.
+describe('a restored turn and the calls it made', () => {
+  const withCalls = (calls: Parameters<typeof restoredBlock>[0]['calls']) =>
+    restoredBlock(
+      facts({
+        kind: 'ask',
+        author: 'agent',
+        command: 'what went wrong?',
+        body: 'line 3 is wrong',
+        calls,
+      }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+
+  it('draws one tool-call line per call, in the causal order the ledger gave', () => {
+    const el = withCalls([
+      { tool: 'files.read', effect: 'observe', resource: { kind: 'path', id: '/repo/a.txt' } },
+      { tool: 'run', effect: 'mutate-destructive' },
+    ])
+    const lines = Array.from(el.querySelectorAll('.ui-tool-call__tool')).map((n) => n.textContent)
+    expect(lines).toEqual(['files.read', 'run'])
+  })
+
+  it('paints the effect the backend decided, never one derived from the name', () => {
+    const el = withCalls([{ tool: 'run', effect: 'mutate-destructive' }])
+    expect(el.querySelector<HTMLElement>('.ui-tool-call')?.dataset.effect).toBe(
+      'mutate-destructive',
+    )
+  })
+
+  it('shows the resource the backend derived, and nothing when it derived none', () => {
+    const named = withCalls([
+      { tool: 'files.read', effect: 'observe', resource: { kind: 'path', id: '/repo/a.txt' } },
+    ])
+    expect(named.querySelector('.ui-tool-call__resource')?.textContent).toBe('/repo/a.txt')
+    const bare = withCalls([{ tool: 'git.status', effect: 'observe' }])
+    expect(bare.querySelector('.ui-tool-call__resource')).toBeNull()
+  })
+
+  it('places the calls inside the turn’s own body, above the prose', () => {
+    const el = withCalls([{ tool: 'files.read', effect: 'observe' }])
+    const body = el.querySelector('[data-answer-body]')
+    const kinds = Array.from(body?.children ?? []).map((c) =>
+      c.classList.contains('ui-tool-call') ? 'call' : 'text',
+    )
+    expect(kinds[0]).toBe('call')
+    expect(kinds).toContain('text')
+  })
+
+  it('a turn with no calls draws exactly what it drew before the relation existed', () => {
+    const el = withCalls([])
+    expect(el.querySelector('.ui-tool-call')).toBeNull()
+    expect(el.querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
+  })
+
+  it('a turn whose answer is gone still says the calls it made happened', () => {
+    // Retention takes bodies and leaves entries (ADR-0019 §7). The calls are
+    // entries of their own, so they survive the loss of the prose — and the
+    // block must not go silent about work that really happened.
+    const el = restoredBlock(
+      facts({
+        kind: 'ask',
+        author: 'agent',
+        command: 'q',
+        body: null,
+        calls: [{ tool: 'files.read', effect: 'observe' }],
+      }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    expect(el.textContent).toContain('Output is no longer kept')
+    expect(el.querySelector('.ui-tool-call__tool')?.textContent).toBe('files.read')
+  })
+
+  it('a COMMAND block never grows a call line, whatever it is handed', () => {
+    // An action has no block and no command line; a call belongs to the turn
+    // that made it, and a second owner of that fact is the defect.
+    const el = restoredBlock(
+      facts({ calls: [{ tool: 'files.read', effect: 'observe' }] }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    expect(el.querySelector('.ui-tool-call')).toBeNull()
+  })
+})

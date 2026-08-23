@@ -5193,6 +5193,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	stream := "combined"
 	truncated := "cap"
 	offset, end := int64(0), int64(4096)
+	effect := "observe"
 	getCases := map[string]ledgerGetResponse{
 		"populated": {
 			Entry: entry,
@@ -5200,6 +5201,20 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				From: entry.ID, To: running.ID, Rel: "rerun-of",
 				Payload: json.RawMessage(`{"note":"anything"}`),
 			}},
+			// The causal flow, both kinds it can hold: a tool call, whose
+			// effect and resource are its own, and a command the turn ran,
+			// which has neither and says so with nulls (nocx-h1l4o).
+			Caused: []ledgerCausedWire{
+				{
+					EntryID: "01924f9c-0000-7000-8000-00000000000a", Position: 0,
+					Kind: "action", Intent: "files.read", Effect: &effect,
+					Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/go.mod"},
+				},
+				{
+					EntryID: running.ID, Position: 1, Kind: "shell",
+					Intent: "make watch", Effect: nil, Resource: nil,
+				},
+			},
 			Artifacts: []ledgerArtifactWire{{
 				ID: "artifact-1", ExecutionID: 3, MediaType: "text/plain",
 				DerivedFrom: nil, State: "sealed", ByteLen: 4096, ChunkCount: 2,
@@ -5212,6 +5227,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 		},
 		"an entry with no relations and no captures": {
 			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
+			Caused: []ledgerCausedWire{},
 		},
 	}
 	getSchema := loadSchema(t, "ledger.get.schema.json")
@@ -5277,6 +5293,106 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 		t.Fatalf("ledger.get: %+v", got.Error)
 	}
 	validateJSON(t, getSchema, got.Result, "ledger.get result (a closed entry)")
+
+	// And an entry that CAUSED something (nocx-h1l4o). The relation is
+	// written through the store's own seam because no JSON-RPC method
+	// writes one — the backend does, from a fact the renderer never sends
+	// — but the read under test is the real handler answering off the real
+	// socket, which is the row that matters in contracts/README.md.
+	led := db.Ledger()
+	action := content.SubmitEntry{
+		ID: "01924f9c-0000-7000-8000-0000000000aa", Client: "agent",
+		EnvironmentID: localEnvironmentID(), Cwd: "/", Kind: content.EntryAction,
+		Intent: "files.read",
+		Payload: `{"tool":"files.read","effect":"observe",` +
+			`"resource":{"kind":"path","id":"/repo/go.mod"}}`,
+	}
+	if _, err := led.Submit(context.Background(), action); err != nil {
+		t.Fatalf("submit the action entry: %v", err)
+	}
+	for _, caused := range []string{action.ID, "wire-2"} {
+		if _, err := led.AddCause(context.Background(), "wire-1", caused); err != nil {
+			t.Fatalf("AddCause(%s): %v", caused, err)
+		}
+	}
+	withCauses := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-1"}, 12)
+	if withCauses.Error != nil {
+		t.Fatalf("ledger.get with causes: %+v", withCauses.Error)
+	}
+	validateJSON(t, getSchema, withCauses.Result, "ledger.get result (an entry that caused two others)")
+	var body struct {
+		Caused []struct {
+			EntryID  string `json:"entryId"`
+			Position int    `json:"position"`
+			Kind     string `json:"kind"`
+			Effect   *string
+			Resource *content.GrantScope
+		} `json:"caused"`
+	}
+	if err := json.Unmarshal(withCauses.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Caused) != 2 {
+		t.Fatalf("caused off the socket = %+v, want both", body.Caused)
+	}
+	if body.Caused[0].EntryID != action.ID || body.Caused[0].Position != 0 ||
+		body.Caused[0].Kind != "action" {
+		t.Fatalf("the first cause off the socket = %+v", body.Caused[0])
+	}
+	if body.Caused[0].Effect == nil || *body.Caused[0].Effect != "observe" {
+		t.Fatalf("the action's effect off the socket = %v, want observe", body.Caused[0].Effect)
+	}
+	if body.Caused[0].Resource == nil || body.Caused[0].Resource.ID != "/repo/go.mod" {
+		t.Fatalf("the action's resource off the socket = %+v", body.Caused[0].Resource)
+	}
+	// The command the turn ran is not a tool call: both are null, and the
+	// renderer draws it as the block it is.
+	if body.Caused[1].EntryID != "wire-2" || body.Caused[1].Position != 1 {
+		t.Fatalf("the second cause off the socket = %+v", body.Caused[1])
+	}
+	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
+		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
+	}
+}
+
+// The negative for the causal flow: the schema refuses what it must, or the
+// `caused` list is a shape nobody is holding to anything.
+func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "ledger.get.schema.json")
+	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"agent",` +
+		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
+		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
+		`"redactions":[]}`
+	body := func(caused string) string {
+		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"caused":` + caused + `}`
+	}
+	bad := map[string]string{
+		"caused as null": body(`null`),
+		"a cause with no position": body(
+			`[{"entryId":"b","kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"a negative position": body(
+			`[{"entryId":"b","position":-1,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"an effect nobody named": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"rummage","resource":null}]`),
+		"a half-named resource": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
+		"an undeclared field on a cause": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the schema accepted %s — additionalProperties/required is not doing its job", name)
+			}
+		})
+	}
+	// And the shape it must ACCEPT, so the refusals above are a contract
+	// and not an accident of a schema that refuses everything.
+	ok := body(`[{"entryId":"b","position":0,"kind":"action","intent":"files.read",` +
+		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"}}]`)
+	if err := validateJSONErr(schema, []byte(ok)); err != nil {
+		t.Fatalf("the schema refused a well-formed cause: %v", err)
+	}
 }
 
 // And the negative: the schema REFUSES a page that is missing a required

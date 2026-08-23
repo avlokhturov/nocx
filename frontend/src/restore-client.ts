@@ -13,7 +13,7 @@
 import type { WSClient } from './ipc'
 import type { LedgerQuery } from './generated/ledger.query'
 import type { LedgerArtifact } from './generated/ledger.artifact'
-import type { LedgerGet } from './generated/ledger.get'
+import type { Caused, LedgerGet } from './generated/ledger.get'
 
 /** How many blocks a pane comes back with.
  *
@@ -163,6 +163,15 @@ export async function answerTextForEntry(
   return artifactBody(client, entryId, 'text/plain')
 }
 
+/** One entry a turn caused, at its position inside the turn — the ledger's
+ *  `caused-by` relation, resolved and ordered by the backend (nocx-h1l4o).
+ *
+ *  This is the generated wire type, re-exported under the name the renderer
+ *  uses. Nothing here is derived: the position, the order, the effect and the
+ *  resource are all the store's, because a reader that re-derived any of them
+ *  would be a second owner of a relation the ledger already owns (AD-8). */
+export type RestoredCause = Caused
+
 /** What a restored entry turns out to be, and the body to draw it with.
  *
  *  `kind` is the block's GRAMMAR (blocks.ts BlockKind): a terminal grid must
@@ -172,6 +181,18 @@ export async function answerTextForEntry(
 export interface RestoredBody {
   kind: 'command' | 'ask'
   body: string | null
+  /**
+   * What this entry CAUSED, in the causal order the turn assigned.
+   *
+   * EMPTY IS THE DEGRADE AND IT IS THE ONLY ONE: an entry that caused
+   * nothing, a store that could not be asked, and a backend that sent no
+   * flow at all all answer `[]`, and every one of them draws plain ledger
+   * order with the command as an independent agent block. None of them
+   * guesses a parent — there is nothing in the page that could be used to
+   * guess one that would not be wrong exactly when two things happened at
+   * once (ADR-0019 §2).
+   */
+  caused: RestoredCause[]
 }
 
 /**
@@ -192,20 +213,85 @@ export interface RestoredBody {
  * every command whose output has aged out.
  *
  * ONE round trip pair, shared with bodyForBlock above: the entry, then its
- * artifact. The kind falls out of the list the first call already returned.
+ * artifact. The kind falls out of the list the first call already returned —
+ * and so does the causal flow, which is why the relation cost this path no
+ * round trip at all.
  */
 export async function restoredBody(client: WSClient, entryId: string): Promise<RestoredBody> {
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const caused = entry.caused ?? []
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const chosen = vt ?? entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    if (!chosen) return { kind: 'command', body: null }
+    if (!chosen) return { kind: 'command', body: null, caused }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
-    return { kind: vt ? 'command' : 'ask', body: body.body }
+    return { kind: vt ? 'command' : 'ask', body: body.body, caused }
   } catch {
     // Quiet for the same reason bodyForBlock is: fifty restoring blocks
     // would otherwise log fifty times for one dead socket, and the pane
     // already says its past could not be read.
-    return { kind: 'command', body: null }
+    return { kind: 'command', body: null, caused: [] }
   }
+}
+
+/**
+ * The page's blocks in the order the RELATION puts them: each turn followed
+ * by the blocks it caused, in the causal order it assigned (nocx-h1l4o).
+ *
+ * THIS DECIDES NOTHING, which is the same promise the module header makes.
+ * The causal order is the store's — `caused` arrives sorted by the position
+ * the turn assigned — and everything else keeps the ledger order the page
+ * came in. What this does is PLACE: it moves a caused block out of its
+ * `ingest_seq` position and next to the turn that caused it, because commit
+ * order is explicitly not causality (ADR-0019 §2) and the two disagree
+ * precisely when two things happen at once.
+ *
+ * THE THREE WAYS THE RELATION IS NOT THERE all land here, and all of them
+ * produce plain ledger order with the block left where the page put it:
+ *
+ *  - no relation — `causesOf` answers `[]` for every entry;
+ *  - an unreadable one — the read failed, so it answers `[]` too;
+ *  - a dangling one — a cause names an entry this page does not hold (older
+ *    than the page limit, or evicted by retention), and it is skipped while
+ *    the turn keeps every cause that IS here.
+ *
+ * None of them attaches a block to the turn that happens to sit above it. A
+ * guessed parent is wrong exactly when a person is confused and looking.
+ */
+export function arrangedByCause<T extends { entryId: string }>(
+  blocks: T[],
+  causesOf: (entryId: string) => RestoredCause[],
+): T[] {
+  const byID = new Map(blocks.map((b) => [b.entryId, b]))
+  // Which blocks are somebody's cause: they are drawn after their turn, so
+  // they do not also come out at their own ledger position.
+  const claimed = new Set<string>()
+  for (const b of blocks) {
+    for (const c of causesOf(b.entryId)) {
+      if (byID.has(c.entryId) && c.entryId !== b.entryId) claimed.add(c.entryId)
+    }
+  }
+  const out: T[] = []
+  const drawn = new Set<string>()
+  // `drawn` is what stops a malformed relation from looping. The store
+  // cannot produce a cycle — AddCause records one direction and refuses an
+  // entry that is not there — but a reader that could hang the tab on one is
+  // a worse answer than an odd order.
+  const emit = (b: T): void => {
+    if (drawn.has(b.entryId)) return
+    drawn.add(b.entryId)
+    out.push(b)
+    for (const c of causesOf(b.entryId)) {
+      const caused = byID.get(c.entryId)
+      if (caused) emit(caused)
+    }
+  }
+  for (const b of blocks) {
+    if (!claimed.has(b.entryId)) emit(b)
+  }
+  // A block claimed by a turn that is itself NOT in this page would
+  // otherwise be dropped from the tab entirely — the relation may cost a
+  // block its placement, never its existence.
+  for (const b of blocks) emit(b)
+  return out
 }

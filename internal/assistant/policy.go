@@ -43,6 +43,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
 )
 
@@ -201,6 +202,11 @@ type AttemptLedger interface {
 	Submit(ctx context.Context, in content.SubmitEntry) (content.SubmitResult, error)
 	StartExecution(ctx context.Context, in content.StartExecution) (int64, error)
 	FinishExecution(ctx context.Context, executionID int64, end content.FinishExecution) error
+	// AddCause joins an entry this turn caused to the turn's own entry, at
+	// the next causal position inside it (nocx-h1l4o). The store assigns the
+	// position; see content.LedgerRepository.AddCause for why the caller may
+	// not.
+	AddCause(ctx context.Context, turnID, causedID string) (int, error)
 }
 
 // maxArgsBytes bounds the model's argument JSON — the ingress size bound of
@@ -222,6 +228,7 @@ const maxToolResultBytes = 1 << 20
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 
+	log       log.Logger
 	grant     content.Grant
 	registry  agenttools.Registry
 	ledger    AttemptLedger
@@ -229,7 +236,26 @@ type policyMiddleware struct {
 	known     KnownMaterial
 	runID     string
 	attempt   int
-	requester RendererRequester
+	// turnEntryID is the TURN's own ledger entry — the thing every entry
+	// this run causes is joined to (nocx-h1l4o, ADR-0036's closing
+	// sentence).
+	//
+	// HOW A RUN ID MAPS TO ITS TURN, since the run id is what this
+	// middleware has always carried: `executions.entry_id`. The run id IS
+	// an execution row id (the transport formats rc.runID with strconv),
+	// and an execution belongs to exactly one entry — the turn. The
+	// transport holds BOTH facts side by side (rc.runID and rc.entryID, set
+	// from the same SubmitAgentAsk result), so the turn arrives here as the
+	// fact it already is rather than as a lookup: a read that recovers what
+	// the caller was holding is a second derivation, and the two can only
+	// ever disagree.
+	//
+	// EMPTY IS A REAL SHAPE and not a defect: an un-bound caller (AskParams
+	// with no turn) causes entries that belong to no turn, and they are
+	// recorded with no relation rather than with a guessed one — the same
+	// rule the run id already follows on the attempt payload.
+	turnEntryID string
+	requester   RendererRequester
 	// classifier is the second model that judges permitted proposals (bead
 	// nocx-kpy23). Nil = not wired for this run: permitted calls run
 	// exactly as they do without one. Consulted ONLY where the policy says
@@ -270,22 +296,30 @@ type policyMiddleware struct {
 //
 // onCall is the seam the visible tool call leaves through (nocx-shxv0);
 // nil means nobody is listening and nothing is announced.
-func newPolicyMiddleware(grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
+//
+// turnEntryID is the turn every entry this run causes is joined to
+// (nocx-h1l4o); empty is the un-bound caller shape and joins nothing.
+// logger may be nil for the same callers — the only thing it reports is a
+// relation that could not be written, which is a degrade the reader already
+// handles.
+func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
 	m := &policyMiddleware{
-		grant:      grant,
-		registry:   registry,
-		ledger:     ledger,
-		approvals:  approvals,
-		known:      known,
-		runID:      runID,
-		attempt:    attempt,
-		requester:  requester,
-		classifier: classifier,
-		onCall:     onCall,
-		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
+		log:         logger,
+		grant:       grant,
+		registry:    registry,
+		ledger:      ledger,
+		approvals:   approvals,
+		known:       known,
+		runID:       runID,
+		attempt:     attempt,
+		turnEntryID: turnEntryID,
+		requester:   requester,
+		classifier:  classifier,
+		onCall:      onCall,
+		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -413,7 +447,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// capability is constructed, next is not called, and the run fails
 		// with a terminal infrastructure error — an interrupted run can
 		// never be told "this may already have happened" when it cannot.
-		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs, classifierFact)
+		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs, matchedResource(decl, args), classifierFact)
 		if err != nil {
 			return "", fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 		}
@@ -743,7 +777,7 @@ func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, c
 	ap := m.proposal(decl.Name, callID, rawArgs)
 	var entryID string
 	if m.ledger != nil {
-		id, err := m.recordProposal(ctx, decl, rawArgs, ap, nil)
+		id, err := m.recordProposal(ctx, decl, rawArgs, matchedResource(decl, args), ap, nil)
 		if err != nil {
 			// The proposal could not be recorded: the run fails rather than
 			// asking a question whose answer would resume nothing — a
@@ -774,7 +808,10 @@ func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttoo
 	ap := m.proposal(decl.Name, callID, rawArgs)
 	var entryID string
 	if m.ledger != nil {
-		id, err := m.recordProposal(ctx, decl, rawArgs, ap, fact)
+		// The classifier arm's ask already carries the SAME derivation
+		// (request() built it with matchedResource), so the record takes it
+		// off the ask rather than deriving it a second time.
+		id, err := m.recordProposal(ctx, decl, rawArgs, ask.Resource, ap, fact)
 		if err != nil {
 			return err
 		}
@@ -940,7 +977,7 @@ func approvalRequestFrom(info *adk.InterruptInfo) (*ApprovalRequest, string) {
 // call runs as a SUBSEQUENT attempt of this same entry. A failed write
 // fails the run: a question whose answer would resume nothing is the hole
 // the thread criterion exists to close.
-func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, ap Approval, fact *classifierFact) (string, error) {
+func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, resource *content.GrantScope, ap Approval, fact *classifierFact) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
 		return "", fmt.Errorf("proposal environment: %w", err)
@@ -962,6 +999,16 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 			"callId":  ap.CallID,
 			"argHash": ap.ArgHash,
 		},
+	}
+	// The resource the call named, derived ONCE (matchedResource, shared
+	// with the scope check, the approval prompt and the visible tool-call
+	// line) and stored with the proposal. A restored turn draws this line
+	// from the record; without the resource on the record the renderer
+	// would have to derive it from the raw arguments a second time, which
+	// is the defect AGENTS.md spends a section on. Absent when the tool
+	// names no resource at all — never an empty scope.
+	if resource != nil {
+		payloadBody["resource"] = resource
 	}
 	// The classifier block (bead nocx-kpy23, criterion 6): when this
 	// escalation was caused by the classifier — suspect, failed, or an
@@ -986,6 +1033,10 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 	if err != nil {
 		return "", fmt.Errorf("proposal submit: %w", err)
 	}
+	// The proposal is a thing the turn caused, exactly as a granted call is:
+	// a person was asked something at this point in the answer, and a
+	// restored turn shows it where it happened.
+	m.noteCause(ctx, res.ID)
 	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
 		EntryID:  res.ID,
 		Attempt:  1, // the escalation itself: recorded, never run
@@ -1020,7 +1071,7 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 // nocx-5dldy) — the entry the escalation recorded, found through the
 // approval store. The returned entryID is what the egress gate's request
 // carries into the store, so the same rule holds for a finding's approval.
-func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, classifierFact *classifierFact) (int64, string, error) {
+func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, resource *content.GrantScope, classifierFact *classifierFact) (int64, string, error) {
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
@@ -1059,6 +1110,13 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		if m.runID != "" {
 			payloadBody["runId"] = m.runID
 		}
+		// The resource the call named, derived ONCE (matchedResource) and
+		// stored so a RESTORED turn can draw this call's line without the
+		// renderer deriving it a second time from the arguments blob. See
+		// recordProposal for the same field on the escalation's own entry.
+		if resource != nil {
+			payloadBody["resource"] = resource
+		}
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own
 		// record carries the verdict and the model, so the audit shows
@@ -1084,6 +1142,13 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 			return 0, "", fmt.Errorf("submit: %w", err)
 		}
 		entryID = res.ID
+		// A new intent is a new cause of this turn. An APPROVED call is
+		// NOT: it runs as a subsequent attempt of the proposal's entry,
+		// which took its position when the person was asked — joining it
+		// again would move it to after everything that followed the
+		// question. (AddCause is idempotent on the pair, so this is belt
+		// and braces rather than the only guard.)
+		m.noteCause(ctx, entryID)
 	}
 	execID, err := m.ledger.StartExecution(ctx, content.StartExecution{
 		EntryID:  entryID,
@@ -1112,6 +1177,34 @@ func (m *policyMiddleware) runWithRetained(decl agenttools.Tool, callID string, 
 		}
 	}
 	return m.run(decl, ctx, capability, rawArgs)
+}
+
+// noteCause joins one entry this turn caused to the turn (nocx-h1l4o): the
+// command a `run` call opened, the action entry of any other call, the
+// proposal entry of an escalation. The position inside the turn is the
+// store's — see content.LedgerRepository.AddCause.
+//
+// A TURN THAT IS NOT THERE JOINS NOTHING. The un-bound caller shape has no
+// turn, and an entry with no cause is recorded with no relation rather than
+// with a guessed one: the reader's answer for a missing relation is plain
+// ledger order and an independent agent block, which is honest, where a
+// guessed parent is not.
+//
+// A FAILED WRITE NEVER FAILS THE CALL, and this is the one deliberate
+// asymmetry with the attempt beside it. The attempt is the RECORD — that the
+// call happened at all — and a record that cannot be written stops the run.
+// The edge is the ARRANGEMENT — where a reader draws it — and its absence is
+// a state the restore already handles. Failing a call to preserve a drawing
+// order would trade a real capability for a cosmetic one, and for the run
+// tool it would fail AFTER the command had already run.
+func (m *policyMiddleware) noteCause(ctx context.Context, causedEntryID string) {
+	if m.ledger == nil || m.turnEntryID == "" || causedEntryID == "" {
+		return
+	}
+	if _, err := m.ledger.AddCause(ctx, m.turnEntryID, causedEntryID); err != nil && m.log != nil {
+		m.log.Warn("agent run: the caused-by relation could not be recorded — this entry will restore in plain ledger order",
+			"turn", m.turnEntryID, "caused", causedEntryID, "error", err)
+	}
 }
 
 // closeAttempt records the outcome on the attempt — the closing event of the
@@ -1188,7 +1281,9 @@ func (m *policyMiddleware) executeInRenderer(ctx context.Context, decl agenttool
 	case *agenttools.ScreenReader:
 		return executeReadScreen(ctx, cap, m.requester, rawArgs)
 	case *agenttools.Runner:
-		return executeRun(ctx, cap, m.requester, rawArgs)
+		return executeRun(ctx, cap, m.requester, rawArgs, func(entryID string) {
+			m.noteCause(ctx, entryID)
+		})
 	default:
 		return "", fmt.Errorf("tool %q: capability is %T, not a renderer-executable capability", decl.Name, capability)
 	}

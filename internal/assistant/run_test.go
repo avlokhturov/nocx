@@ -91,7 +91,7 @@ func TestExecuteRun_SessionOutsideGrantNeverRequests(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 2, 0, 2, "hello\nworld")}
 
-	_, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-b","command":"ls"}`))
+	_, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-b","command":"ls"}`), nil)
 	if err == nil || !strings.Contains(err.Error(), "outside the run's grant") {
 		t.Fatalf("run in session-b error = %v, want the grant refusal", err)
 	}
@@ -99,7 +99,7 @@ func TestExecuteRun_SessionOutsideGrantNeverRequests(t *testing.T) {
 		t.Fatalf("a refused session reached the renderer: %+v", calls)
 	}
 
-	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls -la"}`))
+	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls -la"}`), nil)
 	if err != nil {
 		t.Fatalf("run in session-a failed: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestExecuteRun_WindowIsHonest(t *testing.T) {
 	// three — the window statement tells the model the rest exists.
 	req := &recordingRunner{body: runResolvedBody("e1", new(0), "success", 5, 0, 3, "one\ntwo\nthree")}
 
-	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"seq 5"}`))
+	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"seq 5"}`), nil)
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestExecuteRun_EnteredCarriesNoExitCode(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{body: runResolvedBody("e-ssh", nil, "entered", 1, 0, 1, "deploy@host:~$")}
 
-	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ssh host"}`))
+	out, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ssh host"}`), nil)
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestExecuteRun_FailedOutcomeSurfaces(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{err: errors.New("run: the renderer refused the submission: the agent lane is not prompt-ready")}
 
-	_, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls"}`))
+	_, err := executeRun(context.Background(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls"}`), nil)
 	if err == nil || !strings.Contains(err.Error(), "refused the submission") {
 		t.Fatalf("error = %v, want the renderer's failure sentence", err)
 	}

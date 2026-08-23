@@ -929,6 +929,12 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Approvals:     h.approvals,
 		RunID:         strconv.FormatInt(rc.runID, 10),
 		Attempt:       rc.attempt,
+		// The turn every entry this run causes is joined to (nocx-h1l4o).
+		// It comes off the SAME askRunContext the run id does — both were
+		// set from one SubmitAgentAsk result — so the relation is written
+		// from a fact the backend is already holding, and the renderer
+		// never sends an arrangement of its own.
+		TurnEntryID: rc.entryID,
 	}, func(ev assistant.AskEvent) error {
 		// ONE ordered stream, three notifications (nocx-shxv0, nocx-bshm2,
 		// nocx-s92so). The order between them is the product fact this

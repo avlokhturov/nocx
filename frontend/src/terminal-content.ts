@@ -72,7 +72,7 @@ import {
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { answerTextForEntry, blocksForPane, restoredBody } from './restore-client'
+import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
 import { restoredBlock } from './scrollback/restored-block'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
@@ -3087,13 +3087,27 @@ export class TerminalContent extends BasePaneContent {
     this._pastRestoring = false
     if (blocks.length === 0) return
     const snapshot = fromITheme(getCurrentTheme())
-    const els: HTMLElement[] = []
+    // Every block's body AND its causal flow, in the one round trip pair the
+    // body already cost (restore-client restoredBody). Both are needed
+    // before anything is drawn, because the relation decides WHERE a block
+    // goes and a block cannot be placed while the page is still arriving.
+    const bodies = new Map<string, Awaited<ReturnType<typeof restoredBody>>>()
     for (const b of blocks) {
       // What the entry HAS decides what it is: a terminal body is a
       // command, a text-only body is an assistant turn (nocx-4em1z). One
       // read answers both — the fetch already had to ask for the artifact
       // list.
-      const restored = await restoredBody(this.client, b.entryId)
+      bodies.set(b.entryId, await restoredBody(this.client, b.entryId))
+    }
+    // The arrangement is the LEDGER's (nocx-h1l4o): a turn is followed by
+    // the blocks it caused, in the causal order it assigned. A missing,
+    // unreadable or dangling relation lands on plain ledger order with the
+    // command drawn as an independent agent block — arrangedByCause is the
+    // one place that decides it, and it never guesses a parent.
+    const arranged = arrangedByCause(blocks, (id) => bodies.get(id)?.caused ?? [])
+    const els: HTMLElement[] = []
+    for (const b of arranged) {
+      const restored = bodies.get(b.entryId)
       els.push(
         restoredBlock(
           {
@@ -3106,18 +3120,39 @@ export class TerminalContent extends BasePaneContent {
             durationMs: b.durationMs,
             exitCode: b.exitCode,
             status: b.status,
-            body: restored.body,
-            kind: restored.kind,
+            body: restored?.body ?? null,
+            kind: restored?.kind ?? 'command',
             entryId: b.entryId,
             // Who ran it, carried from the entry's own kind (nocx-4em1z).
             // The block's badge is painted from this, so a command the
             // assistant ran still says so after a restart.
             author: b.author,
+            // The calls this turn made, drawn as the same kit line the live
+            // flow places. An ACTION has no block of its own — it is a line
+            // in the turn's flow — so it reaches the DOM here and nowhere
+            // else. A shell entry the turn caused is a block and was placed
+            // above; it is not also a line.
+            calls: (restored?.caused ?? [])
+              .filter((c) => c.kind === 'action')
+              .map((c) => ({
+                tool: c.intent,
+                // The effect the backend decided. A call whose row carries
+                // none is drawn as an observation rather than not at all:
+                // the line says a call happened, which is the fact, and the
+                // renderer may never derive an effect from a tool name
+                // (ADR-0028 decision 4).
+                effect: c.effect ?? 'observe',
+                resource: c.resource ?? undefined,
+              })),
           },
           snapshot,
           () => this.scrollback?.scrollbackInner ?? document.createElement('div'),
           () => {},
           this.scrollback.snapshotStore,
+          // A session is NAMED, never numbered (nocx-vnzek): the same
+          // derivation the live flow injects, from the pane layer that owns
+          // it.
+          { sessionName: (id) => this.hooks.sessionName?.(id) ?? null },
         ),
       )
     }

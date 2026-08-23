@@ -6,7 +6,14 @@
 // two answers to one question, and they would agree until the day the
 // artifact list changed shape.
 import { describe, it, expect, vi } from 'vitest'
-import { answerTextForEntry, blocksForPane, bodyForBlock, restoredBody } from './restore-client'
+import {
+  answerTextForEntry,
+  arrangedByCause,
+  blocksForPane,
+  bodyForBlock,
+  restoredBody,
+  type RestorableBlock,
+} from './restore-client'
 import type { WSClient } from './ipc'
 
 /** A ledger that answers `ledger.get` with one entry's artifact list and
@@ -80,12 +87,20 @@ describe('restore-client — one helper, two media types', () => {
 describe('restore-client — a block says what it is by what its body is', () => {
   it('a terminal body makes it a command block, and the body is the SGR one', async () => {
     const { client } = fakeLedger(BOTH)
-    expect(await restoredBody(client, 'entry-1')).toEqual({ kind: 'command', body: SGR_BODY })
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'command',
+      body: SGR_BODY,
+      caused: [],
+    })
   })
 
   it('no terminal body makes it an assistant turn, drawn from its text', async () => {
     const { client } = fakeLedger([BOTH[1]])
-    expect(await restoredBody(client, 'entry-1')).toEqual({ kind: 'ask', body: ANSWER_TEXT })
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'ask',
+      body: ANSWER_TEXT,
+      caused: [],
+    })
   })
 
   it('a turn whose answer is gone is still a turn — the kind does not follow the loss', async () => {
@@ -95,14 +110,22 @@ describe('restore-client — a block says what it is by what its body is', () =>
     // lost its answer would say "no longer kept" either way, and inventing
     // prose for an empty entry would repaint every evicted command.
     const { client } = fakeLedger([])
-    expect(await restoredBody(client, 'entry-1')).toEqual({ kind: 'command', body: null })
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'command',
+      body: null,
+      caused: [],
+    })
   })
 
   it('says nothing about the kind it cannot know when the store is unreachable', async () => {
     const client = {
       call: vi.fn(() => Promise.reject(new Error('socket closed'))),
     } as unknown as WSClient
-    expect(await restoredBody(client, 'entry-1')).toEqual({ kind: 'command', body: null })
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'command',
+      body: null,
+      caused: [],
+    })
   })
 })
 
@@ -153,5 +176,161 @@ describe('restore-client — the pane read', () => {
     ])
     const blocks = await blocksForPane(client, 'pane-1')
     expect(blocks.map((b) => b.entryId)).toEqual(['cmd'])
+  })
+})
+
+// ── what a turn caused, and where it goes (nocx-h1l4o) ────────────────────
+//
+// ADR-0036 made a turn one entry and left this: the things a turn caused are
+// separate entries, and until the `caused-by` relation existed a restored tab
+// had nothing to join them with. `ingest_seq` is commit order and explicitly
+// NOT causality (ADR-0019 §2), so the arrangement is read from the relation
+// or it is not read at all.
+describe('restore-client — the causal flow of a restored turn', () => {
+  /** A ledger.get answering with an entry's artifacts AND its causal flow. */
+  function fakeGet(artifacts: Array<{ id: string; mediaType: string }>, caused: unknown[]) {
+    return {
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.get') return Promise.resolve({ artifacts, caused })
+        return Promise.resolve({ body: 'the answer' })
+      }),
+    } as unknown as WSClient
+  }
+
+  const CALL = {
+    entryId: 'act-1',
+    position: 0,
+    kind: 'action',
+    intent: 'files.read',
+    effect: 'observe',
+    resource: { kind: 'path', id: '/repo/a.txt' },
+  }
+
+  it('comes back with the calls the turn made, as the ledger ordered them', async () => {
+    const client = fakeGet(
+      [{ id: 'art-txt', mediaType: 'text/plain' }],
+      [
+        { ...CALL, entryId: 'act-2', position: 1, intent: 'run', effect: 'mutate-destructive' },
+        CALL,
+      ],
+    )
+    const restored = await restoredBody(client, 'turn-1')
+    expect(restored.kind).toBe('ask')
+    // The ORDER is the store's — the wire already sorted by the stored
+    // position, and nothing here re-sorts or re-ranks it.
+    expect(restored.caused.map((c) => c.intent)).toEqual(['run', 'files.read'])
+    expect(restored.caused[1].resource).toEqual({ kind: 'path', id: '/repo/a.txt' })
+  })
+
+  it('a turn that caused nothing comes back with an empty flow, not a missing one', async () => {
+    const client = fakeGet([{ id: 'art-txt', mediaType: 'text/plain' }], [])
+    expect((await restoredBody(client, 'turn-1')).caused).toEqual([])
+  })
+
+  it('a store that cannot be asked degrades to no relation at all', async () => {
+    const client = {
+      call: vi.fn(() => Promise.reject(new Error('socket closed'))),
+    } as unknown as WSClient
+    expect(await restoredBody(client, 'turn-1')).toEqual({
+      kind: 'command',
+      body: null,
+      caused: [],
+    })
+  })
+
+  it('a wire that carries no causal flow at all is read as none, never as a guess', async () => {
+    // The field is required by the contract, so this is the defensive read
+    // for a backend that is older than the renderer — and the answer is the
+    // degrade, never an invented parent.
+    const client = {
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.get')
+          return Promise.resolve({ artifacts: [{ id: 'a', mediaType: 'text/plain' }] })
+        return Promise.resolve({ body: 'x' })
+      }),
+    } as unknown as WSClient
+    expect((await restoredBody(client, 'turn-1')).caused).toEqual([])
+  })
+})
+
+// ── the arrangement, which is the relation's and nothing else's ───────────
+describe('restore-client — blocks arranged by the relation', () => {
+  const block = (entryId: string) =>
+    ({
+      entryId,
+      command: entryId,
+      cwd: '/',
+      host: '',
+      status: 'success' as const,
+      durationMs: 0,
+      exitCode: 0,
+      author: 'shell' as const,
+    }) satisfies RestorableBlock
+
+  const cause = (entryId: string, position: number) => ({
+    entryId,
+    position,
+    kind: 'shell' as const,
+    intent: entryId,
+    effect: null,
+    resource: null,
+  })
+
+  it('places a turn’s commands after it, in the causal order it assigned', () => {
+    // Ledger order interleaves the two turns' commands; the relation says
+    // which belongs to which, and that is the only thing consulted.
+    const blocks = [block('turn-a'), block('cmd-b1'), block('turn-b'), block('cmd-a1')]
+    const arranged = arrangedByCause(blocks, (id) => {
+      if (id === 'turn-a') return [cause('cmd-a1', 0)]
+      if (id === 'turn-b') return [cause('cmd-b1', 0)]
+      return []
+    })
+    expect(arranged.map((b) => b.entryId)).toEqual(['turn-a', 'cmd-a1', 'turn-b', 'cmd-b1'])
+  })
+
+  it('keeps the causal order of several commands one turn ran', () => {
+    const blocks = [block('turn'), block('second'), block('first')]
+    const arranged = arrangedByCause(blocks, (id) =>
+      id === 'turn' ? [cause('first', 0), cause('second', 1)] : [],
+    )
+    expect(arranged.map((b) => b.entryId)).toEqual(['turn', 'first', 'second'])
+  })
+
+  // ── criterion 4: the three ways the relation is not there ──────────────
+
+  it('with NO relation, the order is plain ledger order and nothing is attached', () => {
+    const blocks = [block('turn'), block('cmd')]
+    const arranged = arrangedByCause(blocks, () => [])
+    expect(arranged.map((b) => b.entryId)).toEqual(['turn', 'cmd'])
+  })
+
+  it('an UNREADABLE relation is the same answer as none — never a guessed parent', () => {
+    // The read failed, so every entry answers with no causes. The command
+    // must NOT be attached to the turn that happens to sit above it.
+    const blocks = [block('turn'), block('cmd')]
+    const arranged = arrangedByCause(blocks, () => [])
+    expect(arranged.map((b) => b.entryId)).toEqual(['turn', 'cmd'])
+  })
+
+  it('a DANGLING cause names an entry this page does not hold, and is skipped', () => {
+    // Retention evicted it, or it is older than the page limit. The turn
+    // keeps its other causes and the page keeps everything it does hold.
+    const blocks = [block('turn'), block('kept')]
+    const arranged = arrangedByCause(blocks, (id) =>
+      id === 'turn' ? [cause('evicted', 0), cause('kept', 1)] : [],
+    )
+    expect(arranged.map((b) => b.entryId)).toEqual(['turn', 'kept'])
+  })
+
+  it('a relation that points in a circle still emits every block exactly once', () => {
+    // Not reachable through the store — AddCause assigns one direction —
+    // but a reader that could loop on a malformed page would hang the tab,
+    // and a hung tab is a worse answer than an odd order.
+    const blocks = [block('a'), block('b')]
+    const arranged = arrangedByCause(blocks, (id) =>
+      id === 'a' ? [cause('b', 0)] : [cause('a', 0)],
+    )
+    expect(arranged.map((b) => b.entryId).sort()).toEqual(['a', 'b'])
+    expect(arranged).toHaveLength(2)
   })
 })

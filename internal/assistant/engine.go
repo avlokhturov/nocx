@@ -340,7 +340,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			if p.Classifier != nil {
 				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(*p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.Requester, classifier, func(call ToolCall) error {
+			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 				return emit(AskEvent{Kind: AskToolCall, Call: &call})
 			})
 			if err != nil {

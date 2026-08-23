@@ -340,7 +340,16 @@ type runBodyWire struct {
 // The capability check happens BEFORE the request — naming a session
 // outside the grant is refused here and no broker request ever leaves
 // (criterion 4, asserted by trying).
-func executeRun(ctx context.Context, runner *agenttools.Runner, requester RendererRequester, args json.RawMessage) (string, error) {
+//
+// caused is called with the entry id the RESOLUTION carried, once, as soon
+// as it is known (nocx-h1l4o). It exists so the join between the command and
+// the turn that ran it is made by the backend, from the id the renderer
+// already answers with — the renderer sends no arrangement of its own, the
+// same rule ledger.open states for paneId. It is a parameter rather than a
+// second decode of this function's marshalled return, because the entry id
+// is decoded exactly once, here, where the wire shape is owned. Nil for a
+// caller that is not recording causes.
+func executeRun(ctx context.Context, runner *agenttools.Runner, requester RendererRequester, args json.RawMessage, caused func(entryID string)) (string, error) {
 	var p struct {
 		SessionID string `json:"sessionId"`
 		Command   string `json:"command"`
@@ -369,6 +378,13 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	}
 	if b.EntryID == "" {
 		return "", errors.New("run: the renderer's resolution carried no entry id")
+	}
+	// The command exists now and is joined now — before the window is
+	// checked, because a window this function refuses is a corrupt
+	// resolution about a command that really ran, and a block with no place
+	// in its turn is exactly what this closes.
+	if caused != nil {
+		caused(b.EntryID)
 	}
 
 	// The window: run asks for the whole output — [0, total) — and the

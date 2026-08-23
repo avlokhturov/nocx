@@ -39,8 +39,22 @@ type fakeLedger struct {
 	log         []string
 	failStart   bool
 	failSubmit  bool
+	failCause   bool
 	nextExec    int64
 	submissions []fakeSubmission
+	// causes is every (turn, caused) pair AddCause was asked for, in call
+	// order — the relation nocx-h1l4o records. The fake assigns positions
+	// the way the store does (one counter per turn) so a test can assert
+	// the causal index without an sqlite file.
+	causes []fakeCause
+}
+
+// fakeCause is one recorded caused-by: which turn, which entry it caused,
+// and the position inside that turn it took.
+type fakeCause struct {
+	turn     string
+	caused   string
+	position int
 }
 
 // fakeSubmission is one Submit the ledger recorded: the intent and the
@@ -93,6 +107,34 @@ func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.Fin
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string) (int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log = append(f.log, "cause:"+causedID)
+	if f.failCause {
+		return 0, errors.New("fake ledger: the relation could not be recorded")
+	}
+	for _, existing := range f.causes {
+		if existing.turn == turnID && existing.caused == causedID {
+			return existing.position, nil // idempotent on the pair, like the store
+		}
+	}
+	pos := 0
+	for _, existing := range f.causes {
+		if existing.turn == turnID {
+			pos++
+		}
+	}
+	f.causes = append(f.causes, fakeCause{turn: turnID, caused: causedID, position: pos})
+	return pos, nil
+}
+
+func (f *fakeLedger) recordedCauses() []fakeCause {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeCause(nil), f.causes...)
 }
 
 func (f *fakeLedger) calls() []string {
@@ -228,12 +270,20 @@ func middlewareForWithRequester(t *testing.T, grant content.Grant, ledger Attemp
 // middlewareForWithKnown is the construction seam the egress tests use: the
 // pipeline with an explicit vault-comparison answer.
 func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial) *policyMiddleware {
+	return middlewareForTurn(t, grant, ledger, approvals, requester, known, "")
+}
+
+// middlewareForTurn is the construction seam with the TURN the run's causes
+// join to (nocx-h1l4o). Every other helper here passes "" — the un-bound
+// caller shape, which joins nothing — so the pipeline these tests drive is
+// the same one except where a test is about the relation.
+func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string) *policyMiddleware {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(grant, reg, ledger, approvals, known, "run-1", 1, requester, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

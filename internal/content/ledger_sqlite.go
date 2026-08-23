@@ -1136,6 +1136,118 @@ func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 	})
 }
 
+// AddCause records one `caused-by` edge from the caused entry to the turn
+// that caused it, taking the next causal position INSIDE that turn, and
+// returns the position it took.
+//
+// Read and write are one transaction on purpose. The position is derived
+// from what is already stored — the highest position any cause of this turn
+// holds — so an in-memory counter is not merely unnecessary but wrong: the
+// approval resume builds a fresh pipeline for a turn that already has
+// causes, and a counter that started at zero there would stack the resumed
+// call on top of the calls before it. Reading the maximum in a separate
+// statement would have the same fault against a concurrent writer, one
+// transaction narrower.
+func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (int, error) {
+	pos := 0
+	err := s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// The replay: this pair is already a cause of this turn, so it
+		// keeps the position it took the first time and nothing is written.
+		var existing string
+		err = tx.QueryRowContext(ctx,
+			`SELECT payload FROM edges WHERE from_id = ? AND to_id = ? AND rel = ?`,
+			causedID, turnID, string(RelCausedBy)).Scan(&existing)
+		switch {
+		case err == nil:
+			var p CausePayload
+			if err = json.Unmarshal([]byte(existing), &p); err != nil {
+				return fmt.Errorf("content: caused-by %s -> %s: stored position: %w", causedID, turnID, err)
+			}
+			pos = p.Pos
+			return tx.Commit()
+		case !errors.Is(err, sql.ErrNoRows):
+			return err
+		}
+
+		var highest sql.NullInt64
+		if err = tx.QueryRowContext(ctx,
+			`SELECT MAX(json_extract(payload, '$.pos')) FROM edges WHERE to_id = ? AND rel = ?`,
+			turnID, string(RelCausedBy)).Scan(&highest); err != nil {
+			return err
+		}
+		if highest.Valid {
+			pos = int(highest.Int64) + 1
+		}
+		body, err := json.Marshal(CausePayload{Pos: pos})
+		if err != nil {
+			return err
+		}
+		// Both ids are foreign keys, so an entry that is not there is
+		// refused by the store rather than recorded as an edge that points
+		// at nothing.
+		if _, err = tx.ExecContext(ctx,
+			`INSERT INTO edges (from_id, to_id, rel, payload) VALUES (?, ?, ?, ?)`,
+			causedID, turnID, string(RelCausedBy), string(body)); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+	if err != nil {
+		return 0, err
+	}
+	return pos, nil
+}
+
+// Caused returns everything entryID caused, in stored position order, each
+// row resolved into what a reader draws it with: the caused entry's kind and
+// intent, and — for an action entry — the effect the gate decided and the
+// resource the call named, read back off that row's own payload.
+//
+// ONE statement, joining edges to entries: the alternative is handing the
+// caller a list of ids to resolve itself, which is the same arrangement
+// owned twice (AD-8). Ordering is by the stored position and then by id, so
+// a page is stable even if a position were ever duplicated by a hand-written
+// row.
+func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEntry, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT e.from_id, COALESCE(json_extract(e.payload, '$.pos'), 0), n.kind, n.intent, n.payload
+		 FROM edges e JOIN entries n ON n.id = e.from_id
+		 WHERE e.to_id = ? AND e.rel = ?
+		 ORDER BY json_extract(e.payload, '$.pos'), e.from_id`,
+		entryID, string(RelCausedBy))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]CausedEntry, 0, 4)
+	for rows.Next() {
+		var c CausedEntry
+		var payload string
+		if err := rows.Scan(&c.EntryID, &c.Position, &c.Kind, &c.Intent, &payload); err != nil {
+			return nil, err
+		}
+		// The tool facts belong to an ACTION row and are read from nowhere
+		// else: a shell command a turn ran has no effect class and names no
+		// resource, and inventing one for it would be the reader guessing.
+		if c.Kind == EntryAction {
+			var facts ActionFacts
+			if err := json.Unmarshal([]byte(payload), &facts); err != nil {
+				return nil, fmt.Errorf("content: action %s: payload: %w", c.EntryID, err)
+			}
+			c.Effect = facts.Effect
+			c.Resource = facts.Resource
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 // Edges returns every edge touching entryID, in either direction.
 func (s *sqliteContent) Edges(ctx context.Context, entryID string) ([]Edge, error) {
 	rows, err := s.db.QueryContext(ctx,
