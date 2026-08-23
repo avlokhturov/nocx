@@ -302,6 +302,38 @@ func TestClearWindowClosesEveryLeftoverAndKeepsWhatComesAfter(t *testing.T) {
 	}
 }
 
+func TestSandboxGrantRollbackAllowsRetryAfterLaunchFailure(t *testing.T) {
+	ctx := t.Context()
+	db, _, _ := newLedgerAt(t)
+	layout := db.Layout()
+
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-sandbox-retry", Name: "sandbox retry"},
+		aTab("tab-sandbox-retry", "ws-sandbox-retry"),
+		aPane("pane-sandbox-retry", "tab-sandbox-retry", "/workspace")); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	grant := content.SandboxGrant{
+		PaneID: "pane-sandbox-retry", Version: 1, IssuedAt: 42,
+		Workspace: "/workspace", Payload: `{}`,
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); !errors.Is(err, content.ErrSandboxGrantExists) {
+		t.Fatalf("duplicate InsertSandboxGrant error = %v, want ErrSandboxGrantExists", err)
+	}
+	if err := layout.RemoveSandboxGrant(ctx, grant.PaneID); err != nil {
+		t.Fatalf("RemoveSandboxGrant: %v", err)
+	}
+	if granted, err := layout.SandboxGrantExists(ctx, grant.PaneID); err != nil || granted {
+		t.Fatalf("SandboxGrantExists after rollback = %v, %v; want false, nil", granted, err)
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); err != nil {
+		t.Fatalf("retry InsertSandboxGrant: %v", err)
+	}
+}
+
 // A granted pane is recorded so its blocks and workspace provenance have a
 // durable anchor while it is alive, but its authority cannot be silently
 // re-issued in the next backend incarnation.

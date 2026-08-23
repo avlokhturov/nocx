@@ -458,6 +458,9 @@ type LayoutRepository interface {
 	// InsertSandboxGrant records the immutable authority minted for an open
 	// pane. The pane's UNIQUE grant makes a second sandbox launch fail closed.
 	InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error
+	// RemoveSandboxGrant rolls back a grant only when enforcement failed to
+	// start. A live sandbox grant remains immutable.
+	RemoveSandboxGrant(ctx context.Context, paneID string) error
 	// SandboxGrantExists reports whether an open pane already carries a grant.
 	// A closed or unknown pane is ErrNoSuchPane.
 	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)

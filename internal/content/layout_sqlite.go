@@ -88,6 +88,9 @@ var (
 	// ErrNoSuchPane: a move naming a pane no row carries. Reported rather
 	// than treated as a no-op, so a move never half-applies.
 	ErrNoSuchPane = errors.New("content: no such pane")
+	// ErrSandboxGrantExists means the pane already carries the immutable
+	// authority for a sandbox incarnation.
+	ErrSandboxGrantExists = errors.New("content: sandbox grant already exists")
 	// ErrCrossWorkspaceMove: whether a pane may be dragged between
 	// workspaces is open (design §12 q. 5) and the atomicity model for a
 	// subtree move is undesigned; the inherited requirement is that a
@@ -1252,6 +1255,16 @@ func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGra
 		return ErrClosed
 	}
 	return s.run(ctx, func(ctx context.Context) error {
+		var exists int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sandbox_grants WHERE pane_id = ?)`,
+			grant.PaneID,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			return fmt.Errorf("%w: %s", ErrSandboxGrantExists, grant.PaneID)
+		}
 		result, err := s.db.ExecContext(ctx,
 			`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
 			 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
@@ -1267,6 +1280,16 @@ func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGra
 			return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
 		}
 		return nil
+	})
+}
+
+func (s *sqliteContent) RemoveSandboxGrant(ctx context.Context, paneID string) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM sandbox_grants WHERE pane_id = ?`, paneID)
+		return err
 	})
 }
 

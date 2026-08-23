@@ -459,6 +459,7 @@ async function main() {
     setActiveSandboxed(tm.activePaneSandboxed())
   }
   let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
+  const [sandboxConversionInFlight, setSandboxConversionInFlight] = createSignal(false)
   const currentShieldState = () =>
     shieldState({
       enabled: sandboxEnabledLive(),
@@ -862,7 +863,7 @@ async function main() {
         icon: ShieldIcon,
         selected: () => activeSandboxed(),
         hidden: () => currentShieldState().kind === 'hidden',
-        disabled: () => currentShieldState().kind !== 'ready',
+        disabled: () => sandboxConversionInFlight() || currentShieldState().kind !== 'ready',
         onActivate: () => void convertActiveTabToSandboxed(),
       },
     ],
@@ -1022,68 +1023,87 @@ async function main() {
   }
 
   convertActiveTabToSandboxed = async (): Promise<void> => {
+    if (sandboxConversionInFlight()) return
     const ready = currentShieldState()
     if (ready.kind !== 'ready') return
     const source = tm.activeOrigin()
     const oldPane = source ? tm.paneOf(source.paneId) : undefined
     if (!source || !oldPane || !tm.tabOf(source.paneId)) return
-    if (ready.action === 'remove') {
-      const transcript = tm.captureConversionTranscript(oldPane.id)
-      const made = tm.newLocalPaneAt(ready.workspace)
-      if (
-        (await made.created) &&
-        (await tm.installConversionTranscript(
-          made.pane.id,
-          transcript,
-          'Sandbox removed — new shell',
-        ))
-      ) {
+
+    setSandboxConversionInFlight(true)
+    let conversionContinues = false
+    try {
+      if (ready.action === 'remove') {
+        const transcript = tm.captureConversionTranscript(oldPane.id)
+        const made = tm.newLocalPaneAt(ready.workspace)
+        const created = await made.created
+        const installed =
+          created &&
+          (await tm.installConversionTranscript(
+            made.pane.id,
+            transcript,
+            'Sandbox removed — new shell',
+          ))
+        if (!installed) {
+          if (created) void tm.closePane(made.pane)
+          return
+        }
         tm.replaceTabPosition(oldPane.id, made.pane.id)
         void tm.closePane(oldPane)
+        return
       }
-      return
-    }
 
-    let state: { enabled: boolean; status: SandboxStatus | null }
-    try {
-      state = await getSandboxState()
-    } catch (err) {
-      reportSandboxOpenError(err instanceof Error ? err.message : 'sandbox status unavailable')
-      return
-    }
-    if (!state.enabled) return
-    if (!state.status?.available) {
-      reportSandboxOpenError(
-        `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
-      )
-      return
-    }
-    await openSandboxedShell(
-      {
-        getSnapshot: () => profileClient.getSnapshot(),
-        openDirectory: () => dialogClient.openDirectoryDialog(),
-        showPermissions: showSandboxPermissions,
-        newSandboxedTab: (_workspace, launch) => {
-          const transcript = tm.captureConversionTranscript(oldPane.id)
-          const made = tm.newSandboxedPane(ready.workspace, launch)
-          void (async () => {
-            if (
-              (await made.created) &&
-              (await tm.installConversionTranscript(
-                made.pane.id,
-                transcript,
-                'Sandbox enabled — new shell',
-              ))
-            ) {
-              tm.replaceTabPosition(oldPane.id, made.pane.id)
-              void tm.closePane(oldPane)
-            }
-          })()
+      let state: { enabled: boolean; status: SandboxStatus | null }
+      try {
+        state = await getSandboxState()
+      } catch (err) {
+        reportSandboxOpenError(err instanceof Error ? err.message : 'sandbox status unavailable')
+        return
+      }
+      if (!state.enabled) return
+      if (!state.status?.available) {
+        reportSandboxOpenError(
+          `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
+        )
+        return
+      }
+      await openSandboxedShell(
+        {
+          getSnapshot: () => profileClient.getSnapshot(),
+          openDirectory: () => dialogClient.openDirectoryDialog(),
+          showPermissions: showSandboxPermissions,
+          newSandboxedTab: (_workspace, launch) => {
+            conversionContinues = true
+            const transcript = tm.captureConversionTranscript(oldPane.id)
+            const made = tm.newSandboxedPane(ready.workspace, launch)
+            void (async () => {
+              try {
+                const created = await made.created
+                const installed =
+                  created &&
+                  (await tm.installConversionTranscript(
+                    made.pane.id,
+                    transcript,
+                    'Sandbox enabled — new shell',
+                  ))
+                if (!installed) {
+                  if (created) void tm.closePane(made.pane)
+                  return
+                }
+                tm.replaceTabPosition(oldPane.id, made.pane.id)
+                void tm.closePane(oldPane)
+              } finally {
+                setSandboxConversionInFlight(false)
+              }
+            })()
+          },
+          reportError: reportSandboxOpenError,
         },
-        reportError: reportSandboxOpenError,
-      },
-      { workspace: ready.workspace },
-    )
+        { workspace: ready.workspace },
+      )
+    } finally {
+      if (!conversionContinues) setSandboxConversionInFlight(false)
+    }
   }
 
   const qcProviders: QuickConnectProvider[] = [

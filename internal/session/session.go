@@ -173,6 +173,9 @@ type Config struct {
 	// started. A failure aborts launch, preserving the grant-before-enforcement
 	// boundary.
 	SandboxPrepared func(*sandbox.PreparedCommand) error
+	// SandboxStartFailed rolls back the recorded grant if enforcement cannot
+	// reach readiness after SandboxPrepared succeeds.
+	SandboxStartFailed func() error
 }
 
 type PTYFactory interface {
@@ -495,15 +498,16 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 		var perr error
 		pt, perr = r.ptf.NewPTY(ctx, pty.Config{
-			Cwd:             cfg.Cwd,
-			Cols:            cfg.Cols,
-			Rows:            cfg.Rows,
-			XPixel:          cfg.XPixel,
-			YPixel:          cfg.YPixel,
-			Enhanced:        cfg.Enhanced,
-			SessionID:       string(id),
-			Sandbox:         sandboxReq,
-			SandboxPrepared: cfg.SandboxPrepared,
+			Cwd:                cfg.Cwd,
+			Cols:               cfg.Cols,
+			Rows:               cfg.Rows,
+			XPixel:             cfg.XPixel,
+			YPixel:             cfg.YPixel,
+			Enhanced:           cfg.Enhanced,
+			SessionID:          string(id),
+			Sandbox:            sandboxReq,
+			SandboxPrepared:    cfg.SandboxPrepared,
+			SandboxStartFailed: cfg.SandboxStartFailed,
 		})
 		if perr != nil {
 			return nil, fmt.Errorf("open session: %w", perr)

@@ -128,6 +128,7 @@ type paneWorkspaces interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
 	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
 	InsertSandboxGrant(ctx context.Context, grant content.SandboxGrant) error
+	RemoveSandboxGrant(ctx context.Context, paneID string) error
 }
 
 // workspaceForOpen derives the workspace this session's ack will carry.
@@ -238,6 +239,12 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 	if isLineageRefusal(err) {
 		h.log.Warn("open refused: parent edge", "error", err)
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
+		return
+	}
+	if errors.Is(err, content.ErrSandboxGrantExists) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: sandbox pane already granted",
+		})
 		return
 	}
 	var statusErr *sandbox.StatusError
@@ -409,9 +416,14 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		}
 		granted, grantErr := h.panes.SandboxGrantExists(ctx, params.PaneID)
 		if grantErr != nil {
-			_ = r.TryError(req.ID, RPCError{
-				Code: -32602, Message: "Invalid params: sandbox requires an open pane",
-			})
+			if errors.Is(grantErr, content.ErrNoSuchPane) {
+				_ = r.TryError(req.ID, RPCError{
+					Code: -32602, Message: "Invalid params: sandbox requires an open pane",
+				})
+			} else {
+				h.log.Error("sandbox grant lookup failed")
+				_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "Internal error"})
+			}
 			return
 		}
 		if granted {
@@ -488,6 +500,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				PaneID: params.PaneID, Version: 1, IssuedAt: time.Now().UnixMilli(),
 				Workspace: sandboxReq.Workspace, Payload: string(payload),
 			})
+		}
+		cfg.SandboxStartFailed = func() error {
+			return h.panes.RemoveSandboxGrant(context.WithoutCancel(ctx), params.PaneID)
 		}
 	}
 	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a

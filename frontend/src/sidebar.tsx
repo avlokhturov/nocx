@@ -399,7 +399,7 @@ function SidebarSolid(props: SidebarSolidProps) {
   const handleKeyDown = (e: KeyboardEvent) => {
     const toolbar = props.bar.querySelector('[role="toolbar"]')
     if (!toolbar) return
-    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button')]
+    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button:not(:disabled)')]
     if (buttons.length === 0) return
 
     const currentIdx = buttons.findIndex((b) => b.getAttribute('tabindex') === '0')
@@ -513,7 +513,7 @@ function SidebarSolid(props: SidebarSolidProps) {
                   ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
                   selected={action.selected?.() === true}
                   disabled={action.disabled?.() === true}
-                  tabIndex={action.id === tabbableId() ? 0 : -1}
+                  tabIndex={action.disabled?.() !== true && action.id === tabbableId() ? 0 : -1}
                   onClick={() => handleActionClick(action)}
                 >
                   <action.icon />

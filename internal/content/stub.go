@@ -321,6 +321,11 @@ func (s *layoutStub) InsertSandboxGrant(_ context.Context, grant SandboxGrant) e
 	return ErrNotImplemented
 }
 
+func (s *layoutStub) RemoveSandboxGrant(_ context.Context, paneID string) error {
+	s.log.Info("content stub: LayoutRepository.RemoveSandboxGrant", "pane", paneID)
+	return ErrNotImplemented
+}
+
 func (s *layoutStub) SandboxGrantExists(_ context.Context, paneID string) (bool, error) {
 	s.log.Info("content stub: LayoutRepository.SandboxGrantExists", "pane", paneID)
 	return false, ErrNotImplemented
