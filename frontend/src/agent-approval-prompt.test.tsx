@@ -72,6 +72,15 @@ function recordDecisions() {
 
 const SID = '9bb9a7602c27e8ba0741972c7049b54b'
 
+/** What a pane answers about itself. `cwd`/`cwdVerified` travel together
+ *  (nocx-n7xha): a cwd an OSC 7 report confirmed is a claim, the one a
+ *  session was opened with is a guess, and this window is the one place a
+ *  guess printed as fact costs most. */
+type Where = { tab: string; machine: string; cwd: string; cwdVerified: boolean }
+
+/** A local pane in a directory the shell has confirmed. */
+const HERE: Where = { tab: 'home/dev', machine: '', cwd: '/home/dev', cwdVerified: true }
+
 describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek)', () => {
   afterEach(cleanup)
 
@@ -85,31 +94,58 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
   it("says which pane the call reaches, in the pane's own name", () => {
     const r = renderPrompt({
       ask: SESSION_ASK,
-      sessionWhere: (id: string) => (id === SID ? { tab: 'home/dev', machine: '' } : null),
+      sessionWhere: (id: string) => (id === SID ? HERE : null),
     })
-    expect(r.getByText(/home\/dev/)).toBeTruthy()
+    // The pane's own name, not the 32-hex handle the wire carried.
+    expect(r.container.textContent ?? '').toContain('home/dev')
+    expect(r.container.textContent ?? '').not.toContain(SID)
   })
 
-  it('leaves the proposed arguments verbatim — the blob is what the model asked for', () => {
-    const { container } = renderPrompt({
-      ask: SESSION_ASK,
-      sessionWhere: () => ({ tab: 'home/dev', machine: '' }),
-    })
-    const code = container.querySelector('.ui-code-block')
-    expect(code?.textContent).toBe(`{"sessionId":"${SID}"}`)
+  /**
+   * CHANGED DELIBERATELY (nocx-n7xha). This used to assert the verbatim
+   * blob — `{"sessionId":"9bb9a760…"}` — on the grounds that a paraphrase is
+   * honest only while it is exhaustive, which is right and is not what
+   * changed. What changed is the conclusion that exhaustive means per-tool:
+   * a renderer listing EVERY parsed argument as a named row is exhaustive
+   * by construction, so the blob is no longer the price of honesty here.
+   * And for readScreen the blob's only content IS the id two beads took
+   * off every other surface, so it added nothing to the sentence beneath
+   * it while putting the id back on the one surface that asks a person to
+   * decide.
+   */
+  it('renders the session argument as the pane, never as the id and never as a blob', () => {
+    const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
+    expect(container.querySelector('.ui-code-block')).toBeNull()
+    const names = Array.from(container.querySelectorAll('.ui-fact-list__name')).map(
+      (n) => n.textContent,
+    )
+    expect(names).toContain('sessionId')
+    expect(container.textContent ?? '').toContain('home/dev on this machine')
+    expect(container.textContent ?? '').not.toContain(SID)
   })
 
-  it('says nothing extra when no pane can name the session', () => {
-    const r = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => null })
-    expect(r.queryByText(/This call reaches/)).toBeNull()
+  it('still accounts for the session when no pane can name it — without the id', () => {
+    const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => null })
+    const names = Array.from(container.querySelectorAll('.ui-fact-list__name')).map(
+      (n) => n.textContent,
+    )
+    // Nothing is dropped: the argument is still a row. But an id nothing on
+    // screen can name is still an id, so it stays off the surface.
+    expect(names).toEqual(['sessionId'])
+    expect(container.textContent ?? '').not.toContain(SID)
+    expect(container.textContent ?? '').toContain('no tab in this window holds')
   })
 
-  it('says nothing extra for a path — a path is the person’s own word', () => {
-    const r = renderPrompt({
-      ask: POLICY_ASK,
-      sessionWhere: () => ({ tab: 'home/dev', machine: '' }),
-    })
-    expect(r.queryByText(/This call reaches/)).toBeNull()
+  it('says nothing about a tab or a directory for a path — a path is the person’s own word', () => {
+    const { container } = renderPrompt({ ask: POLICY_ASK, sessionWhere: () => HERE })
+    const text = container.textContent ?? ''
+    expect(text).not.toContain('home/dev')
+    expect(text).not.toContain('working directory')
+    // The path argument itself is still a row, named as the model named it.
+    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
+      (r) => r.textContent,
+    )
+    expect(rows).toEqual(['path/repo/a.txt'])
   })
 })
 
@@ -138,7 +174,7 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
     resource: { kind: 'session', id: SID },
   }
 
-  const LOCAL = { tab: 'home/dev', machine: '' }
+  const LOCAL: Where = HERE
 
   it('reads as a sentence: the command, the machine and the tab', () => {
     const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
@@ -158,7 +194,12 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
   it('names the machine the pane is actually talking to', () => {
     const { container } = renderPrompt({
       ask: RUN_ASK,
-      sessionWhere: () => ({ tab: 'srv-01', machine: 'deploy@srv-01.example.com' }),
+      sessionWhere: () => ({
+        tab: 'srv-01',
+        machine: 'deploy@srv-01.example.com',
+        cwd: '/srv/app',
+        cwdVerified: true,
+      }),
     })
     const text = container.textContent ?? ''
     expect(text).toContain('deploy@srv-01.example.com')
@@ -175,14 +216,28 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
   })
 
-  it('falls back to the verbatim blob when the proposal carries an argument it has no words for', () => {
+  /**
+   * CHANGED DELIBERATELY (nocx-n7xha). njn8s put the blob back whenever
+   * `run` carried a third argument, because the sentence had words for two
+   * and dropping the third silently would have been worse than a blob. The
+   * sentence is now accompanied by a row per argument it does not itself
+   * state, so the third argument is SHOWN rather than dropped — which is
+   * what the fallback was protecting, obtained without giving up the
+   * sentence and without putting the session id back on screen.
+   */
+  it('shows an argument it has no words for as a row, and keeps the sentence', () => {
     const args = `{"command":"df -h","sessionId":"${SID}","timeoutMs":5000}`
     const { container } = renderPrompt({
       ask: { ...RUN_ASK, arguments: args },
       sessionWhere: () => LOCAL,
     })
-    expect(container.querySelector('.ui-code-block')?.textContent).toBe(args)
-    expect(container.textContent ?? '').toContain('with these arguments')
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
+      (r) => r.textContent,
+    )
+    expect(rows).toContain('timeoutMs5000')
+    expect(container.textContent ?? '').not.toContain(SID)
+    expect(container.textContent ?? '').not.toContain('with these arguments')
   })
 
   it('falls back to the verbatim blob when the arguments are not an object at all', () => {
@@ -193,7 +248,7 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('not json')
   })
 
-  it('names the machine on the location sentence of every other tool too', () => {
+  it('names the machine for every other tool too — as the session row (nocx-n7xha)', () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
@@ -201,12 +256,22 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
         arguments: `{"sessionId":"${SID}"}`,
         resource: { kind: 'session', id: SID },
       },
-      sessionWhere: () => ({ tab: 'srv-01', machine: 'deploy@srv-01.example.com' }),
+      sessionWhere: () => ({
+        tab: 'srv-01',
+        machine: 'deploy@srv-01.example.com',
+        cwd: '/srv/app',
+        cwdVerified: true,
+      }),
     })
-    const text = container.textContent ?? ''
-    expect(text).toContain('This call reaches')
-    expect(text).toContain('srv-01')
-    expect(text).toContain('deploy@srv-01.example.com')
+    // Where the call lands is stated ONCE. `run` states it in its lead
+    // sentence; every other tool states it on the row for the argument
+    // that names the session — never both, which would be two surfaces
+    // owning one fact.
+    expect(container.textContent ?? '').not.toContain('This call reaches')
+    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
+      (r) => r.textContent,
+    )
+    expect(rows[0]).toBe('sessionIdsrv-01 on deploy@srv-01.example.com')
   })
 
   it('does not say the assistant WANTS to run a command that has already run', () => {
@@ -230,13 +295,171 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
   })
 })
 
+/**
+ * The window states FACTS, not JSON (nocx-n7xha).
+ *
+ * What a person saw: a 32-hex session id printed back inside a JSON blob,
+ * above a sentence that named the tab the blob was identifying; no word
+ * anywhere about which directory the call lands in; and two of five
+ * paragraphs spent explaining policy.
+ *
+ * Three properties are asserted here and they are the whole bead:
+ *
+ *  - EXHAUSTIVE BY CONSTRUCTION. Every parsed argument is a named row, for
+ *    every tool, including one this surface has never heard of. That is
+ *    what makes dropping the blob honest — njn8s's rule survives, it is
+ *    just no longer satisfied per-tool.
+ *  - THE ID IS GONE. A value naming a resource the window has already named
+ *    renders as the product's name for it, and the handle appears on no
+ *    surface of the window.
+ *  - A GUESS IS NOT A FACT. The working directory is named, and a cwd no
+ *    OSC 7 report confirmed says so (AD-5). An approval window that printed
+ *    a guess as fact would lie at the moment lying is most expensive.
+ */
+describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
+  afterEach(cleanup)
+
+  const SESSION_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'readScreen',
+    arguments: `{"sessionId":"${SID}"}`,
+    resource: { kind: 'session', id: SID },
+  }
+
+  /** Every row as `name` + `value`, in the order the window reads. The
+   *  note lives inside the value cell (it qualifies that value and must not
+   *  be able to drift to another row), so it is subtracted here. */
+  function rows(container: HTMLElement): Array<[string, string]> {
+    return Array.from(container.querySelectorAll('.ui-fact-list__row')).map((r) => {
+      const value = r.querySelector('.ui-fact-list__value')?.textContent ?? ''
+      const note = r.querySelector('.ui-fact-list__note')?.textContent ?? ''
+      return [r.querySelector('.ui-fact-list__name')?.textContent ?? '', value.replace(note, '')]
+    })
+  }
+
+  it('shows every parsed argument as a named row, including ones it has no words for', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...SESSION_ASK,
+        arguments: `{"sessionId":"${SID}","region":{"start":0,"end":24},"why":"because"}`,
+      },
+      sessionWhere: () => HERE,
+    })
+    const named = rows(container).map(([name]) => name)
+    // Nothing is dropped, and the order is the model's own.
+    expect(named).toEqual(['sessionId', 'region', 'why', 'working directory'])
+    expect(rows(container)[1][1]).toBe('{"start":0,"end":24}')
+    expect(rows(container)[2][1]).toBe('because')
+  })
+
+  it('does the same for a tool nobody has written a sentence for', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'someone.elses.tool',
+        arguments: '{"target":"prod","force":true,"retries":3}',
+        resource: null,
+      },
+    })
+    expect(rows(container)).toEqual([
+      ['target', 'prod'],
+      ['force', 'true'],
+      ['retries', '3'],
+    ])
+    expect(container.textContent ?? '').toContain('someone.elses.tool')
+  })
+
+  it('keeps the verbatim blob when the arguments are not an object — that fallback stays', () => {
+    const { container } = renderPrompt({
+      ask: { ...SESSION_ASK, arguments: '[1,2,3]' },
+      sessionWhere: () => HERE,
+    })
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('[1,2,3]')
+    expect(container.querySelector('.ui-fact-list')).toBeNull()
+    expect(container.textContent ?? '').toContain('with these arguments')
+  })
+
+  it('names the working directory the shell confirmed, and says the shell confirmed it', () => {
+    const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
+    const row = rows(container).find(([name]) => name === 'working directory')
+    expect(row?.[1]).toContain('/home/dev')
+    const note = container.querySelector('.ui-fact-list__note')?.textContent ?? ''
+    expect(note).toContain('reported by the shell')
+    // It is the pane's directory AS OF NOW. Binding the effect to the
+    // precondition is a different bead (nocx-d6gn4.1) and this window must
+    // not read as though it had already happened.
+    expect(note).toContain('as of now')
+  })
+
+  it('says so when the working directory is a guess the shell never confirmed', () => {
+    const { container } = renderPrompt({
+      ask: SESSION_ASK,
+      sessionWhere: () => ({ ...HERE, cwd: '~/Documents', cwdVerified: false }),
+    })
+    const row = rows(container).find(([name]) => name === 'working directory')
+    expect(row?.[1]).toContain('~/Documents')
+    const note = container.querySelector('.ui-fact-list__note')?.textContent ?? ''
+    expect(note).toContain('has not confirmed')
+    expect(note).toContain('as of now')
+  })
+
+  it('says nothing about a directory when the pane has none to report', () => {
+    const { container } = renderPrompt({
+      ask: SESSION_ASK,
+      sessionWhere: () => ({ ...HERE, cwd: '', cwdVerified: false }),
+    })
+    expect(rows(container).map(([name]) => name)).toEqual(['sessionId'])
+  })
+
+  it("names run's directory too, beside the sentence rather than instead of it", () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'run',
+        effect: 'mutate-destructive',
+        arguments: `{"command":"rm -rf build","sessionId":"${SID}"}`,
+        resource: { kind: 'session', id: SID },
+      },
+      sessionWhere: () => HERE,
+    })
+    const text = container.textContent ?? ''
+    // njn8s's sentence is untouched: command in a code block, machine and
+    // tab in the lead.
+    expect(text).toContain('run this command')
+    expect(text).toContain('this machine')
+    expect(text).toContain('home/dev')
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('rm -rf build')
+    // And the directory is added beside it. The two arguments the sentence
+    // already states are not repeated as rows — where a call lands has one
+    // owner on this surface, not two.
+    expect(rows(container)).toEqual([['working directory', '/home/dev']])
+  })
+
+  it('puts the decision facts before the policy prose', () => {
+    const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
+    const text = container.textContent ?? ''
+    const facts = text.indexOf('working directory')
+    const effect = text.indexOf('This call can')
+    const covers = text.indexOf('Approving covers this call')
+    const lasts = text.indexOf('An answer in this session lasts')
+    expect(facts).toBeGreaterThan(-1)
+    expect(effect).toBeGreaterThan(facts)
+    expect(covers).toBeGreaterThan(effect)
+    expect(lasts).toBeGreaterThan(covers)
+  })
+})
+
 describe('AgentApprovalPrompt', () => {
   afterEach(cleanup)
 
   it('names the tool, the arguments and the reason — the question a person decides', () => {
     const { container } = renderPrompt()
     expect(container.textContent).toContain('files.read')
-    expect(container.textContent).toContain('{"path":"/repo/a.txt"}')
+    // The argument, as a named row. It used to be the JSON blob
+    // `{"path":"/repo/a.txt"}`; a person deciding is owed the fact, not
+    // the encoding (nocx-n7xha).
+    expect(container.querySelector('.ui-fact-list__name')?.textContent).toBe('path')
+    expect(container.querySelector('.ui-fact-list__value')?.textContent).toBe('/repo/a.txt')
     expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
   })
 

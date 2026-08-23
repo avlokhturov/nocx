@@ -68,6 +68,7 @@
 @import './styles/components/collection-view.css';
 @import './styles/components/file-status-row.css';
 @import './styles/components/record-row.css';
+@import './styles/components/fact-list.css';
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
 @import './styles/components/workspace-chip.css';
