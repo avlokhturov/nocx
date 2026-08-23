@@ -370,7 +370,7 @@ func TestEvictionExemptsEntriesHoldingAPinnedArtifact(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 	if _, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ID: "00000000-0000-7000-8000-00000000a001", ExecutionID: execID,
+		ID: "00000000-0000-7000-8000-00000000a001", EntryID: pinned, ExecutionID: &execID,
 		MediaType: content.MediaText, Pinned: true,
 	}); err != nil {
 		t.Fatalf("AppendArtifact: %v", err)

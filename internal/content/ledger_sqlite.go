@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -179,14 +178,25 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			}
 		}
 		submittedAt = time.Now().UnixMilli()
+		// A `text` block is BORN CLOSED (ADR-0037). Every other kind opens a
+		// lifecycle the driver will bind and close; prose has none — it was
+		// printed, so there is nothing to wait for and nothing to judge. The
+		// schema's CHECK says exactly this, and the two are read together
+		// deliberately: the enum's mirror is the CHECK (this file's header),
+		// so the one writer of the column obeys it here rather than handing
+		// the constraint a row it will refuse.
+		phase, status := PhaseOpen, EntryPending
+		if in.Kind == EntryText {
+			phase, status = PhaseClosed, EntrySuccess
+		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
-			 phase, status, conversation_id, submitted_at, started_at, ended_at, duration_ms,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, parent_id, pos,
+			 cwd, kind, intent, phase, status, submitted_at, started_at, ended_at, duration_ms,
 			 sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 'pending', ?, ?, ?, ?, ?, ?, ?)`,
-			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID, in.Cwd,
-			string(in.Kind), in.Intent, in.ConversationID, submittedAt, in.StartedAt,
-			in.EndedAt, in.DurationMs, string(in.Sensitivity), in.Payload,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID,
+			in.ParentID, in.Pos, in.Cwd, string(in.Kind), in.Intent, string(phase), string(status),
+			submittedAt, in.StartedAt, in.EndedAt, in.DurationMs, string(in.Sensitivity), in.Payload,
 		); err != nil {
 			return err
 		}
@@ -216,11 +226,12 @@ func entryDigest(in SubmitEntry) string {
 	_ = enc.Encode(struct {
 		Client, EnvironmentID, Cwd, Intent, Payload string
 		Kind, Sensitivity                           string
-		PaneID, SessionID, ConversationID           *string
+		PaneID, SessionID, ParentID                 *string
+		Pos                                         *int
 	}{
 		Client: in.Client, EnvironmentID: in.EnvironmentID, Cwd: in.Cwd, Intent: in.Intent,
 		Payload: in.Payload, Kind: string(in.Kind), Sensitivity: string(in.Sensitivity),
-		PaneID: in.PaneID, SessionID: in.SessionID, ConversationID: in.ConversationID,
+		PaneID: in.PaneID, SessionID: in.SessionID, ParentID: in.ParentID, Pos: in.Pos,
 	})
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -282,14 +293,15 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	e := &LedgerEntry{}
 	var env environmentScan
 	dest := []any{
-		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID, &e.Cwd,
-		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.ConversationID, &e.SubmittedAt,
-		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.ReviewedAt, &e.Payload,
+		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID,
+		&e.ParentID, &e.Pos, &e.Cwd,
+		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
+		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.Payload,
 	}
 	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
-		e.environment_id, e.pane_id, e.session_id, e.cwd, e.kind, e.intent, e.phase, e.status,
-		e.conversation_id, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
-		e.sensitivity, e.reviewed_at, e.payload, `+environmentColumns+`
+		e.environment_id, e.pane_id, e.session_id, e.parent_id, e.pos, e.cwd, e.kind, e.intent,
+		e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
+		e.sensitivity, e.payload, `+environmentColumns+`
 		FROM entries e `+environmentJoin+` WHERE e.id = ?`, id).
 		Scan(append(dest, env.dest()...)...)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -844,13 +856,20 @@ func runStateForTermination(r TerminationReason) RunState {
 
 // ── artifacts ────────────────────────────────────────────────────────────
 
-// AppendArtifact creates one artifact of an execution with its capture
-// provenance (ADR-0019 §6: a capture records how it was taken — method and
-// version, terminal dimensions, stream position, encoding, gaps). Content
-// arrives via AppendChunk: an artifact is never one BLOB.
+// AppendArtifact creates one artifact of a BLOCK with its capture provenance
+// (ADR-0019 §6: a capture records how it was taken — method and version,
+// terminal dimensions, stream position, encoding, gaps). Content arrives via
+// AppendChunk: an artifact is never one BLOB.
+//
+// The entry is required and the execution is not (ADR-0037): a body belongs
+// to the block it is a body of, and which ATTEMPT produced it is a second,
+// weaker fact that a `text` block simply does not have.
 func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (string, error) {
 	if in.ID == "" {
 		return "", errors.New("content: append artifact: id is required")
+	}
+	if in.EntryID == "" {
+		return "", errors.New("content: append artifact: entry id is required — an artifact belongs to its block")
 	}
 	err := s.run(ctx, func(ctx context.Context) error {
 		return insertArtifact(ctx, s.db, in)
@@ -896,11 +915,11 @@ func insertArtifact(ctx context.Context, q execer, in AppendArtifact) error {
 		payload = "{}"
 	}
 	_, err := q.ExecContext(ctx, `INSERT INTO artifacts
-		(id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
+		(id, entry_id, execution_id, media_type, derived_from, pinned, truncated, capture_method,
 		 capture_version, terminal_cols, terminal_rows, stream, byte_offset, byte_end,
 		 encoding, gaps, payload)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.ID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.ID, in.EntryID, in.ExecutionID, string(in.MediaType), in.DerivedFrom, in.Pinned, truncated,
 		string(in.CaptureMethod), in.CaptureVersion, in.TerminalCols, in.TerminalRows,
 		stream, in.ByteOffset, in.ByteEnd, in.Encoding, gaps, payload)
 	return err
@@ -1000,14 +1019,15 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 			return nil
 		}
 
-		var existingMedia, existingExec sql.NullString
+		var existingMedia, existingEntry sql.NullString
 		lookupErr := tx.QueryRowContext(ctx,
-			`SELECT media_type, execution_id FROM artifacts WHERE id = ?`,
-			in.ArtifactID).Scan(&existingMedia, &existingExec)
+			`SELECT media_type, entry_id FROM artifacts WHERE id = ?`,
+			in.ArtifactID).Scan(&existingMedia, &existingEntry)
 		switch {
 		case errors.Is(lookupErr, sql.ErrNoRows):
 			if insertErr := insertArtifact(ctx, tx, AppendArtifact{
-				ExecutionID: execID, ID: in.ArtifactID, MediaType: in.MediaType,
+				EntryID: in.EntryID, ExecutionID: &execID,
+				ID: in.ArtifactID, MediaType: in.MediaType,
 				DerivedFrom: in.DerivedFrom, Truncated: in.Truncated,
 				CaptureMethod: in.CaptureMethod, CaptureVersion: in.CaptureVersion,
 				TerminalCols: in.TerminalCols, TerminalRows: in.TerminalRows,
@@ -1019,9 +1039,12 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 		default:
 			// A replay must find the artifact it wrote. Anything else under
 			// the same id is a different object, and this store never
-			// overwrites one id with another object (§7).
+			// overwrites one id with another object (§7). The identity
+			// checked is the artifact's OWNER (ADR-0037) — the execution
+			// beside it is provenance, and a body cannot change which block
+			// it is a body of whatever attempt wrote it.
 			if existingMedia.String != string(in.MediaType) ||
-				existingExec.String != strconv.FormatInt(execID, 10) {
+				existingEntry.String != in.EntryID {
 				return ErrIDConflict
 			}
 		}
@@ -1097,12 +1120,13 @@ func (s *sqliteContent) artifactByID(ctx context.Context, id string) (*Artifact,
 	var a Artifact
 	var gapsJSON string
 	var stream, truncated sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.execution_id, a.media_type, a.derived_from,
+	err := s.db.QueryRowContext(ctx, `SELECT a.id, a.entry_id, a.execution_id, a.media_type,
+		a.derived_from,
 		a.state, a.byte_len, (SELECT count(*) FROM artifact_chunks c WHERE c.artifact_id = a.id),
 		a.pinned, a.truncated, a.capture_method, a.capture_version, a.terminal_cols,
 		a.terminal_rows, a.stream, a.byte_offset, a.byte_end, a.encoding, a.gaps, a.payload
 		FROM artifacts a WHERE a.id = ?`, id).Scan(
-		&a.ID, &a.ExecutionID, &a.MediaType, &a.DerivedFrom, &a.State, &a.ByteLen,
+		&a.ID, &a.EntryID, &a.ExecutionID, &a.MediaType, &a.DerivedFrom, &a.State, &a.ByteLen,
 		&a.ChunkCount, &a.Pinned, &truncated, &a.CaptureMethod, &a.CaptureVersion,
 		&a.TerminalCols, &a.TerminalRows, &stream, &a.ByteOffset, &a.ByteEnd, &a.Encoding,
 		&gapsJSON, &a.Payload)
@@ -1136,19 +1160,25 @@ func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 	})
 }
 
-// AddCause records one `caused-by` edge from the caused entry to the turn
-// that caused it, taking the next causal position INSIDE that turn, and
-// returns the position it took.
+// AddCause seats an existing entry as the next child of the block that
+// caused it, and returns the seat it took.
 //
-// Read and write are one transaction on purpose. The position is derived
-// from what is already stored — the highest position any cause of this turn
-// holds — so an in-memory counter is not merely unnecessary but wrong: the
-// approval resume builds a fresh pipeline for a turn that already has
-// causes, and a counter that started at zero there would stack the resumed
-// call on top of the calls before it. Reading the maximum in a separate
-// statement would have the same fault against a concurrent writer, one
-// transaction narrower.
-func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string, at int) (int, error) {
+// It was one `caused-by` edge; ADR-0037 made containment a column, so this
+// is now an UPDATE of the child's own row. What did not change is why read
+// and write are one transaction: the seat is derived from what is already
+// stored — the highest pos any child of this parent holds — so an in-memory
+// counter is not merely unnecessary but wrong. The approval resume builds a
+// fresh pipeline for a turn that already has children, and a counter that
+// started at zero there would stack the resumed call on top of the calls
+// before it. Reading the maximum in a separate statement would have the same
+// fault against a concurrent writer, one transaction narrower.
+//
+// Both ids are resolved HERE rather than left to the foreign key, the rule
+// Submit follows for its pane: the FK would refuse a parent that is not
+// there, but its constraint text does not say which reference was missing,
+// and an UPDATE that matches no row does not fail at all — it silently
+// changes nothing, which is the one answer worse than an error.
+func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (int, error) {
 	pos := 0
 	err := s.run(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
@@ -1157,47 +1187,54 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string, a
 		}
 		defer func() { _ = tx.Rollback() }()
 
-		// The replay: this pair is already a cause of this turn, so it
-		// keeps the position it took the first time and nothing is written.
-		var existing string
+		var parent sql.NullString
+		var seat sql.NullInt64
 		err = tx.QueryRowContext(ctx,
-			`SELECT payload FROM edges WHERE from_id = ? AND to_id = ? AND rel = ?`,
-			causedID, turnID, string(RelCausedBy)).Scan(&existing)
-		switch {
-		case err == nil:
-			var p CausePayload
-			if err = json.Unmarshal([]byte(existing), &p); err != nil {
-				return fmt.Errorf("content: caused-by %s -> %s: stored position: %w", causedID, turnID, err)
+			`SELECT parent_id, pos FROM entries WHERE id = ?`, causedID).Scan(&parent, &seat)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: seat %s under %s: %w", causedID, turnID, ErrNoSuchEntry)
+		}
+		if err != nil {
+			return err
+		}
+		// The replay: this child is already under this parent, so it keeps
+		// the seat it took the first time and nothing is written.
+		if parent.Valid && parent.String == turnID {
+			if !seat.Valid {
+				return fmt.Errorf("content: %s is a child of %s with no position — the tree is inconsistent", causedID, turnID)
 			}
-			// The stored anchor is kept with the stored position, and for
-			// the same reason: the replay is looking at an answer that has
-			// grown since, and taking its `at` would move this cause below
-			// prose it actually happened above.
-			pos = p.Pos
+			pos = int(seat.Int64)
 			return tx.Commit()
-		case !errors.Is(err, sql.ErrNoRows):
+		}
+		// ONE PARENT, which an edge could never say. A block already drawn
+		// inside something else is refused rather than moved: re-parenting
+		// is a deliberate act, not a side effect of a second caller
+		// recording the same cause against a different turn.
+		if parent.Valid {
+			return fmt.Errorf("content: %s is already a child of %s and cannot also be seated under %s",
+				causedID, parent.String, turnID)
+		}
+
+		var exists string
+		err = tx.QueryRowContext(ctx, `SELECT id FROM entries WHERE id = ?`, turnID).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: seat %s under %s: %w", causedID, turnID, ErrNoSuchEntry)
+		}
+		if err != nil {
 			return err
 		}
 
 		var highest sql.NullInt64
 		if err = tx.QueryRowContext(ctx,
-			`SELECT MAX(json_extract(payload, '$.pos')) FROM edges WHERE to_id = ? AND rel = ?`,
-			turnID, string(RelCausedBy)).Scan(&highest); err != nil {
+			`SELECT MAX(pos) FROM entries WHERE parent_id = ?`, turnID).Scan(&highest); err != nil {
 			return err
 		}
 		if highest.Valid {
 			pos = int(highest.Int64) + 1
 		}
-		body, err := json.Marshal(CausePayload{Pos: pos, At: at})
-		if err != nil {
-			return err
-		}
-		// Both ids are foreign keys, so an entry that is not there is
-		// refused by the store rather than recorded as an edge that points
-		// at nothing.
 		if _, err = tx.ExecContext(ctx,
-			`INSERT INTO edges (from_id, to_id, rel, payload) VALUES (?, ?, ?, ?)`,
-			causedID, turnID, string(RelCausedBy), string(body)); err != nil {
+			`UPDATE entries SET parent_id = ?, pos = ? WHERE id = ?`,
+			turnID, pos, causedID); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -1208,24 +1245,23 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string, a
 	return pos, nil
 }
 
-// Caused returns everything entryID caused, in stored position order, each
-// row resolved into what a reader draws it with: the caused entry's kind and
-// intent, and — for an action entry — the effect the gate decided and the
-// resource the call named, read back off that row's own payload.
+// Caused returns a block's CHILDREN in pos order, each resolved into what a
+// reader draws it with: the child's kind and intent, and — for an action
+// entry — the effect the gate decided and the resource the call named, read
+// back off that row's own payload.
 //
-// ONE statement, joining edges to entries: the alternative is handing the
-// caller a list of ids to resolve itself, which is the same arrangement
-// owned twice (AD-8). Ordering is by the stored position and then by id, so
-// a page is stable even if a position were ever duplicated by a hand-written
-// row.
+// ONE statement over the child rows: the alternative is handing the caller a
+// list of ids to resolve itself, which is the same arrangement owned twice
+// (AD-8). Ordering is by pos and then by id, so a page is stable even if a
+// seat were ever duplicated by a hand-written row — which the table's
+// UNIQUE (parent_id, pos) is there to make impossible through this seam.
 func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT e.from_id, COALESCE(json_extract(e.payload, '$.pos'), 0),
-		        COALESCE(json_extract(e.payload, '$.at'), 0), n.kind, n.intent, n.payload
-		 FROM edges e JOIN entries n ON n.id = e.from_id
-		 WHERE e.to_id = ? AND e.rel = ?
-		 ORDER BY json_extract(e.payload, '$.pos'), e.from_id`,
-		entryID, string(RelCausedBy))
+		`SELECT n.id, COALESCE(n.pos, 0), n.kind, n.intent, n.payload
+		 FROM entries n
+		 WHERE n.parent_id = ?
+		 ORDER BY n.pos, n.id`,
+		entryID)
 	if err != nil {
 		return nil, err
 	}
@@ -1234,7 +1270,7 @@ func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEnt
 	for rows.Next() {
 		var c CausedEntry
 		var payload string
-		if err := rows.Scan(&c.EntryID, &c.Position, &c.At, &c.Kind, &c.Intent, &payload); err != nil {
+		if err := rows.Scan(&c.EntryID, &c.Position, &c.Kind, &c.Intent, &payload); err != nil {
 			return nil, err
 		}
 		// The tool facts belong to an ACTION row and are read from nowhere
@@ -1396,7 +1432,12 @@ func (s *sqliteContent) grantFor(ctx context.Context, executionID int64) (*Grant
 	return &g, erows.Err()
 }
 
-// artifactsFor loads one execution's artifacts, metadata only (no bodies).
+// artifactsFor loads the artifacts one execution PRODUCED, metadata only (no
+// bodies). It reads the provenance column, deliberately: this hangs the
+// bodies off the attempt that wrote them inside LedgerEntry, which is what
+// makes a re-run's output distinguishable from the first run's. The block's
+// own bodies — including a `text` block's, which no attempt produced — are
+// reached by entry_id.
 func (s *sqliteContent) artifactsFor(ctx context.Context, executionID int64) ([]Artifact, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id FROM artifacts
 		WHERE execution_id = ? ORDER BY id`, executionID)

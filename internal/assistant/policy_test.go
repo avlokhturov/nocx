@@ -49,15 +49,12 @@ type fakeLedger struct {
 	causes []fakeCause
 }
 
-// fakeCause is one recorded caused-by: which turn, which entry it caused,
-// and the position inside that turn it took.
+// fakeCause is one recorded containment: which turn, which entry it caused,
+// and the seat inside that turn it took.
 type fakeCause struct {
 	turn     string
 	caused   string
 	position int
-	// at is the prose anchor the caller supplied (nocx-9sqii): how much of
-	// the answer had been written when this cause was recorded.
-	at int
 }
 
 // fakeSubmission is one Submit the ledger recorded: the intent and the
@@ -112,7 +109,7 @@ func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.Fin
 	return nil
 }
 
-func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string, at int) (int, error) {
+func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log = append(f.log, "cause:"+causedID)
@@ -130,7 +127,7 @@ func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string, at int
 			pos++
 		}
 	}
-	f.causes = append(f.causes, fakeCause{turn: turnID, caused: causedID, position: pos, at: at})
+	f.causes = append(f.causes, fakeCause{turn: turnID, caused: causedID, position: pos})
 	return pos, nil
 }
 
@@ -281,19 +278,12 @@ func middlewareForWithKnown(t *testing.T, grant content.Grant, ledger AttemptLed
 // caller shape, which joins nothing — so the pipeline these tests drive is
 // the same one except where a test is about the relation.
 func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string) *policyMiddleware {
-	return middlewareForTurnAt(t, grant, ledger, approvals, requester, known, turnEntryID, nil)
-}
-
-// middlewareForTurnAt is the same seam with the ANSWER's length under the
-// test's control (nocx-9sqii): the anchor every cause is recorded at. Nil is
-// "no answer is being written", which every other helper passes.
-func middlewareForTurnAt(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore, requester RendererRequester, known KnownMaterial, turnEntryID string, answerLen func() int) *policyMiddleware {
 	t.Helper()
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, answerLen, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

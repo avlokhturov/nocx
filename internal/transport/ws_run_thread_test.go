@@ -785,19 +785,12 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 		t.Errorf("run payload = %q, want the refusal sentence — the decision is in the thread, not only in a log", run.Payload)
 	}
 
-	edges, err := led.Edges(ctx, res.EntryID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
-	}
-	for _, e := range edges {
-		if e.Rel == content.RelCausedBy {
-			t.Errorf("edge %+v: the answer is not an entry of its own (nocx-4em1z)", e)
-		}
-	}
-
 	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
 		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
+	}
+	if ans.ParentID != nil {
+		t.Errorf("the turn is drawn inside %q — the answer is its own body (nocx-4em1z)", *ans.ParentID)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntryFailure {
 		t.Errorf("turn phase/status = %q/%q, want closed/failure — the turn closes with the run", ans.Phase, ans.Status)
@@ -835,23 +828,17 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 // ── the caused-by relation, read back from the store (nocx-h1l4o) ────────
 
 // assertNothingClaimsToBeTheAnswer is nocx-4em1z's invariant in the form the
-// causal relation left it: the answer is the turn's own body, so no entry is
-// joined to the turn AS its answer. Every caused-by edge touching a turn
-// points AT the turn, from a thing the turn caused, and none of those is an
-// `agent` entry.
+// tree left it: the answer is the turn's own body, so no entry is drawn as
+// the turn's answer. The turn itself sits inside nothing, and nothing inside
+// it is an `agent` entry.
 func assertNothingClaimsToBeTheAnswer(t *testing.T, led content.LedgerRepository, turnID string) {
 	t.Helper()
-	edges, err := led.Edges(context.Background(), turnID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
+	turn, err := led.Entry(context.Background(), turnID)
+	if err != nil || turn == nil {
+		t.Fatalf("turn entry: %v (nil=%v)", err, turn == nil)
 	}
-	for i := range edges {
-		if edges[i].Rel != content.RelCausedBy {
-			continue
-		}
-		if edges[i].From == turnID {
-			t.Errorf("edge %+v: the turn is caused by nothing — the answer is its own body", edges[i])
-		}
+	if turn.ParentID != nil {
+		t.Errorf("the turn is drawn inside %q — the answer is its own body", *turn.ParentID)
 	}
 	caused, err := led.Caused(context.Background(), turnID)
 	if err != nil {
@@ -865,8 +852,8 @@ func assertNothingClaimsToBeTheAnswer(t *testing.T, led content.LedgerRepository
 }
 
 // assertCausedByTheTurn reads the relation back out of the store: the entry
-// is joined to the turn at the position given, and the position is stored on
-// the edge rather than inferred from the order rows came out.
+// is drawn inside the turn at the position given, and the position is stored
+// on the row rather than inferred from the order rows came out.
 func assertCausedByTheTurn(t *testing.T, led content.LedgerRepository, turnID, causedID string, position int) {
 	t.Helper()
 	caused, err := led.Caused(context.Background(), turnID)

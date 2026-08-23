@@ -284,16 +284,11 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
 		t.Errorf("answer entry phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
 	}
-	// Nothing is joined to it: the answer is the turn's own body, so there
-	// is no second entry to point at (nocx-4em1z).
-	edges, err := led.Edges(ctx, res.EntryID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
-	}
-	for _, e := range edges {
-		if e.Rel == content.RelCausedBy {
-			t.Errorf("edge %+v: the answer is not an entry of its own", e)
-		}
+	// Nothing contains it: the answer is the turn's own body, so there is no
+	// second entry to point at (nocx-4em1z). Containment is a column since
+	// ADR-0037, so the question is asked of the row itself.
+	if ans.ParentID != nil {
+		t.Errorf("the turn is drawn inside %q — the answer is its own body", *ans.ParentID)
 	}
 	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
 		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/1", len(ans.Executions), len(ans.Executions[0].Artifacts))

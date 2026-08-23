@@ -5310,10 +5310,8 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 	if _, err := led.Submit(context.Background(), action); err != nil {
 		t.Fatalf("submit the action entry: %v", err)
 	}
-	for i, caused := range []string{action.ID, "wire-2"} {
-		// Distinct anchors, so "the anchor came off the socket" cannot pass
-		// on a zero the mapping never set (nocx-9sqii).
-		if _, err := led.AddCause(context.Background(), "wire-1", caused, i*17); err != nil {
+	for _, caused := range []string{action.ID, "wire-2"} {
+		if _, err := led.AddCause(context.Background(), "wire-1", caused); err != nil {
 			t.Fatalf("AddCause(%s): %v", caused, err)
 		}
 	}
@@ -5357,12 +5355,20 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
 		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
 	}
-	// The two facts a turn drawn in fragments is placed by (nocx-9sqii),
-	// off the real socket: where in the prose each cause sat, and whether
-	// its work became a block of its own. A command entry never claims to
-	// have opened one — it IS one.
-	if body.Caused[0].At != 0 || body.Caused[1].At != 17 {
-		t.Fatalf("the anchors off the socket = %d, %d; want 0, 17",
+	// THE ANCHOR IS DEAD AND THE FIELD HAS NOT LEFT YET (ADR-0037,
+	// nocx-dc2fr.1 → .2). `at` said where in the prose a cause sat, and it
+	// existed only because the unit that was DRAWN (a run of prose) and the
+	// unit that was STORED (the whole answer) were different things. They
+	// are the same thing now — a cause is a CHILD, at a seat — so nothing
+	// records an offset and nothing can.
+	//
+	// The field is still required by contracts/ledger.get.schema.json, so
+	// it still goes out, and what it carries is the only honest value left:
+	// zero, for every cause. This asserts exactly that, so the day the
+	// contract drops the field (nocx-dc2fr.2, which owns the wire) this test
+	// fails and is deleted rather than quietly passing on a placeholder.
+	if body.Caused[0].At != 0 || body.Caused[1].At != 0 {
+		t.Fatalf("the anchors off the socket = %d, %d; want 0, 0 — `at` is no longer recorded",
 			body.Caused[0].At, body.Caused[1].At)
 	}
 	if !body.Caused[0].OpensBlock {

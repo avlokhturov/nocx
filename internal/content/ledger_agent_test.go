@@ -388,20 +388,18 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 		t.Errorf("run lane = %v, want agent", run.Lane)
 	}
 
-	// Two edges: the references edge (question → frame, region carried) and
-	// the caused-by edge from the answer entry (design §5 — the answer is
-	// an entry joined to the question, streamed in).
+	// One edge: the references edge (question → frame, region carried).
+	// Design §5 had a second — a caused-by from an answer entry of its own —
+	// and there is no such entry (nocx-4em1z) and no such relation
+	// (ADR-0037): containment is a column now.
 	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	var ref, caused *content.Edge
+	var ref *content.Edge
 	for i := range edges {
-		switch edges[i].Rel {
-		case content.RelReferences:
+		if edges[i].Rel == content.RelReferences {
 			ref = &edges[i]
-		case content.RelCausedBy:
-			caused = &edges[i]
 		}
 	}
 	if ref == nil {
@@ -417,13 +415,10 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if region.RowStart != 0 || region.RowEnd != 2 {
 		t.Errorf("region = %+v, want rows [0,2)", region)
 	}
-	// NO caused-by edge, because there is no second entry to join: a turn
-	// is ONE entry whose body is the answer (nocx-4em1z). The relation is
-	// free for what actually needs it — an action belongs to its turn.
-	if caused != nil {
-		t.Errorf("edges = %+v, want no caused-by: the answer is not an entry of its own", caused)
-	}
-
+	// NOTHING CONTAINS THE TURN, because there is no second entry it could
+	// be the answer of: a turn is ONE entry whose body is the answer
+	// (nocx-4em1z). The tree is free for what actually needs it — an action
+	// is drawn inside its turn.
 	// The answer's body is an artifact on the turn's own RUN — open, empty,
 	// waiting for deltas. Not a container execution under a second entry.
 	turn, err := led.Entry(ctx, res.EntryID)

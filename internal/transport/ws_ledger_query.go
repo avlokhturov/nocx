@@ -158,10 +158,13 @@ type ledgerGetResponse struct {
 type ledgerCausedWire struct {
 	EntryID  string `json:"entryId"`
 	Position int    `json:"position"`
-	// At is where in the turn's ANSWER this happened, in UTF-16 code units
-	// (nocx-9sqii): the offset the renderer cuts the prose at, so a restored
-	// turn draws its fragments around the blocks it caused exactly where the
-	// live one did. The position orders the causes; this places them.
+	// At was where in the turn's ANSWER this happened, in UTF-16 code units
+	// (nocx-9sqii) — the offset the renderer cut the prose at. ADR-0037
+	// deleted it from the store: prose is a `text` child with a seat of its
+	// own now, so the position IS the place and there is nothing left to
+	// cut. The field stays on the wire, sending 0, only because
+	// contracts/ledger.get.schema.json still requires it; taking it off the
+	// contract and out of the renderer is a task of its own.
 	At         int                 `json:"at"`
 	Kind       string              `json:"kind"`
 	Intent     string              `json:"intent"`
@@ -175,9 +178,12 @@ type ledgerCausedWire struct {
 // enum on the wire is closed, and an empty string is not in it.
 func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 	w := ledgerCausedWire{
-		EntryID:    c.EntryID,
-		Position:   c.Position,
-		At:         c.At,
+		EntryID:  c.EntryID,
+		Position: c.Position,
+		// 0, always: the store no longer holds a prose offset (ADR-0037) and
+		// this field is here to satisfy a contract that has not been changed
+		// yet. See ledgerCausedWire.At.
+		At:         0,
 		Kind:       string(c.Kind),
 		Intent:     c.Intent,
 		Resource:   c.Resource,
@@ -527,8 +533,17 @@ func ledgerArtifactWireOf(a content.Artifact) (ledgerArtifactWire, error) {
 		v := string(*a.Stream)
 		stream = &v
 	}
+	// The wire's executionId is a plain integer, and the contract owns that
+	// shape. Every artifact reaching here came off the entry's executions,
+	// so the pointer is never nil on this path; ADR-0037 made the column
+	// nullable for a body no attempt produced (a `text` block's), and
+	// putting THAT on the wire belongs to the contracts task.
+	var execID int64
+	if a.ExecutionID != nil {
+		execID = *a.ExecutionID
+	}
 	return ledgerArtifactWire{
-		ID: a.ID, ExecutionID: a.ExecutionID, MediaType: string(a.MediaType),
+		ID: a.ID, ExecutionID: execID, MediaType: string(a.MediaType),
 		DerivedFrom: a.DerivedFrom, State: string(a.State), ByteLen: a.ByteLen,
 		ChunkCount: a.ChunkCount, Pinned: a.Pinned, Truncated: truncated,
 		CaptureMethod: string(a.CaptureMethod), CaptureVersion: a.CaptureVersion,

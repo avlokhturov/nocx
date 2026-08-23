@@ -374,67 +374,6 @@ func TestAProposalJoinsItsTurnAndTheApprovedCallDoesNotJoinAgain(t *testing.T) {
 	}
 }
 
-// ── where in the answer the call happened (nocx-9sqii) ───────────────────
-
-// The position says which cause came first; it does not say where in the
-// model's prose any of them sat. A turn is now drawn as fragments around the
-// blocks it caused, so the anchor is recorded with the cause — read at the
-// moment the attempt is written, which is after everything the model had
-// said and before anything it says from the result.
-func TestACauseIsAnchoredAtTheAnswerAsItStoodWhenTheCallHappened(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	writeFile(t, filepath.Join(dir, "a.txt"), "in scope")
-	led := &fakeLedger{}
-	// The answer as the run has written it so far — the engine's own tally,
-	// which grows between the two calls below exactly as a stream does.
-	written := 0
-	mw := middlewareForTurnAt(t, grant, led, nil, nil, &fakeKnownMaterial{}, "turn-entry",
-		func() int { return written })
-
-	written = len("Let me look.")
-	if _, err := wrappedEndpoint(mw, "files.read", "call-1",
-		`{"path":"`+filepath.Join(dir, "a.txt")+`"}`); err != nil {
-		t.Fatalf("files.read: %v", err)
-	}
-	written = len("Let me look. It says something; now the tree:")
-	if _, err := wrappedEndpoint(mw, "git.status", "call-2", `{}`); err == nil {
-		t.Fatal("git.status ran — it is declared but not executable")
-	}
-
-	got := led.recordedCauses()
-	if len(got) != 2 {
-		t.Fatalf("causes recorded = %+v, want two", got)
-	}
-	if got[0].at != len("Let me look.") {
-		t.Fatalf("the first call's anchor = %d, want %d — the prose that stood when it happened",
-			got[0].at, len("Let me look."))
-	}
-	if got[1].at != len("Let me look. It says something; now the tree:") {
-		t.Fatalf("the second call's anchor = %d, want %d", got[1].at,
-			len("Let me look. It says something; now the tree:"))
-	}
-}
-
-// A run with no answer being written anchors everything at 0 — the un-bound
-// caller shape, and the ordinary turn that reaches for its tools before it
-// has said anything. Both draw the cause above the prose, which is where it
-// belongs.
-func TestWithNoAnswerYetEveryCauseIsAnchoredAtTheHeadOfTheProse(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	writeFile(t, filepath.Join(dir, "a.txt"), "in scope")
-	led := &fakeLedger{}
-	mw := middlewareForTurn(t, grant, led, nil, nil, &fakeKnownMaterial{}, "turn-entry")
-
-	if _, err := wrappedEndpoint(mw, "files.read", "call-1",
-		`{"path":"`+filepath.Join(dir, "a.txt")+`"}`); err != nil {
-		t.Fatalf("files.read: %v", err)
-	}
-	got := led.recordedCauses()
-	if len(got) != 1 || got[0].at != 0 {
-		t.Fatalf("causes = %+v, want the one call anchored at 0", got)
-	}
-}
-
 // The attempt's own row carries whether the call opened a block, because
 // that is what tells a RESTORED turn the block is the account of the call
 // and no line belongs beside it. It is the declaration's fact, copied once,

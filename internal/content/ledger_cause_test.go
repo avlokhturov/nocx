@@ -1,17 +1,17 @@
 package content_test
 
-// The caused-by relation with an order (nocx-h1l4o), through the public
-// seam. ADR-0036 ends on the sentence these tests are: an assistant turn is
-// one entry, the things it causes are separate entries, and until now
-// nothing joined them — `ingest_seq` is commit order, never causality
-// (ADR-0019 §2), so a restored turn came back with neither its calls nor a
-// reason to draw its command anywhere in particular.
+// Containment with an order (nocx-h1l4o), through the public seam. ADR-0036
+// ends on the sentence these tests are: an assistant turn is one entry, the
+// things it causes are separate entries, and until now nothing joined them —
+// `ingest_seq` is commit order, never causality (ADR-0019 §2), so a restored
+// turn came back with neither its calls nor a reason to draw its command
+// anywhere in particular.
 //
-// Two facts are asserted IN THE STORE and never inferred from ordering: that
-// the relation is there, and that it carries the causal position the turn
-// assigned. The position is the ledger's own, taken inside the transaction
-// that appends the edge — see AddCause's doc for why the caller may not
-// supply it.
+// ADR-0037 made that relation a COLUMN. Two facts are still asserted IN THE
+// STORE and never inferred from ordering: that the child is inside the
+// parent, and that it holds the seat the parent gave it. The seat is the
+// ledger's own, taken inside the transaction that writes it — see AddCause's
+// doc for why the caller may not supply one.
 
 import (
 	"context"
@@ -58,32 +58,25 @@ func submitAction(t *testing.T, led content.LedgerRepository, id, tool string, e
 	return out.ID
 }
 
-// causePosition reads the position off the caused-by edge itself — the
-// assertion is IN THE STORE, so it goes through the edge the store wrote and
-// not through the convenience read that resolves it.
-func causePosition(t *testing.T, led content.LedgerRepository, from, to string) int {
+// causePosition reads the seat off the child's OWN ROW — the assertion is IN
+// THE STORE, and since ADR-0037 the store's answer is a column rather than an
+// edge payload: parent_id says which block draws it and pos says where.
+func causePosition(t *testing.T, led content.LedgerRepository, child, parent string) int {
 	t.Helper()
-	edges, err := led.Edges(context.Background(), from)
+	row, err := led.Entry(context.Background(), child)
 	if err != nil {
-		t.Fatalf("Edges(%s): %v", from, err)
+		t.Fatalf("Entry(%s): %v", child, err)
 	}
-	for _, e := range edges {
-		if e.From != from || e.To != to || e.Rel != content.RelCausedBy {
-			continue
-		}
-		var payload struct {
-			Pos *int `json:"pos"`
-		}
-		if err := json.Unmarshal([]byte(e.Payload), &payload); err != nil {
-			t.Fatalf("caused-by payload %q is not JSON: %v", e.Payload, err)
-		}
-		if payload.Pos == nil {
-			t.Fatalf("caused-by %s -> %s carries no position: payload %q", from, to, e.Payload)
-		}
-		return *payload.Pos
+	if row == nil {
+		t.Fatalf("Entry(%s) = nil — the child is not in the store", child)
 	}
-	t.Fatalf("no caused-by edge %s -> %s among %+v", from, to, edges)
-	return -1
+	if row.ParentID == nil || *row.ParentID != parent {
+		t.Fatalf("%s is drawn inside %v, want %s", child, row.ParentID, parent)
+	}
+	if row.Pos == nil {
+		t.Fatalf("%s is a child of %s with no seat", child, parent)
+	}
+	return *row.Pos
 }
 
 // ── the relation and its order ───────────────────────────────────────────
@@ -96,11 +89,11 @@ func TestACommandAnAssistantTurnRanCarriesACausedByEdgeWithAPosition(t *testing.
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "what is in here?")
 	ids := submitIntents(t, led, "ls -la", "cat go.mod")
 
-	first, err := led.AddCause(ctx, turn, ids[0], 0)
+	first, err := led.AddCause(ctx, turn, ids[0])
 	if err != nil {
 		t.Fatalf("AddCause: %v", err)
 	}
-	second, err := led.AddCause(ctx, turn, ids[1], 0)
+	second, err := led.AddCause(ctx, turn, ids[1])
 	if err != nil {
 		t.Fatalf("AddCause 2: %v", err)
 	}
@@ -127,7 +120,7 @@ func TestAnActionEntryJoinsItsTurnByTheSameRelation(t *testing.T) {
 		"files.read", content.EffectObserve,
 		&content.GrantScope{Kind: content.ResourcePath, ID: "/repo/go.mod"})
 
-	if _, err := led.AddCause(ctx, turn, action, 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, action); err != nil {
 		t.Fatalf("AddCause: %v", err)
 	}
 	if got := causePosition(t, led, action, turn); got != 0 {
@@ -170,7 +163,7 @@ func TestCausedComesBackInCausalPositionOrder(t *testing.T) {
 
 	// Caused in an order that is NOT the order the rows were submitted in.
 	for _, id := range []string{action, cmds[1], cmds[0]} {
-		if _, err := led.AddCause(ctx, turn, id, 0); err != nil {
+		if _, err := led.AddCause(ctx, turn, id); err != nil {
 			t.Fatalf("AddCause(%s): %v", id, err)
 		}
 	}
@@ -210,13 +203,13 @@ func TestAddCauseIsIdempotentOnThePair(t *testing.T) {
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "twice")
 	ids := submitIntents(t, led, "ls", "pwd")
 
-	if _, err := led.AddCause(ctx, turn, ids[0], 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, ids[0]); err != nil {
 		t.Fatalf("AddCause: %v", err)
 	}
-	if _, err := led.AddCause(ctx, turn, ids[1], 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, ids[1]); err != nil {
 		t.Fatalf("AddCause 2: %v", err)
 	}
-	again, err := led.AddCause(ctx, turn, ids[0], 0)
+	again, err := led.AddCause(ctx, turn, ids[0])
 	if err != nil {
 		t.Fatalf("AddCause replay: %v", err)
 	}
@@ -243,13 +236,13 @@ func TestEachTurnCountsItsOwnCauses(t *testing.T) {
 	turnB := submitTurn(t, led, "00000000-0000-7000-8000-00000000000b", "second")
 	ids := submitIntents(t, led, "ls", "pwd", "id")
 
-	if pos, err := led.AddCause(ctx, turnA, ids[0], 0); err != nil || pos != 0 {
+	if pos, err := led.AddCause(ctx, turnA, ids[0]); err != nil || pos != 0 {
 		t.Fatalf("A's first cause = %d (%v), want 0", pos, err)
 	}
-	if pos, err := led.AddCause(ctx, turnB, ids[1], 0); err != nil || pos != 0 {
+	if pos, err := led.AddCause(ctx, turnB, ids[1]); err != nil || pos != 0 {
 		t.Fatalf("B's first cause = %d (%v), want 0 — B counts its own", pos, err)
 	}
-	if pos, err := led.AddCause(ctx, turnA, ids[2], 0); err != nil || pos != 1 {
+	if pos, err := led.AddCause(ctx, turnA, ids[2]); err != nil || pos != 1 {
 		t.Fatalf("A's second cause = %d (%v), want 1", pos, err)
 	}
 }
@@ -264,10 +257,10 @@ func TestAddCauseRefusesAnEntryThatIsNotThere(t *testing.T) {
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "q")
 	ids := submitIntents(t, led, "ls")
 
-	if _, err := led.AddCause(ctx, turn, "ghost", 0); err == nil {
+	if _, err := led.AddCause(ctx, turn, "ghost"); err == nil {
 		t.Fatal("AddCause accepted a caused entry that does not exist")
 	}
-	if _, err := led.AddCause(ctx, "ghost", ids[0], 0); err == nil {
+	if _, err := led.AddCause(ctx, "ghost", ids[0]); err == nil {
 		t.Fatal("AddCause accepted a turn that does not exist")
 	}
 	// Nothing was left behind by either refusal.
@@ -313,7 +306,7 @@ func TestTheRelationOutlivesTheTurnThatClosedFirst(t *testing.T) {
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "run it")
 	ids := submitIntents(t, led, "sleep 30")
 
-	if _, err := led.AddCause(ctx, turn, ids[0], 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, ids[0]); err != nil {
 		t.Fatalf("AddCause: %v", err)
 	}
 	// The turn closes while the command is still open.
@@ -363,10 +356,10 @@ func TestATurnThatFailedMidCallKeepsTheCallsItMade(t *testing.T) {
 	dying := submitAction(t, led, "00000000-0000-7000-8000-00000000000c",
 		"blocks.read", content.EffectObserve, nil)
 
-	if _, err := led.AddCause(ctx, turn, done, 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, done); err != nil {
 		t.Fatalf("AddCause(done): %v", err)
 	}
-	if _, err := led.AddCause(ctx, turn, dying, 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, dying); err != nil {
 		t.Fatalf("AddCause(dying): %v", err)
 	}
 	// The second call fails and the turn fails with it.
@@ -408,7 +401,7 @@ func TestTheCausalPositionSurvivesAReopen(t *testing.T) {
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "persist")
 	ids := submitIntents(t, led, "ls", "pwd")
 	for _, id := range ids {
-		if _, err := led.AddCause(ctx, turn, id, 0); err != nil {
+		if _, err := led.AddCause(ctx, turn, id); err != nil {
 			t.Fatalf("AddCause: %v", err)
 		}
 	}
@@ -427,104 +420,12 @@ func TestTheCausalPositionSurvivesAReopen(t *testing.T) {
 	// The counter continues from what is stored, not from zero: a restart
 	// mid-turn must not put the next cause on top of an earlier one.
 	next, err := reopened.AddCause(ctx, turn, submitTurn(t, reopened,
-		"00000000-0000-7000-8000-00000000000d", "another entry"), 0)
+		"00000000-0000-7000-8000-00000000000d", "another entry"))
 	if err != nil {
 		t.Fatalf("AddCause after reopen: %v", err)
 	}
 	if next != 2 {
 		t.Fatalf("the first cause after a reopen took position %d, want 2", next)
-	}
-}
-
-// ── where in the answer it happened (nocx-9sqii) ──────────────────────────
-
-// causeAnchor reads the prose anchor off the caused-by edge itself, beside
-// the position — the same in-the-store reading causePosition takes.
-func causeAnchor(t *testing.T, led content.LedgerRepository, from, to string) int {
-	t.Helper()
-	edges, err := led.Edges(context.Background(), from)
-	if err != nil {
-		t.Fatalf("Edges(%s): %v", from, err)
-	}
-	for _, e := range edges {
-		if e.From != from || e.To != to || e.Rel != content.RelCausedBy {
-			continue
-		}
-		var payload struct {
-			At *int `json:"at"`
-		}
-		if err := json.Unmarshal([]byte(e.Payload), &payload); err != nil {
-			t.Fatalf("caused-by payload %q is not JSON: %v", e.Payload, err)
-		}
-		if payload.At == nil {
-			t.Fatalf("caused-by %s -> %s carries no anchor: payload %q", from, to, e.Payload)
-		}
-		return *payload.At
-	}
-	t.Fatalf("no caused-by edge %s -> %s among %+v", from, to, edges)
-	return -1
-}
-
-// A turn is drawn as fragments around the blocks it caused (nocx-9sqii), so
-// the position — which cause came first — is no longer the whole relation:
-// the reader also has to know WHERE IN THE PROSE each one sat, or every
-// restored turn puts its calls at the head of its flow while the live one
-// interleaves them. The anchor is that fact, and it is the CALLER's, not the
-// store's: only the run knows how much of the answer had been written.
-func TestACauseCarriesWhereInTheAnswerItHappened(t *testing.T) {
-	_, led := newLedger(t)
-	ctx := context.Background()
-	envReady(t, led, "local")
-
-	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "how much disk is left?")
-	ids := submitIntents(t, led, "df -h", "du -sh .")
-
-	if _, err := led.AddCause(ctx, turn, ids[0], 0); err != nil {
-		t.Fatalf("AddCause: %v", err)
-	}
-	if _, err := led.AddCause(ctx, turn, ids[1], 42); err != nil {
-		t.Fatalf("AddCause 2: %v", err)
-	}
-
-	if got := causeAnchor(t, led, ids[0], turn); got != 0 {
-		t.Fatalf("stored anchor of the first command = %d, want 0", got)
-	}
-	if got := causeAnchor(t, led, ids[1], turn); got != 42 {
-		t.Fatalf("stored anchor of the second command = %d, want 42", got)
-	}
-
-	caused, err := led.Caused(ctx, turn)
-	if err != nil {
-		t.Fatalf("Caused: %v", err)
-	}
-	if len(caused) != 2 {
-		t.Fatalf("Caused returned %d rows, want 2", len(caused))
-	}
-	if caused[0].At != 0 || caused[1].At != 42 {
-		t.Fatalf("resolved anchors = %d, %d; want 0, 42", caused[0].At, caused[1].At)
-	}
-}
-
-// The replay keeps the ORIGINAL anchor with the original position, for the
-// same reason: an approved resume passes the same call through the pipeline
-// again, by which time the answer has grown, and a second write would move
-// the call down the prose it actually happened above.
-func TestAReplayedCauseKeepsItsOriginalAnchor(t *testing.T) {
-	_, led := newLedger(t)
-	ctx := context.Background()
-	envReady(t, led, "local")
-
-	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "what changed?")
-	ids := submitIntents(t, led, "git status")
-
-	if _, err := led.AddCause(ctx, turn, ids[0], 7); err != nil {
-		t.Fatalf("AddCause: %v", err)
-	}
-	if _, err := led.AddCause(ctx, turn, ids[0], 300); err != nil {
-		t.Fatalf("AddCause replay: %v", err)
-	}
-	if got := causeAnchor(t, led, ids[0], turn); got != 7 {
-		t.Fatalf("anchor after the replay = %d, want the original 7", got)
 	}
 }
 
@@ -544,10 +445,10 @@ func TestAnActionSaysWhetherItOpenedABlockOfItsOwn(t *testing.T) {
 		"readScreen", content.EffectObserve,
 		&content.GrantScope{Kind: content.ResourceSession, ID: "sess-1"})
 
-	if _, err := led.AddCause(ctx, turn, opens, 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, opens); err != nil {
 		t.Fatalf("AddCause: %v", err)
 	}
-	if _, err := led.AddCause(ctx, turn, quiet, 0); err != nil {
+	if _, err := led.AddCause(ctx, turn, quiet); err != nil {
 		t.Fatalf("AddCause 2: %v", err)
 	}
 

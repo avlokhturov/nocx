@@ -222,7 +222,7 @@ func TestDeleteEntryCascadesToEdgesAndArtifacts(t *testing.T) {
 	ids := submitIntents(t, led, "source", "target")
 	src, dst := ids[0], ids[1]
 
-	if err := led.AddEdge(ctx, content.Edge{From: src, To: dst, Rel: content.RelCausedBy}); err != nil {
+	if err := led.AddEdge(ctx, content.Edge{From: src, To: dst, Rel: content.RelRerunOf}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: src})
@@ -230,7 +230,7 @@ func TestDeleteEntryCascadesToEdgesAndArtifacts(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "aaaaaaaa-0000-7000-8000-000000000001",
+		EntryID: src, ExecutionID: &execID, ID: "aaaaaaaa-0000-7000-8000-000000000001",
 		MediaType: content.MediaText, CaptureMethod: content.CaptureRawOutput,
 	})
 	if err != nil {
@@ -305,7 +305,8 @@ func TestArtifactsAttachToExecutionNotEntry(t *testing.T) {
 	}
 	for i, eid := range execIDs {
 		if _, err := led.AppendArtifact(ctx, content.AppendArtifact{
-			ExecutionID: eid,
+			EntryID:     entryID,
+			ExecutionID: &eid,
 			ID:          fmt.Sprintf("bbbbbbbb-0000-7000-8000-%012d", i),
 			MediaType:   content.MediaText,
 		}); err != nil {
@@ -1206,7 +1207,7 @@ func TestArtifactProvenanceRoundTrips(t *testing.T) {
 	off, end := int64(2048), int64(4096)
 	stream := content.StreamCombined
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000001",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000001",
 		MediaType: content.MediaText, CaptureMethod: content.CaptureTerminalCells,
 		CaptureVersion: 3, TerminalCols: &cols, TerminalRows: &rows,
 		Stream: &stream, ByteOffset: &off, ByteEnd: &end, Encoding: "utf-8",
@@ -1255,7 +1256,7 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000002",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000002",
 		MediaType: content.MediaText,
 	})
 	if err != nil {
@@ -1289,8 +1290,9 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 	}
 }
 
-// An artifact needs a real execution and a closed media type; a chunk needs
-// a real artifact. The FK and the CHECK are the checks.
+// An artifact needs a real BLOCK, a real execution when it names one, and a
+// closed media type; a chunk needs a real artifact. The FK and the CHECK are
+// the checks.
 func TestArtifactWritesValidateTheirTargets(t *testing.T) {
 	_, led := newLedger(t)
 	ctx := context.Background()
@@ -1308,21 +1310,34 @@ func TestArtifactWritesValidateTheirTargets(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 
+	ghost := int64(999_999)
 	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: 999_999, ID: "cccccccc-0000-7000-8000-000000000003",
+		EntryID: entryID, ExecutionID: &ghost, ID: "cccccccc-0000-7000-8000-000000000003",
 		MediaType: content.MediaText,
 	}); err == nil {
 		t.Fatal("artifact under a missing execution succeeded")
 	}
 	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000004",
+		EntryID: "no-such-entry", ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000006",
+		MediaType: content.MediaText,
+	}); err == nil {
+		t.Fatal("artifact under a missing block succeeded")
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000007",
+		MediaType: content.MediaText,
+	}); err == nil {
+		t.Fatal("artifact with no block at all succeeded — an artifact belongs to its block")
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000004",
 		MediaType: "image/png",
 	}); err == nil {
 		t.Fatal("artifact with a media type outside the closed set succeeded")
 	}
 	// Paired successes.
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000005",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000005",
 		MediaType: content.MediaText,
 	})
 	if err != nil {
@@ -1389,12 +1404,12 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 			VALUES ('b', 1, 'exploded')`},
 		{"authority_grants.policy", `INSERT INTO authority_grants
 			(execution_id, version, issued_at, expires_at, policy) VALUES (1, 1, 1, 2, 'yolo')`},
-		{"artifacts.media_type", `INSERT INTO artifacts (id, execution_id, media_type)
-			VALUES ('art', 1, 'text/html')`},
-		{"artifacts.truncated", `INSERT INTO artifacts (id, execution_id, media_type, truncated)
-			VALUES ('art2', 1, 'text/plain', 'clipped')`},
-		{"artifacts.capture_method", `INSERT INTO artifacts (id, execution_id, media_type, capture_method)
-			VALUES ('art3', 1, 'text/plain', 'telepathy')`},
+		{"artifacts.media_type", `INSERT INTO artifacts (id, entry_id, execution_id, media_type)
+			VALUES ('art', 'a', 1, 'text/html')`},
+		{"artifacts.truncated", `INSERT INTO artifacts (id, entry_id, execution_id, media_type, truncated)
+			VALUES ('art2', 'a', 1, 'text/plain', 'clipped')`},
+		{"artifacts.capture_method", `INSERT INTO artifacts (id, entry_id, execution_id, media_type, capture_method)
+			VALUES ('art3', 'a', 1, 'text/plain', 'telepathy')`},
 	}
 	for _, c := range cases {
 		if err := rawLedger(t, path, keyHex, c.sql); err == nil {
@@ -1444,7 +1459,9 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 			return led.FinishExecution(ctx, 1, content.FinishExecution{})
 		}},
 		{"AppendArtifact", func() error {
-			_, err := led.AppendArtifact(ctx, content.AppendArtifact{ID: "a", MediaType: content.MediaText})
+			_, err := led.AppendArtifact(ctx, content.AppendArtifact{
+				ID: "a", EntryID: "i", MediaType: content.MediaText,
+			})
 			return err
 		}},
 		{"AppendChunk", func() error { return led.AppendChunk(ctx, "a", 1, []byte("x")) }},
@@ -1452,7 +1469,7 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 			return led.AddEdge(ctx, content.Edge{From: "i", To: "i", Rel: content.RelCites})
 		}},
 		{"AddCause", func() error {
-			_, err := led.AddCause(ctx, "i", "i", 0)
+			_, err := led.AddCause(ctx, "i", "i")
 			return err
 		}},
 	}

@@ -505,7 +505,8 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	}
 	const body = "the-output-bytes-nobody-asked-for"
 	if _, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: row.Executions[0].ID, ID: "artifact-1", MediaType: content.MediaText,
+		EntryID: row.ID, ExecutionID: &row.Executions[0].ID,
+		ID: "artifact-1", MediaType: content.MediaText,
 		CaptureMethod: content.CaptureRawOutput, CaptureVersion: 1, Encoding: "utf-8",
 	}); err != nil {
 		t.Fatalf("AppendArtifact: %v", err)

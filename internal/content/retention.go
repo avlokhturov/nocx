@@ -244,8 +244,7 @@ func evictionVictims(ctx context.Context, tx *sql.Tx, req EvictionRequest) ([]st
 		    AND NOT EXISTS (
 		          SELECT 1
 		            FROM artifacts a
-		            JOIN executions x ON x.id = a.execution_id
-		           WHERE x.entry_id = e.id AND a.pinned = 1)
+		           WHERE a.entry_id = e.id AND a.pinned = 1)
 		  ORDER BY e.ingest_seq
 		  LIMIT ?`, req.Before, req.Max)
 	if err != nil {

@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 12
+const schemaVersion = 13
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -736,12 +736,41 @@ CREATE TABLE IF NOT EXISTS entries (
   -- true of the rows as well — see dropDeadSessions.
   pane_id         TEXT REFERENCES panes(id) ON DELETE SET NULL,
   session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+  -- THE TREE (ADR-0037, amending ADR-0036). Everything drawn in the
+  -- scrollback is an entry, and entries form ONE ordered tree: parent_id is
+  -- containment and pos orders siblings. NULL parent is a top-level block,
+  -- whose order stays ingest_seq — the design's total order (ADR-0019 §2) is
+  -- unchanged and the tree does not replace it.
+  --
+  -- This is a COLUMN and no longer an edge. It was a caused-by row in
+  -- edges carrying {pos, at}, and an edge cannot say "one parent" — the
+  -- table would take a second one and the reader would have to pick. The
+  -- database says it now. edges keeps the relations that genuinely are not
+  -- a tree (rerun-of, supersedes, cites, in-span, references).
+  --
+  -- ON DELETE SET NULL, not CASCADE, for the reason pane_id and session_id
+  -- above give in as many words: the container this row remembers is gone,
+  -- the block is not, and it must not be left pointing at a row that is not
+  -- there. A tool call whose turn was evicted is still a command that ran.
+  --
+  -- UNIQUE (parent_id, pos) is the seat, and it is the database's job
+  -- rather than a writer's: two children at one position is a drawing order
+  -- with two answers, and the store refuses it instead of picking. SQLite
+  -- counts NULLs as distinct in a unique index, so every top-level block
+  -- (NULL, NULL) coexists — the constraint binds siblings only.
+  parent_id       TEXT REFERENCES entries(id) ON DELETE SET NULL,
+  pos             INTEGER,
   cwd             TEXT NOT NULL,
-  kind            TEXT NOT NULL CHECK (kind IN ('shell','agent','action')),
+  -- text is one run of assistant prose (ADR-0037): a thing that was
+  -- PRINTED, not attempted. Its shape is declared by the CHECK at the foot
+  -- of the table rather than left to convention, because the objection to
+  -- prose living in a table built around intent → attempt → outcome is real.
+  -- Left implicit it becomes "for text this column is NULL and that one does
+  -- not apply", which is how a table rots.
+  kind            TEXT NOT NULL CHECK (kind IN ('shell','agent','action','text')),
   intent          TEXT NOT NULL,
   phase           TEXT NOT NULL CHECK (phase IN ('open','bound','closed')),
   status          TEXT NOT NULL CHECK (status IN ('pending','running','success','failure','interrupted','unknown')),
-  conversation_id TEXT,
   submitted_at    INTEGER NOT NULL,        -- backend wall clock, display only
   -- The terminal facts, written by FinishExecution — see the header note on
   -- the two clocks (nocx-rtg0.23).
@@ -749,20 +778,32 @@ CREATE TABLE IF NOT EXISTS entries (
   ended_at        INTEGER,                 -- backend wall clock at the close
   duration_ms     INTEGER,                 -- measured by whoever ran the clock
   sensitivity     TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),
-  reviewed_at     INTEGER,
   -- capture_key is the renderer's idempotency key for a FRAME capture
   -- (nocx-f4s5): the backend mints the frame entry's id, so the untrusted
   -- key gets its own column, unique where present — a replay of the same
   -- capture returns the original frame id, and two captures can never
   -- share a key. NULL for every non-frame entry.
   capture_key     TEXT,
-  payload         TEXT NOT NULL DEFAULT '{}' -- kind payload, sparse extension only
+  payload         TEXT NOT NULL DEFAULT '{}', -- kind payload, sparse extension only
+  UNIQUE (parent_id, pos),
+  -- The text shape, stated once and enforced by the engine: a run of prose
+  -- sits INSIDE a block (parent_id, pos), says nothing about an intent
+  -- (intent = ''), and has no execution to wait for or judge — it was
+  -- printed, so it is born closed and successful. Every clause is refused
+  -- separately; a row that satisfies four of the five is not a text block.
+  CHECK (kind <> 'text' OR (
+           parent_id IS NOT NULL AND pos IS NOT NULL AND
+           intent = '' AND phase = 'closed' AND status = 'success'))
 ) STRICT;
 
+-- What is left here is what is genuinely NOT a tree (ADR-0037). caused-by
+-- is retired with its {pos, at} payload: containment is entries.parent_id
+-- now, and the database guarantees the one parent an edge never could. These
+-- five are relations between blocks that each already have a home.
 CREATE TABLE IF NOT EXISTS edges (
   from_id TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
   to_id   TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
-  rel     TEXT NOT NULL CHECK (rel IN ('rerun-of','supersedes','caused-by','cites','in-span','references')),
+  rel     TEXT NOT NULL CHECK (rel IN ('rerun-of','supersedes','cites','in-span','references')),
   -- payload is the edge's sparse extension: for a references edge it is
   -- the region JSON (design §5 — references carry region coordinates).
   payload TEXT NOT NULL DEFAULT '{}',
@@ -825,9 +866,27 @@ CREATE TABLE IF NOT EXISTS grant_effects (
   PRIMARY KEY (grant_id, effect)
 ) STRICT;
 
+-- AN ARTIFACT BELONGS TO ITS BLOCK (ADR-0037). entry_id is the OWNER: it is
+-- what a body is a body OF, and it is NOT NULL because a body with no block
+-- is nothing a reader could ever draw. It cascades, so DeleteEntry still
+-- takes the bodies with it and eviction still frees what it accounts for.
+--
+-- execution_id is now PROVENANCE and nullable: WHICH ATTEMPT produced this
+-- body, when there was an attempt. A text block has a body and no attempt —
+-- it was printed, not run — so the column is honestly empty there rather
+-- than pointing at an execution invented to hold it. ON DELETE SET NULL for
+-- the reason derived_from below and entries.pane_id above both give: the
+-- link going null is the honest "provenance lost" state, and the body's own
+-- home is entry_id.
+--
+-- This does NOT collapse the executions table into entries. An execution is an
+-- ATTEMPT and there are several per entry by design (ADR-0020 decision 4:
+-- an approved retry is attempt 2 of the same intent, never a new intent) —
+-- which attempt printed a body is exactly what this column still answers.
 CREATE TABLE IF NOT EXISTS artifacts (
   id              TEXT PRIMARY KEY,        -- client-minted UUIDv7
-  execution_id    INTEGER NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+  entry_id        TEXT NOT NULL REFERENCES entries(id) ON DELETE CASCADE,
+  execution_id    INTEGER REFERENCES executions(id) ON DELETE SET NULL,
   media_type      TEXT NOT NULL CHECK (media_type IN
                   ('application/vt','text/plain','text/markdown','application/json')),
   derived_from    TEXT REFERENCES artifacts(id) ON DELETE SET NULL,
@@ -892,9 +951,18 @@ CREATE INDEX IF NOT EXISTS entries_by_session    ON entries(session_id);
 -- Restore reads one pane's blocks, newest first, and that is the whole
 -- access pattern the anchor exists for (design §8).
 CREATE INDEX IF NOT EXISTS entries_by_pane       ON entries(pane_id, ingest_seq DESC) WHERE pane_id IS NOT NULL;
+-- A block's children are read by parent in pos order, and there is
+-- deliberately no index here for it: UNIQUE (parent_id, pos) on the table
+-- already IS that index. A second one over the same two columns would cost
+-- every insert and answer nothing the first cannot.
 CREATE INDEX IF NOT EXISTS edges_by_to           ON edges(to_id);
 CREATE INDEX IF NOT EXISTS executions_by_entry   ON executions(entry_id, attempt);
-CREATE INDEX IF NOT EXISTS artifacts_by_execution ON artifacts(execution_id);
+-- A block's bodies are read by the block: the owning column is what the
+-- restore and the detail read reach for. artifacts_by_execution stays for
+-- the provenance question ("what did THIS attempt print") and is partial,
+-- because a text block's row has nothing to say to it.
+CREATE INDEX IF NOT EXISTS artifacts_by_entry     ON artifacts(entry_id);
+CREATE INDEX IF NOT EXISTS artifacts_by_execution ON artifacts(execution_id) WHERE execution_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS observations_by_env   ON environment_observations(environment_id, version DESC);
 -- The frame idempotency replay check is an index lookup, never a scan: one
 -- capture_key per frame (nocx-f4s5).

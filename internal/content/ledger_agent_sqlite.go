@@ -296,11 +296,13 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 			return err
 		}
 		mediaType, method, version := frameArtifactIdentity(in)
+		// The frame's body belongs to the frame BLOCK (ADR-0037); the
+		// capture execution beside it says which attempt took it.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, state, byte_len, capture_method, capture_version,
+			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
 			 terminal_cols, terminal_rows, encoding, gaps, payload)
-			VALUES (?, ?, ?, 'sealed', ?, ?, ?, ?, ?, 'utf-8', '[]', ?)`,
-			artifactID, execID, string(mediaType), len(text), string(method), version,
+			VALUES (?, ?, ?, ?, 'sealed', ?, ?, ?, ?, ?, 'utf-8', '[]', ?)`,
+			artifactID, frameID, execID, string(mediaType), len(text), string(method), version,
 			cols, rows, string(payload)); err != nil {
 			return err
 		}
@@ -550,10 +552,10 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		// from (prose wraps, a grid must not).
 		artifactID := mintID()
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, state, byte_len, capture_method, capture_version,
+			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
 			 encoding, gaps, payload)
-			VALUES (?, ?, 'text/plain', 'open', 0, 'none', 1, 'utf-8', '[]', '{}')`,
-			artifactID, runID); err != nil {
+			VALUES (?, ?, ?, 'text/plain', 'open', 0, 'none', 1, 'utf-8', '[]', '{}')`,
+			artifactID, in.ID, runID); err != nil {
 			return err
 		}
 
@@ -746,9 +748,8 @@ func validateFrameReference(ctx context.Context, tx *sql.Tx, in AgentAsk, ref Ag
 
 	var payload string
 	err = tx.QueryRowContext(ctx,
-		`SELECT a.payload FROM artifacts a
-		   JOIN executions e ON a.execution_id = e.id
-		  WHERE e.entry_id = ? ORDER BY a.id LIMIT 1`, ref.FrameID).Scan(&payload)
+		`SELECT a.payload FROM artifacts a WHERE a.entry_id = ? ORDER BY a.id LIMIT 1`,
+		ref.FrameID).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrFrameNotFound
 	}

@@ -26,7 +26,9 @@ package content
 // AddCause and Caused were never on that list: they arrived wired
 // (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for
 // every entry a turn causes (policyMiddleware.noteCause) and ledger.get
-// reaches Caused. Both were checked with `deadcode -tags gtk3 -whylive`,
+// reaches Caused. Since ADR-0037 both work the tree — AddCause seats a child,
+// Caused reads a block's children in pos order — rather than the retired
+// `caused-by` edge. Both were checked with `deadcode -tags gtk3 -whylive`,
 // which is the only form that answers this question — see the note below
 // about -filter.
 //
@@ -71,6 +73,13 @@ const (
 	EntryShell  EntryKind = "shell"
 	EntryAgent  EntryKind = "agent"
 	EntryAction EntryKind = "action"
+	// EntryText is one run of assistant prose (ADR-0037): a thing that was
+	// PRINTED, not attempted. It has no intent, no execution and no outcome
+	// to wait for, so the schema's CHECK pins its shape — inside a block
+	// (parent and pos), empty intent, born closed and successful. Everything
+	// drawn in the scrollback is an entry, and this is the kind that makes
+	// that true of what the model writes between its calls.
+	EntryText EntryKind = "text"
 )
 
 // Phase is the entry lifecycle (design §3.7): open until execution is
@@ -98,10 +107,13 @@ const (
 // Relation is the edge vocabulary (design §3.4).
 type Relation string
 
+// `caused-by` was here and is retired (ADR-0037): containment is
+// entries.parent_id now, which is one parent the database enforces rather
+// than however many rows anybody inserted. What is left is what is genuinely
+// not a tree.
 const (
 	RelRerunOf    Relation = "rerun-of"
 	RelSupersedes Relation = "supersedes"
-	RelCausedBy   Relation = "caused-by"
 	RelCites      Relation = "cites"
 	RelInSpan     Relation = "in-span"
 	// RelReferences joins a question entry to the frame entry it points at
@@ -343,17 +355,27 @@ type SubmitEntry struct {
 	// refused with ErrUnknownPane rather than stored dangling. Nil means the
 	// entry is attached to no recorded pane, which is what an agent run
 	// outside a terminal and every submit before nocx-rtg0.28 look like.
-	PaneID         *string
-	SessionID      *string
-	Cwd            string
-	Kind           EntryKind
-	Intent         string
-	ConversationID *string
-	StartedAt      *int64 // frontend monotonic clock — durations only
-	EndedAt        *int64
-	DurationMs     *int64
-	Sensitivity    Sensitivity
-	Payload        string // kind payload JSON (sparse extension only)
+	PaneID    *string
+	SessionID *string
+	// ParentID and Pos place the entry IN THE TREE (ADR-0037): the block it
+	// sits inside and where among that block's children it sits. Both nil is
+	// a top-level block, whose order stays ingest_seq.
+	//
+	// They travel together — a parent with no seat cannot be drawn and a seat
+	// with no parent is not a place — and the pair is the caller's, because
+	// only the caller knows where in what it is writing this belongs. A
+	// second child at a position already taken is refused by the database,
+	// never silently reordered.
+	ParentID    *string
+	Pos         *int
+	Cwd         string
+	Kind        EntryKind
+	Intent      string
+	StartedAt   *int64 // frontend monotonic clock — durations only
+	EndedAt     *int64
+	DurationMs  *int64
+	Sensitivity Sensitivity
+	Payload     string // kind payload JSON (sparse extension only)
 }
 
 // SubmitResult is the store's answer to Submit: the backend-assigned
@@ -837,11 +859,15 @@ type CaptureOutput struct {
 	Body []byte
 }
 
-// AppendArtifact creates one artifact of an execution, with its capture
+// AppendArtifact creates one artifact of a BLOCK, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
 // never one BLOB.
 type AppendArtifact struct {
-	ExecutionID    int64
+	// EntryID is the OWNER: the block this is a body of (ADR-0037). Required.
+	EntryID string
+	// ExecutionID is PROVENANCE: which attempt produced this body. Nil when
+	// there was no attempt — a `text` block was printed, not run.
+	ExecutionID    *int64
 	ID             string // client-minted UUIDv7
 	MediaType      MediaType
 	DerivedFrom    *string
@@ -873,57 +899,11 @@ type Edge struct {
 	To   string
 	Rel  Relation
 	// Payload is the edge's sparse extension — for a `references` edge it
-	// is the region JSON (FrameRegion), for a `caused-by` edge the causal
-	// position (CausePayload). Default '{}'; the store never interprets it,
-	// which is why AddCause — the one writer that DOES need a field read —
-	// is a method of its own rather than a flag on AddEdge.
+	// is the region JSON (FrameRegion). Default '{}'; the store never
+	// interprets it. It carried a `caused-by` edge's causal position until
+	// ADR-0037 made containment a column, and no relation left here has a
+	// field the store reads.
 	Payload string
-}
-
-// CausePayload is what a `caused-by` edge carries: where the caused entry
-// sits INSIDE the turn that caused it (nocx-h1l4o).
-//
-// WHY THE PAYLOAD AND NOT A COLUMN. An `ordinal` column on `edges` was the
-// other candidate and this repo is greenfield, so no migration argues for
-// either — the merit does. The position is a fact of ONE relation out of
-// six; a column would sit NULL on every `rerun-of`, `cites` and `in-span`
-// row, and it would have to be threaded through the wire shape, the JSON
-// Schema and the generated renderer type as a second way of saying what
-// `payload` already says for `references`. The sparse extension is declared
-// for exactly this, and `ledger.get` already carries an edge's payload
-// verbatim, so the relation reached the renderer with no new wire field at
-// all.
-//
-// WHAT INCREMENTS IT: one entry the turn caused. Not a clock and not
-// `ingest_seq` — ADR-0019 §2 is explicit that commit order is not causality
-// — but a causal index the turn hands out, 0 for the first thing it caused,
-// 1 for the next. Two turns count independently, because the position is a
-// place inside a turn rather than a number the store hands out.
-type CausePayload struct {
-	Pos int `json:"pos"`
-	// At is WHERE IN THE ANSWER'S PROSE this happened: how much of the
-	// turn's answer text had been written when the cause was recorded,
-	// counted in UTF-16 code units (nocx-9sqii).
-	//
-	// The position above orders the causes; it does not say where any of
-	// them sat in what the model wrote. A turn is drawn as fragments around
-	// the blocks it caused, so a reader that knows only the order puts every
-	// call at the head of the flow while the live view interleaves them —
-	// the deliberate gap nocx-h1l4o left, closed here.
-	//
-	// UTF-16 CODE UNITS, AND THE UNIT IS THE POINT. The one reader is a
-	// renderer that slices a JavaScript string, whose indices are UTF-16
-	// code units; a byte offset would split «41G свободно» mid-character on
-	// the first Cyrillic answer, and a rune count would disagree on an
-	// emoji. Stored in the unit the reader cuts with, so the cut is exact.
-	//
-	// UNLIKE Pos, THIS IS THE CALLER'S. The store cannot know how much of
-	// an answer has been written — only the run that is writing it can — so
-	// AddCause takes it, while Pos stays the store's for the reasons its own
-	// doc gives. A caller that has no answer to give passes 0, which draws
-	// the cause above the prose and is exactly right for the ordinary turn
-	// that reaches for its tools before it says anything.
-	At int `json:"at"`
 }
 
 // ActionFacts is the part of an ACTION entry's payload the ledger reads
@@ -954,28 +934,33 @@ type ActionFacts struct {
 	Resource *GrantScope `json:"resource,omitempty"`
 }
 
-// CausedEntry is one entry a turn caused, resolved: the relation's position
-// and the facts a reader needs to draw it, off the caused entry's own row.
+// CausedEntry is one CHILD of a block, resolved: its seat and the facts a
+// reader needs to draw it, off its own row (ADR-0037).
+//
+// It used to be a `caused-by` edge's other end and it is a child row now.
+// What it carried and no longer does is `at` — how far the turn's prose had
+// got when this happened — because that offset existed only while the unit
+// that is DRAWN (a run of prose) and the unit that is STORED (one whole
+// answer) were different things. They are the same thing now: prose is a
+// `text` child with a seat of its own, so the sequence is the children in
+// pos order and there is nothing left to cut.
 //
 // The JOIN happens HERE, in the ledger, and that is the point (AD-8). A
-// reader that got raw edges back would have to resolve each id, order the
-// result and decide what a dangling one means — a second owner of the
-// arrangement, in the surface that has the least idea what the relation
-// means. The ledger owns the relation; a reader draws what it is told.
+// reader handed raw ids would have to resolve each one, order the result and
+// decide what a dangling one means — a second owner of the arrangement, in
+// the surface that has the least idea what it means. The ledger owns the
+// arrangement; a reader draws what it is told.
 type CausedEntry struct {
-	// EntryID is the caused entry — a shell command the turn ran, or the
-	// action entry of a tool call it made.
+	// EntryID is the child — a run of prose the turn wrote, a shell command
+	// it ran, or the action entry of a tool call it made.
 	EntryID string
-	// Position is the causal index the turn assigned (CausePayload.Pos).
+	// Position is the child's seat among its siblings (entries.pos).
 	Position int
-	// At is how much of the turn's answer had been written when this
-	// happened, in UTF-16 code units (CausePayload.At) — where the reader
-	// cuts the prose to draw this cause between the text before it and the
-	// text written from its result.
-	At   int
-	Kind EntryKind
-	// Intent is the caused row's own intent: the command line for a shell
-	// entry, the tool name for an action.
+	Kind     EntryKind
+	// Intent is the child row's own intent: the command line for a shell
+	// entry, the tool name for an action, and EMPTY for a `text` child —
+	// prose has no intent, which is a clause of its CHECK rather than a
+	// convention a reader has to know.
 	Intent string
 	// Effect is the effect class the gate decided for an ACTION entry, read
 	// back off that row's payload. Empty on every other kind — a command a
@@ -1150,22 +1135,25 @@ type LedgerEntry struct {
 	// PaneID is the anchor the restore path reads; SessionID beside it is
 	// provenance, and it is nil from the first Open after the backend that
 	// wrote it exited (design §6.1).
-	PaneID         *string
-	SessionID      *string
-	Cwd            string
-	Kind           EntryKind
-	Intent         string
-	Phase          Phase
-	Status         EntryStatus
-	ConversationID *string
-	SubmittedAt    int64
-	StartedAt      *int64
-	EndedAt        *int64
-	DurationMs     *int64
-	Sensitivity    Sensitivity
-	ReviewedAt     *int64
-	Payload        string
-	Executions     []Execution
+	PaneID    *string
+	SessionID *string
+	// ParentID and Pos are the entry's place in the tree (ADR-0037): the
+	// block it sits inside and its seat among that block's children. Both nil
+	// on a top-level block.
+	ParentID    *string
+	Pos         *int
+	Cwd         string
+	Kind        EntryKind
+	Intent      string
+	Phase       Phase
+	Status      EntryStatus
+	SubmittedAt int64
+	StartedAt   *int64
+	EndedAt     *int64
+	DurationMs  *int64
+	Sensitivity Sensitivity
+	Payload     string
+	Executions  []Execution
 }
 
 // Execution is one run: lease bounds, interactivity policy, process group,
@@ -1204,8 +1192,11 @@ type Execution struct {
 // the bodies in seq order; it is nil on artifacts embedded in LedgerEntry
 // (the recall read must not haul bytes — Artifact fetches them).
 type Artifact struct {
-	ID             string
-	ExecutionID    int64
+	ID string
+	// EntryID is the block this body belongs to; ExecutionID is which
+	// attempt produced it, nil when there was none (ADR-0037).
+	EntryID        string
+	ExecutionID    *int64
 	MediaType      MediaType
 	DerivedFrom    *string
 	State          ArtifactState
@@ -1325,8 +1316,9 @@ type LedgerRepository interface {
 	// FinishExecution closes the run with its termination reason and
 	// closes the entry with its final status.
 	FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error
-	// AppendArtifact creates one artifact of an execution (never a BLOB:
-	// content arrives chunked).
+	// AppendArtifact creates one artifact of a BLOCK (never a BLOB: content
+	// arrives chunked). The entry owns it; the execution, when there was
+	// one, is the provenance of which attempt produced it.
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
 	// CaptureOutput records one body of a frozen block: the artifact if it
 	// is not there yet and the chunk at its seq, in one transaction against
@@ -1393,40 +1385,42 @@ type LedgerRepository interface {
 	AddEdge(ctx context.Context, e Edge) error
 	// Edges returns every edge touching entryID, in either direction.
 	Edges(ctx context.Context, entryID string) ([]Edge, error)
-	// AddCause records that causedID happened BECAUSE OF turnID — one
-	// `caused-by` edge carrying the causal position inside that turn — and
-	// returns the position it took (nocx-h1l4o, ADR-0036's closing
-	// sentence).
+	// AddCause seats an EXISTING entry as the next child of turnID and
+	// returns the seat it took (nocx-h1l4o, ADR-0036's closing sentence, as
+	// amended by ADR-0037). It is the write path for a block the turn caused
+	// but did not create — a command a `run` call opened, the action entry
+	// of a tool call — whose row was submitted before anyone knew where in
+	// the turn it belonged. An entry that knows its place when it is written
+	// carries it on Submit instead (SubmitEntry.ParentID/Pos), which is what
+	// a `text` block does.
 	//
-	// THE POSITION IS THE STORE'S, and the caller may not supply one. It is
-	// read and written inside the same transaction that appends the edge,
-	// so two causes recorded at once cannot take the same index and a
-	// process that restarted mid-turn continues from what is stored rather
-	// than from zero — an in-memory counter would restart on every approval
-	// resume, which re-runs the pipeline over a turn that already has
-	// causes.
+	// THE SEAT IS THE STORE'S, and the caller may not supply one. It is read
+	// and written inside one transaction, so two children recorded at once
+	// cannot take the same index and a process that restarted mid-turn
+	// continues from what is stored rather than from zero — an in-memory
+	// counter would restart on every approval resume, which re-runs the
+	// pipeline over a turn that already has children.
 	//
-	// IDEMPOTENT ON THE PAIR: recording a cause that is already there
-	// returns its ORIGINAL position and adds nothing. The approval resume
-	// passes the same call through the pipeline a second time, and a
+	// IDEMPOTENT ON THE PAIR: seating a child that is already under this
+	// parent returns its ORIGINAL position and moves nothing. The approval
+	// resume passes the same call through the pipeline a second time, and a
 	// counter that advanced on the replay would move the resumed call to
 	// after everything that followed it.
 	//
-	// Either id naming an entry that is not there is refused, so a
-	// `caused-by` edge can never dangle in the store — the reader's
-	// dangling case is an id whose ROW is not in the page it is drawing,
-	// which is a different thing and handled there.
-	// `at` is the ONE thing the caller supplies: how much of the turn's
-	// answer text had been written when this happened, in UTF-16 code
-	// units. The store cannot know it, and a reader that has to draw the
-	// turn as fragments around its blocks cannot do without it — see
-	// CausePayload.At. It is kept on the REPLAY too: the resume re-records
-	// a cause against an answer that has since grown, and taking the new
-	// value would move a call below the prose it happened above.
-	AddCause(ctx context.Context, turnID, causedID string, at int) (int, error)
-	// Caused returns everything entryID caused, in stored causal position
-	// order, each resolved into what a reader draws it with. Empty — never
-	// an error — for an entry that caused nothing and for an id no row
-	// carries: "what did this cause" has an honest answer either way.
+	// ONE PARENT, which is the whole reason this is a column and not an
+	// edge: an entry already seated under a DIFFERENT block is refused, not
+	// re-parented, because moving a block out of the turn that drew it is
+	// not something a second caller may do by accident. Either id naming an
+	// entry that is not there is refused too, so nothing is left seated
+	// under a parent the store does not hold.
+	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// Caused returns entryID's CHILDREN in pos order — everything drawn
+	// inside that block, prose included — each resolved into what a reader
+	// draws it with. It read `caused-by` edges until ADR-0037 made
+	// containment a column; the order it returns is the order on screen, and
+	// the sequence is the whole meaning (a sentence before a command is why
+	// the command was run). Empty — never an error — for a block with no
+	// children and for an id no row carries: "what is inside this" has an
+	// honest answer either way.
 	Caused(ctx context.Context, entryID string) ([]CausedEntry, error)
 }
