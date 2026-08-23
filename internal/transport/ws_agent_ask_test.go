@@ -39,6 +39,7 @@ type scriptedAssistantClient struct {
 	received       []assistant.Message
 	receivedParams assistant.AskParams
 	aborted        bool // onDelta returned an error and Ask aborted
+	release        <-chan struct{}
 }
 
 func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
@@ -48,6 +49,13 @@ func (s *scriptedAssistantClient) Probe(ctx context.Context, p assistant.ProbePa
 func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.release != nil {
+		select {
+		case <-s.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	s.received = append([]assistant.Message(nil), p.Messages...)
 	s.receivedParams = p
 	for _, d := range s.deltas {
@@ -642,6 +650,90 @@ func TestAgentAsk_RegionSelectsRowsForTheModel(t *testing.T) {
 	}
 	if st.State != "completed" {
 		t.Fatalf("runState = %q, want completed", st.State)
+	}
+}
+
+func TestAgentAsk_SealedVaultUnlocksAndContinuesTheRun(t *testing.T) {
+	release := make(chan struct{})
+	client := &scriptedAssistantClient{deltas: []string{"after unlock"}, release: release}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	h.v.Seal()
+	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
+	sid := openLocalSession(t, h.conn)
+
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "sealed-ask", "sessionId": sid, "question": "answer after unlock",
+		"cwd": "/repo", "references": []any{},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	frame := readUnlockRequestFrame(t, h.conn)
+	if frame.Reason != "answer the ask" {
+		t.Fatalf("unlock reason = %q, want %q", frame.Reason, "answer the ask")
+	}
+	if err := h.v.Unseal(t.Context(), vault.UnsealRequest{Passphrase: "test"}); err != nil {
+		t.Fatalf("Unseal: %v", err)
+	}
+	answerUnlock(t, h.conn, frame.RequestID, "unsealed")
+	close(release)
+
+	raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+	var delta agentRunDelta
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		t.Fatalf("runDelta: %v", err)
+	}
+	if delta.RunID != res.RunID || delta.Text != "after unlock" {
+		t.Fatalf("runDelta = %+v, want run %d after unlock", delta, res.RunID)
+	}
+	raw = readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var state agentRunState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState: %v", err)
+	}
+	if state.RunID != res.RunID || state.State != string(content.RunCompleted) {
+		t.Fatalf("runState = %+v, want run %d completed", state, res.RunID)
+	}
+}
+
+func TestAgentAsk_CancelledUnlockCancelsTheDurableRun(t *testing.T) {
+	client := &scriptedAssistantClient{deltas: []string{"must not run"}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	h.v.Seal()
+	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
+	sid := openLocalSession(t, h.conn)
+
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "cancelled-ask", "sessionId": sid, "question": "cancel this",
+		"cwd": "/repo", "references": []any{},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	frame := readUnlockRequestFrame(t, h.conn)
+	answerUnlock(t, h.conn, frame.RequestID, "cancelled")
+
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var state agentRunState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState: %v", err)
+	}
+	if state.RunID != res.RunID || state.State != string(content.RunCancelled) {
+		t.Fatalf("runState = %+v, want run %d cancelled", state, res.RunID)
+	}
+	if got := client.messages(); len(got) != 0 {
+		t.Fatalf("model received %d messages after unlock cancellation", len(got))
+	}
+
+	entry, err := h.db.Ledger().Entry(t.Context(), res.QuestionID)
+	if err != nil {
+		t.Fatalf("ledger entry: %v", err)
+	}
+	if len(entry.Executions) != 1 || entry.Executions[0].State == nil ||
+		*entry.Executions[0].State != content.RunCancelled {
+		t.Fatalf("durable run state = %+v, want cancelled", entry.Executions)
 	}
 }
 

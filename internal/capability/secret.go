@@ -103,6 +103,7 @@ type SecretOperations struct {
 	groups     profile.GroupRepository
 	vault      SecretVault
 	store      credential.SecretStore
+	resolver   credential.Resolver
 	// exists answers whether id names a stored secret. Wired from the
 	// vault's own existence check; nil means "no check" (a test seam).
 	exists func(context.Context, credential.SecretID) (bool, error)
@@ -116,6 +117,7 @@ func NewSecretOperations(
 	groups profile.GroupRepository,
 	v SecretVault,
 	store credential.SecretStore,
+	resolver credential.Resolver,
 	exists func(context.Context, credential.SecretID) (bool, error),
 ) *SecretOperations {
 	return &SecretOperations{
@@ -126,6 +128,7 @@ func NewSecretOperations(
 		groups:     groups,
 		vault:      v,
 		store:      store,
+		resolver:   resolver,
 		exists:     exists,
 	}
 }
@@ -146,7 +149,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 	return newOperation[SecretService](
 		control.NewComposite(f.configGate, f.vaultGate, f.lane),
 		g,
-		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
+		newSecretService(g, f.profiles, f.groups, f.vault, f.store, f.resolver),
 	), nil
 }
 
@@ -159,12 +162,13 @@ func NewSecretOperation(
 	groups profile.GroupRepository,
 	v SecretVault,
 	store credential.SecretStore,
+	resolver credential.Resolver,
 ) SecretOperation {
 	g := &guard{}
 	return newOperation[SecretService](
 		control.NewComposite(configGate, vaultGate, lane),
 		g,
-		newSecretService(g, profiles, groups, v, store),
+		newSecretService(g, profiles, groups, v, store, resolver),
 	)
 }
 
@@ -176,8 +180,12 @@ func newSecretService(
 	groups profile.GroupRepository,
 	v SecretVault,
 	store credential.SecretStore,
+	resolver credential.Resolver,
 ) *secretService {
-	return &secretService{guard: g, profiles: profiles, groups: groups, vault: v, store: store}
+	return &secretService{
+		guard: g, profiles: profiles, groups: groups, vault: v, store: store,
+		resolver: resolver,
+	}
 }
 
 type secretService struct {
@@ -186,6 +194,7 @@ type secretService struct {
 	groups   profile.GroupRepository
 	vault    SecretVault
 	store    credential.SecretStore
+	resolver credential.Resolver
 }
 
 func (s *secretService) Inventory(ctx context.Context) ([]vault.InventoryEntry, error) {
@@ -285,7 +294,7 @@ func (s *secretService) GetSecret(ctx context.Context, id credential.SecretID) (
 	if err := s.guard.check(); err != nil {
 		return credential.Secret{}, err
 	}
-	return s.store.Get(ctx, id)
+	return s.resolver.Resolve(ctx, id, credential.Operation("load the secret"))
 }
 
 func (s *secretService) Usage(ctx context.Context, row string) ([]profile.ProfileRef, error) {
@@ -374,7 +383,7 @@ func (s *secretService) resolveVaultSecret(ctx context.Context, name string, nam
 	if !ok {
 		return "", false, false
 	}
-	secret, err := s.store.Get(ctx, id)
+	secret, err := s.resolver.Resolve(ctx, id, credential.Operation("resolve the command line"))
 	if err != nil {
 		if err == vault.ErrVaultSealed {
 			return "", false, true

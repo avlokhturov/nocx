@@ -111,7 +111,7 @@ type WSServer struct {
 	// JSON-RPC error.
 	profiles    profile.ProfileRepository
 	groups      profile.GroupRepository
-	credentials credential.SecretStore
+	credentials credential.MaterialStore
 	// Vault lifecycle for vault.* RPC methods. When nil, those methods return a
 	// JSON-RPC error.
 	vaultLifecycle VaultLifecycle
@@ -752,27 +752,27 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 
 // WithCredentialStore attaches a credential store, enabling the
 // secrets.* and vault.* secret operations.
-func WithCredentialStore(cs credential.SecretStore) WSServerOption {
+func WithCredentialStore(cs credential.MaterialStore) WSServerOption {
 	return func(s *WSServer) { s.credentials = cs }
 }
 
-// credentialResolver is the STANCED read seam over the credential store
-// (nocx-k41yv): the form every handler that resolves material on a person's
-// behalf is wired with. Handlers hold this rather than the store, because
-// the store's Get takes no stance and a seam that can be bypassed is the
-// one that was — three times.
-//
-// The sealed predicate is injected here, at the composition root, because
-// internal/credential must not import the vault (the vault imports it) and
-// because which implementation's sealed error is in play is precisely a
-// composition decision.
+// credentialResolver is the stanced read seam over the credential store.
+// Production wires *vault.Vault, whose EnsureUnsealed owns the prompt and
+// coalesces concurrent operation reads. Test stores without that capability
+// retain the ordinary sealed-error path.
 func (s *WSServer) credentialResolver() credential.Resolver {
 	if s.credentials == nil {
 		return nil
 	}
+	var ensure func(context.Context, string) error
+	if unsealer, ok := s.credentials.(interface {
+		EnsureUnsealed(context.Context, string) error
+	}); ok {
+		ensure = unsealer.EnsureUnsealed
+	}
 	return credential.NewResolver(s.credentials, func(err error) bool {
 		return errors.Is(err, vault.ErrVaultSealed)
-	})
+	}, ensure)
 }
 
 // WithCredentialStore attaches a credential store, enabling the

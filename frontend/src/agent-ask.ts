@@ -259,8 +259,10 @@ export class AgentInputTarget implements InputTarget {
         // block was never associated: nothing to close.
         return
       }
-      if (s.state === 'completed' || s.state === 'cancelled') {
+      if (s.state === 'completed') {
         handle.close('success')
+      } else if (s.state === 'cancelled') {
+        handle.close('cancelled')
       } else if (s.state === 'failed' || s.state === 'interrupted') {
         handle.close('failure', s.error ?? s.state)
       }

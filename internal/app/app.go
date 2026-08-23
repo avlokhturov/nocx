@@ -1116,12 +1116,9 @@ func New(opts ...Option) (*App, error) {
 	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
 	// the transport owns "deliver one prompt to whichever renderer is
 	// there" — this line is the only place the two meet.
-	//
-	// NOT YET LIVE FOR USERS: EnsureUnsealed has no production consumer
-	// until nocx-k41yv routes the sealed secret-access paths through it.
-	// Callers still reach RequestUnlock directly and still get one prompt
-	// each. Recorded here rather than left to a green deadcode run, which
-	// is how nocx-rtg0 shipped a write path nobody called.
+	// Every production credential resolver now reaches EnsureUnsealed through
+	// the vault's structural capability (nocx-k41yv): asks, probes, command
+	// secret expansion and SSH authentication all share this coalescing state.
 	v.SetUnlockRequester(tp)
 
 	// One resolver, one consumer family: connections.test probes and
@@ -1207,7 +1204,7 @@ func New(opts ...Option) (*App, error) {
 		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
 	resolver := connection.NewResolver(
-		profileStore, profileStore, v,
+		profileStore, profileStore, credential.NewOperationResolver(v),
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),

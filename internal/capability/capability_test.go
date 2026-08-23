@@ -730,7 +730,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 	seam := newFakeVault()
 	cfgSvc := newProfileService(t)
 
-	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam))
 	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, testLane(), profiles, groups, cfgSvc, seam, seam)
 
 	// Run both in both arrival orders, concurrently, repeatedly.
@@ -861,7 +861,7 @@ func TestForSecretUnknownID(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam), seam.Exists)
 
 	op, err := factory.ForSecret(context.Background(), "sec:v1:file:does-not-exist")
 	if err == nil {
@@ -885,7 +885,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam), seam.Exists)
 	op, err := factory.ForSecret(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ForSecret with a known id failed: %v", err)
@@ -1015,7 +1015,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam))
 
 	// Failure path: unknown row.
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1255,7 +1255,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 func TestMintSecretReturnsTheMintedID(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam, credential.NewOperationResolver(seam))
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1279,7 +1279,7 @@ func TestMintSecretReturnsTheMintedID(t *testing.T) {
 func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	store := newFakeSecretStore()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store, credential.NewOperationResolver(store))
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {

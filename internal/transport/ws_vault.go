@@ -104,6 +104,8 @@ func reasonForError(err error) *vaultErrorData {
 		return &vaultErrorData{Reason: "vault-uninitialized"}
 	case errors.Is(err, vault.ErrVaultSealed):
 		return &vaultErrorData{Reason: "vault-sealed"}
+	case errors.Is(err, ErrUnlockCancelled):
+		return &vaultErrorData{Reason: "vault-operation-cancelled"}
 	case errors.Is(err, vault.ErrVaultGenerationChanged):
 		// NOT "vault-sealed". The renderer turns that reason into an Unlock
 		// dialog, and unlocking cannot fix a generation change — which is how
@@ -1261,7 +1263,10 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 	}
 	var secretOp capability.SecretOperation
 	if s.vaultLifecycle != nil && s.profiles != nil && s.groups != nil && s.credentials != nil {
-		secretOp = capability.NewSecretOperation(configGate, vaultGate, lane, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
+		secretOp = capability.NewSecretOperation(
+			configGate, vaultGate, lane, s.profiles, s.groups,
+			s.vaultLifecycle, s.credentials, s.credentialResolver(),
+		)
 	}
 	var resetOp capability.VaultResetOperation
 	if s.vaultReset != nil {

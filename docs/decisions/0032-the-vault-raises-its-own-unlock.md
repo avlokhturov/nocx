@@ -143,3 +143,42 @@ the message this ADR exists to delete.
 
 **Never seal while the app runs.** Rejected on its face: auto-seal is a feature
 and the vault's whole point is that it can be shut.
+
+## Amendment — 2026-08-23: stance governs reads, including runs
+
+`nocx-k41yv` found the boundary this decision omitted: the dispatcher sees only
+errors on JSON-RPC requests. Secret access may also happen after a request has
+created a durable run, or below connection/SSH layers. Letting the carrier
+decide whether an unlock appears made transport shape stand in for intent.
+
+The decision is amended:
+
+- `credential.Resolver` is the only consumer-facing interface that returns
+  secret material. Every read supplies either `Operation(reason)` or `Report()`;
+  the zero stance is invalid. `credential.SecretStore` exposes mutations and
+  existence only, so a stanceless read does not compile.
+- An operation read calls the vault's `EnsureUnsealed`, waits for the one
+  coalesced prompt, then continues the same operation. A report read never asks
+  and maps the sealed state to `credential.ErrSealedQuiet`.
+- Waiting is allowed only outside a capability admission. The ingress-critical
+  `vault.unlockResolved` method remains on the read loop, so the answer cannot
+  queue behind the operation it releases. The earlier statement that the
+  backend never blocks on unlock is superseded by this narrower invariant: no
+  control read loop or capability admission blocks on unlock.
+- `agent.ask` creates the durable run, answers with its backend identity, then
+  resolves endpoint material at the start of the stream task before the
+  streaming transition or any model request. Unlock therefore waits and
+  continues the same run. Dismissing it terminalizes the run as
+  `cancelled`/`user-killed`, not failed.
+- A stream resolves all endpoint material once. A later seal does not revoke
+  material already handed to the in-process client, and the stream has no
+  resolver from which it could fetch more. This is the deliberate answer to
+  the mid-run case; no re-drive is needed.
+- The renderer's sealed-error normalization and replay remain a fallback for
+  operations outside the material resolver. They no longer decide credential
+  intent.
+
+The plaintext lifetime is shorter than the request-path workaround this
+amendment replaces: endpoint key and secret-valued headers exist from the start
+of the stream task until the synchronous client call returns, never in the
+durable run, JSON-RPC payload, ledger, or logs.

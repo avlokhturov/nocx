@@ -3,64 +3,50 @@ package credential
 // WHO MAY RAISE THE UNLOCK — the declaration this file exists to force
 // (nocx-k41yv, ADR-0032 as amended).
 //
-// A sealed vault reaches the person as the unlock prompt through one seam:
-// the failure travels out as an error on a control REQUEST, the transport's
-// normalizer rewrites it to the canonical shape, and the renderer's
-// dispatcher raises the dialog and re-sends the request. Nothing about that
-// mechanism can tell whether the caller WANTED it: an ask needs the secret
-// and must raise, while a settings page listing which endpoints have a key
-// must not — it is describing state, and a modal thrown at somebody who was
-// only reading is the regression that keeps coming back.
+// Transport shape is not intent. An operation may resolve material while it
+// is still a request or after it has created a durable run; a report may travel
+// through the same pipes and must remain quiet. Every resolution therefore
+// declares one of two stances:
 //
-// Three times the fix was applied at a call site, and the fourth escape
-// arrived through a path nobody had edited. The cause was always the same:
-// whether the prompt appeared was decided by WHICH PIPE the error happened
-// to travel down. A pipe is not an intent.
+//   - Operation(reason) asks the vault to become unsealed, waits, and reads.
+//   - Report() reads only to describe state and translates sealed to
+//     ErrSealedQuiet, which cannot raise a prompt.
 //
-// So the intent is a required argument. A resolution declares why it is
-// asking, here, at the moment of asking:
-//
-//   - ForOperation — the person asked for something that cannot happen
-//     without this secret. A sealed vault is returned verbatim, so the seam
-//     recognizes it and the unlock appears.
-//   - ToReport — the resolution's whole purpose is to answer a question
-//     about state. A sealed vault is a FACT here, so it comes back as
-//     ErrSealedQuiet: a distinct error that deliberately does not wrap the
-//     vault's sealed error and does not carry its words, which is what
-//     makes it unrecognizable to the seam. A read cannot raise a prompt
-//     even if it wants to.
-//
-// There is no third option and no default. Stance has no valid zero value:
-// a resolution that names nothing gets ErrStanceUndeclared instead of a
-// secret, and the compiler already refuses the call that omits the
-// argument entirely.
+// There is no default. The zero stance returns ErrStanceUndeclared, and a call
+// that omits the stance does not compile. Raw Get belongs only to the
+// composition-only MaterialStore used to build this resolver.
 
 import (
 	"context"
 	"errors"
 )
 
-// Stance is why a secret is being resolved. It is a required argument of
-// every resolution — see the package comment above.
-type Stance int
+// Stance declares why secret material is being resolved. Its zero value is
+// invalid; callers construct one with Operation or Report.
+type Stance struct {
+	kind   stanceKind
+	reason string
+}
+
+type stanceKind uint8
 
 const (
-	// StanceUndeclared is the zero value and is never valid. It exists so
-	// the zero value cannot silently mean one of the real stances: a
-	// resolution that names nothing is a defect, and it is answered as one.
-	StanceUndeclared Stance = iota
-
-	// ForOperation: the person asked for something this secret is needed
-	// for — the ask, a probe, connecting a profile. A sealed vault becomes
-	// the unlock prompt and the caller's request completes once the vault
-	// answers.
-	ForOperation
-
-	// ToReport: the resolution answers a question about state — which
-	// endpoints have a resolvable key, what a credential badge says,
-	// agent.status. A sealed vault is reported, never raised.
-	ToReport
+	stanceUndeclared stanceKind = iota
+	stanceOperation
+	stanceReport
 )
+
+// Operation declares a user-initiated operation that cannot continue without
+// the secret. reason is shown by the vault-owned unlock prompt.
+func Operation(reason string) Stance {
+	return Stance{kind: stanceOperation, reason: reason}
+}
+
+// Report declares a read whose purpose is to describe state. It never raises
+// an unlock prompt.
+func Report() Stance {
+	return Stance{kind: stanceReport}
+}
 
 // ErrStanceUndeclared is what a resolution that names no stance gets
 // instead of a secret. It is a programming error, surfaced rather than
@@ -83,29 +69,50 @@ type Resolver interface {
 	Resolve(ctx context.Context, id SecretID, why Stance) (Secret, error)
 }
 
-// NewResolver wraps a store. sealed reports whether an error from the store
-// is the sealed-vault condition; it is injected because this package must
-// not import the vault (the vault imports this one), and because it is the
-// composition root's job to say which implementation's sealed error is in
-// play. A nil sealed predicate makes every error ordinary — the quiet
-// translation simply never fires, which fails towards reporting the
-// store's own error rather than towards a prompt nobody asked for.
-func NewResolver(store SecretStore, sealed func(error) bool) Resolver {
-	return resolver{store: store, sealed: sealed}
+// NewResolver wraps a store. sealed recognizes the store's sealed condition.
+// ensure raises and waits for the vault-owned unlock for operation reads. A
+// nil ensure preserves the sealed error for test seams and headless consumers
+// that have no prompt carrier.
+func NewResolver(
+	store MaterialStore,
+	sealed func(error) bool,
+	ensure func(context.Context, string) error,
+) Resolver {
+	return resolver{store: store, sealed: sealed, ensure: ensure}
+}
+
+// NewOperationResolver builds the operation-only seam used by connection and
+// SSH layers. A store that owns EnsureUnsealed supplies it structurally; test
+// stores and headless implementations preserve their ordinary read behavior.
+func NewOperationResolver(store MaterialStore) Resolver {
+	if store == nil {
+		return nil
+	}
+	var ensure func(context.Context, string) error
+	if unsealer, ok := store.(interface {
+		EnsureUnsealed(context.Context, string) error
+	}); ok {
+		ensure = unsealer.EnsureUnsealed
+	}
+	return NewResolver(store, nil, ensure)
 }
 
 type resolver struct {
-	store  SecretStore
+	store  MaterialStore
 	sealed func(error) bool
+	ensure func(context.Context, string) error
 }
 
 func (r resolver) Resolve(ctx context.Context, id SecretID, why Stance) (Secret, error) {
-	switch why {
-	case ForOperation:
-		// Verbatim, including the sealed error: this path is exactly the
-		// one whose failure must reach the seam intact.
+	switch why.kind {
+	case stanceOperation:
+		if r.ensure != nil {
+			if err := r.ensure(ctx, why.reason); err != nil {
+				return Secret{}, err
+			}
+		}
 		return r.store.Get(ctx, id)
-	case ToReport:
+	case stanceReport:
 		s, err := r.store.Get(ctx, id)
 		if err != nil && r.sealed != nil && r.sealed(err) {
 			return Secret{}, ErrSealedQuiet

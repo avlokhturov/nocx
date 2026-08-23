@@ -1326,7 +1326,7 @@ export class TerminalContent extends BasePaneContent {
               handle.append(text)
               this.scrollback?.scrollToBottom()
             },
-            close: (status: 'success' | 'failure', error?: string) => {
+            close: (status: 'success' | 'cancelled' | 'failure', error?: string) => {
               handle.close(status, error)
               this.scrollback?.scrollToBottom()
             },

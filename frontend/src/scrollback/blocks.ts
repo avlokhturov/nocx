@@ -145,8 +145,8 @@ export interface AnswerBlockHandle {
    *  `this: void` — the target holds the handle and calls the method
    *  detached from any receiver (unbound-method contract). */
   append(this: void, text: string): void
-  /** Close the block: success, or failure with the renderable reason. */
-  close(this: void, status: 'success' | 'failure', error?: string): void
+  /** Close the block with the run's terminal outcome. */
+  close(this: void, status: 'success' | 'cancelled' | 'failure', error?: string): void
 }
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
@@ -1649,12 +1649,10 @@ export class BlockManager {
           }
         }
       },
-      close(status: 'success' | 'failure', error?: string): void {
+      close(status: 'success' | 'cancelled' | 'failure', error?: string): void {
         stopWaiting()
         trimEmptyTail()
         partial = null
-        // The header's status chip, in the flow's own chip vocabulary —
-        // the words come from the ask kind's rules (nocx-ex636).
         const chips = blockKindRules('ask').statusChips
         const right = el.querySelector('.cmd-header-right')
         if (right && chips) {
@@ -1662,8 +1660,11 @@ export class BlockManager {
           chip.className =
             status === 'success'
               ? 'nocx-chip nocx-chip-ok cmd-header-exit'
-              : 'nocx-chip nocx-chip-fail cmd-header-exit'
-          chip.textContent = status === 'success' ? chips.done : chips.failed
+              : status === 'cancelled'
+                ? 'nocx-chip cmd-header-exit'
+                : 'nocx-chip nocx-chip-fail cmd-header-exit'
+          chip.textContent =
+            status === 'success' ? chips.done : status === 'cancelled' ? 'cancelled' : chips.failed
           right.appendChild(chip)
         }
         if (error) {

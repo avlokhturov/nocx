@@ -159,6 +159,7 @@ test('a sealed vault raises the unlock and the probe completes after unlocking',
   await lockVault(page)
   await openAIEndpoints(page)
   await openEndpointEditor(page)
+  await expect(unlockSheet(page)).not.toBeVisible()
   await page.getByRole('button', { name: 'Test endpoint', exact: true }).click()
 
   const unlock = unlockSheet(page)
