@@ -755,10 +755,28 @@ function placeHeaderChip(right: Element, chip: Element): void {
  *  socket, and the one that does is wired at the composition root. */
 export type AnswerTextSource = (entryId: string) => Promise<string | null>
 
+/** What a RUNNING block's ⋮ menu can do about the command in it, beyond
+ *  copying its text (nocx-92gfl, nocx-23rph).
+ *
+ *  Injected, never constructed here, for the same reason `answerText` is:
+ *  this module owns block DOM and holds neither an editor nor a socket. Both
+ *  entries also exist as a keystroke — ⌘/Ctrl+Enter summons, Ctrl+C
+ *  interrupts — and the menu is deliberately a SECOND DOOR to the same
+ *  handlers rather than a second implementation: a gesture nobody can see is
+ *  a gesture nobody uses, and two implementations of one action are two
+ *  behaviours waiting to diverge. */
+export interface RunningBlockActions {
+  /** Summon the editor to ask about this command — what ⌘/Ctrl+Enter does. */
+  ask(): void
+  /** Stop it, through the backend's escalation ladder. */
+  stop(): void
+}
+
 function buildOverflowMenu(
   blockEl: HTMLElement,
   command: string,
   answerText?: AnswerTextSource,
+  running?: RunningBlockActions,
 ): HTMLElement {
   const btn = document.createElement('button')
   btn.className = 'cmd-overflow-btn'
@@ -938,6 +956,37 @@ function buildOverflowMenu(
       closeMenu()
     })
 
+    // THE TWO THINGS A PERSON CAN DO ABOUT A COMMAND THAT IS STILL RUNNING
+    // (nocx-92gfl, nocx-23rph). Present only while it runs, and only when
+    // the host supplied the handlers: a finished block has nothing to ask
+    // about that the transcript does not already show, and nothing to stop.
+    //
+    // FIRST in the menu, above the copy group, because they act on the
+    // command while the copy items act on its text — and because they are
+    // the only items here that are time-limited.
+    if (running) {
+      const ask = document.createElement('button')
+      ask.className = 'cmd-overflow-menu-item'
+      // The identity is the attribute, not the word: the word can be
+      // translated and the CSS and the tests read this.
+      ask.dataset.action = 'ask'
+      ask.textContent = 'Ask about this command'
+      ask.addEventListener('click', (ev) => {
+        ev.stopPropagation()
+        closeMenu()
+        running.ask()
+      })
+      const stop = document.createElement('button')
+      stop.className = 'cmd-overflow-menu-item'
+      stop.dataset.action = 'stop'
+      stop.textContent = 'Stop'
+      stop.addEventListener('click', (ev) => {
+        ev.stopPropagation()
+        closeMenu()
+        running.stop()
+      })
+      menu.append(ask, stop)
+    }
     menu.append(copyCmd, copyOut, copyAll, wrapItem)
 
     // Render at body level so it floats above all scroll containers (P1-6).
@@ -1163,6 +1212,9 @@ export function createRunningBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
+  /** What this block's ⋮ menu can do about the command while it runs. Absent
+   *  in a bare-bones embedding, and then the menu is exactly what it was. */
+  running?: RunningBlockActions,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block cmd-block-running'
@@ -1184,9 +1236,10 @@ export function createRunningBlock(
     author,
   )
 
-  // Overflow menu — minimal: copy command only while running.
+  // Overflow menu — copying the command, plus what can be done ABOUT the
+  // command while it is still running (nocx-92gfl, nocx-23rph).
   // Always the LAST element of header-right (owner directive).
-  const overflow = buildOverflowMenu(wrapper, command)
+  const overflow = buildOverflowMenu(wrapper, command, undefined, running)
   const right = header.querySelector('.cmd-header-right')
   if (right) right.appendChild(overflow)
 
@@ -1326,6 +1379,11 @@ export interface BlockManagerOpts {
    *  embedding, and then copying an answer refuses rather than falling back
    *  to the painted text. */
   answerText?: AnswerTextSource
+  /** What a RUNNING block's ⋮ menu can do about the command in it
+   *  (nocx-92gfl, nocx-23rph). Passed straight to every running block this
+   *  manager opens; this manager neither summons nor signals anything.
+   *  Absent in a bare-bones embedding, and then the menu is what it was. */
+  runningActions?: RunningBlockActions
 }
 
 export class BlockManager {
@@ -1368,6 +1426,7 @@ export class BlockManager {
   /** Reader for an answer's durable text — handed to the copy menu of every
    *  answer block this manager frames (nocx-v13pd). */
   private _answerText?: AnswerTextSource
+  private _runningActions?: RunningBlockActions
   /** The attempt id the running block is bound to (ADR-0024 §7 projection).
    *  Set when the published running fact binds the block; cleared when the
    *  block freezes or the scrollback is cleared. */
@@ -1418,6 +1477,7 @@ export class BlockManager {
     this._dimensions = opts.dimensions
     this._sessionName = opts.sessionName
     this._answerText = opts.answerText
+    this._runningActions = opts.runningActions
   }
 
   /** THE ONE DOOR into `.scrollback-inner`. Everything this manager shows
@@ -1612,6 +1672,7 @@ export class BlockManager {
       },
       this._snapshotStore,
       author,
+      this._runningActions,
     )
     this._own(el, this._xtermContainer)
 

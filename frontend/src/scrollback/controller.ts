@@ -10,7 +10,7 @@
 
 import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
-import { BlockManager, type BlockRecord, type GetLineFn } from './blocks'
+import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockActions } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -49,6 +49,10 @@ export interface ScrollbackControllerOpts {
    *  manager, which hands it to the copy menu of every answer block it
    *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
   answerText?: (entryId: string) => Promise<string | null>
+  /** What a RUNNING block's ⋮ menu can do about the command in it — passed
+   *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
+   *  neither summons the editor nor signals a session. */
+  runningActions?: RunningBlockActions
 }
 
 export class ScrollbackController {
@@ -181,6 +185,7 @@ export class ScrollbackController {
       dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
       sessionName: opts.sessionName,
       answerText: opts.answerText,
+      runningActions: opts.runningActions,
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────

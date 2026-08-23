@@ -6530,3 +6530,680 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     }
   })
 })
+
+/**
+ * A COMMAND IS RUNNING, AND THE PERSON AT IT IS NOT POWERLESS (nocx-92gfl,
+ * nocx-23rph).
+ *
+ * Two gestures, one situation. While a command runs the editor is hidden —
+ * that is deliberate and stays (an inline TUI on the normal buffer needs
+ * both its ROWS and its KEYS, and nocx cannot tell `top` from `du` without
+ * sniffing the stream, which AD-6 forbids). What was missing was any way
+ * back in: nowhere to type a question about the command, and no way to stop
+ * it once the keyboard had gone anywhere else.
+ *
+ * Every test below drives the seam a person actually reaches — a keystroke
+ * on the pane, an item in the ⋮ menu — and reads the answer off the product:
+ * the grid's writability, a byte arriving at the session, the target the
+ * mode indicator names. None of them reads a private flag as the assertion.
+ */
+describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)', () => {
+  /** jsdom implements neither; the block model calls both at submit. */
+  function stubScrolling(): () => void {
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    return () => {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+    }
+  }
+
+  /** The pane element TerminalContent mounted into — where the pane-level
+   *  key handlers live, and an ancestor of the live grid. */
+  const paneOf = (content: TerminalContent): HTMLElement =>
+    (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+
+  /** The live grid container: where the focus is while a command runs and
+   *  the person has not clicked away. */
+  const gridOf = (content: TerminalContent): HTMLElement =>
+    (content as unknown as { scrollback: ScrollbackController }).scrollback.xtermLiveContainer
+
+  /** The grid's writability seam. Reached through a cast because the typed
+   *  interface says setReadOnly(boolean) while the mock is a spy — the same
+   *  trade the ownership tests above make. */
+  const readOnlyOf = (content: TerminalContent): ReturnType<typeof vi.fn> =>
+    (rendererOf(content) as unknown as { setReadOnly: ReturnType<typeof vi.fn> }).setReadOnly
+
+  /** The registry's active target id — read through the product's own
+   *  account of it, the mode indicator's data-target, wherever the editor
+   *  is on screen to carry one. */
+  function targetNamed(ed: CommandEditor): string | null {
+    const el = viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    return el?.dataset.target ?? null
+  }
+
+  /** ⌘/Ctrl+Enter, dispatched where a person's keystroke lands while the
+   *  grid owns input: on the live grid, so it travels the same path. */
+  function summonChord(content: TerminalContent): void {
+    gridOf(content).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+  }
+
+  function escapeOn(el: HTMLElement): void {
+    el.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+  }
+
+  /** A prompt, then one running command. The two facts a person's pane goes
+   *  through before any of this matters. */
+  function startCommand(client: ClientFake, command = 'sleep 300'): (p: unknown) => void {
+    const handler = lifecycleHandler(client)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command },
+    })
+    return handler
+  }
+
+  /** The completion of that command, which is what brings the prompt back. */
+  function finishCommand(handler: (p: unknown) => void): void {
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: {
+        id: 'att-run',
+        state: 'completed',
+        exitCode: 0,
+        fence: 'c'.repeat(64),
+        completedAt: '2026-08-23T12:00:00Z',
+      },
+    })
+    // The SAME domain and the SAME epoch: epochs name an incarnation of the
+    // integration, not a command, and the kernel refuses a fact whose epoch
+    // does not match the domain it already holds (resolveDomain).
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+  }
+
+  it('Ctrl+Enter while a command is running summons the editor, in ask mode', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      // The editor is gone while it runs — that is today's behaviour and it
+      // is the state this gesture exists for.
+      expect(ed.isVisible).toBe(false)
+
+      summonChord(content)
+
+      expect(ed.isVisible).toBe(true)
+      // Ask, not the shell: the summoned editor's only target. Read off the
+      // indicator, which is the product's own account of where Enter goes.
+      expect(targetNamed(ed)).toBe('agent')
+      // And the grid is read-only again, which is the invariant
+      // _syncLifecycleOwnership states about itself: editor shown ⟺ grid
+      // read-only.
+      expect(readOnlyOf(content)).toHaveBeenLastCalledWith(true)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('Escape dismisses it and the keys reach the process again', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      summonChord(content)
+      expect(ed.isVisible).toBe(true)
+
+      escapeOn(viewOf(ed).contentDOM)
+
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
+      // The assertion that matters is not the flag: it is a key the PROGRAM
+      // consumes arriving at the session. `q` is what quits `top`, and if
+      // the editor still owned input it would be a letter in a draft.
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('q')
+      expect(session.send).toHaveBeenCalledWith('q')
+      // And the summon is UNWOUND, not merely hidden: the target it
+      // displaced is back, so the prompt that returns when the command ends
+      // is the shell's again. Leaving it on Ask would put the person's next
+      // Enter in front of the model without them ever choosing that.
+      expect(targetNamed(ed)).toBe('shell')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('a half-typed question survives the dismissal, and is still there on the next summon', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      summonChord(content)
+      ed.insertText('why is this slow')
+
+      escapeOn(viewOf(ed).contentDOM)
+      expect(ed.isVisible).toBe(false)
+
+      summonChord(content)
+      // Escape here means "put this away", not "throw it away": the person
+      // dismissed a surface, they did not cancel their question.
+      expect(ed.getDoc()).toBe('why is this slow')
+      // And with words still in the box, the target stayed on Ask through
+      // the dismissal: they are a question, and re-pointing them at the
+      // shell is the one thing that must never happen to them.
+      expect(targetNamed(ed)).toBe('agent')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('the summoned editor cannot target the shell, so no second command starts over the running one', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      summonChord(content)
+      expect(targetNamed(ed)).toBe('agent')
+
+      // The chord is now the editor's own — the explicit target switch. It
+      // must refuse the shell while the shell is busy.
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(targetNamed(ed)).toBe('agent')
+      // And it says so rather than doing nothing: a control that ignores a
+      // deliberate gesture in silence reads as broken.
+      expect(showToast).toHaveBeenCalled()
+
+      // The direct assertion the criterion asks for: Enter on a typed line
+      // starts no command. A shell submission would paste the line into the
+      // grid and open a running block; a question does neither.
+      const renderer = rendererOf(content)
+      renderer.paste.mockClear()
+      ed.insertText('rm -rf /tmp/x')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(renderer.paste).not.toHaveBeenCalled()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('when the command ends the editor comes back and the target returns to the shell', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      summonChord(content)
+      expect(targetNamed(ed)).toBe('agent')
+
+      finishCommand(handler)
+
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('shell')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('but a half-typed question is never re-targeted at the shell', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      summonChord(content)
+      ed.insertText('what did that do')
+
+      finishCommand(handler)
+
+      // The prompt is back — and the words in the box are still a question,
+      // addressed to the assistant. Re-pointing them at the shell would
+      // turn the next Enter into a command the person never wrote.
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('agent')
+      expect(ed.getDoc()).toBe('what did that do')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('nothing changes for a command nobody summons the editor during', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+
+      // This is the regression each dropped design would have introduced:
+      // an inline TUI keeps every row and every key it has today, until the
+      // person deliberately asks for the editor.
+      expect(ed.isVisible).toBe(false)
+      expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('q')
+      expect(session.send).toHaveBeenCalledWith('q')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('the alternate buffer is untouched: the chord summons nothing there', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'htop')
+      rendererOf(content)._fireBufferChange('alternate')
+
+      summonChord(content)
+
+      // A full-screen program owns the pane, and that is its own
+      // conversation — the editor has no business over it.
+      expect(ed.isVisible).toBe(false)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // ── stopping it (nocx-23rph) ─────────────────────────────────────────────
+
+  /** Every signal this pane addressed to its own session, in order. Read
+   *  off the SESSION HANDLE, which is the addressing: a signal reaches the
+   *  command running in the session it was asked of, and the pane has
+   *  exactly one. */
+  function signalsSent(content: TerminalContent): string[] {
+    return sessionOf(content).signal.mock.calls.map((c: unknown[]) => c[0] as string)
+  }
+
+  it('Ctrl+C is addressed to the running command even when the grid does not hold focus', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    // Somewhere in the pane that is NOT the grid and NOT a text control —
+    // the state the owner reported, where the key reaches nobody today.
+    const elsewhere = document.createElement('div')
+    elsewhere.tabIndex = -1
+    paneOf(content).append(elsewhere)
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      elsewhere.focus()
+      expect(document.activeElement).toBe(elsewhere)
+
+      elsewhere.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      expect(signalsSent(content)).toEqual(['interrupt'])
+    } finally {
+      restore()
+      elsewhere.remove()
+      teardown()
+    }
+  })
+
+  it('and it stands down where the byte already arrives: the grid keeps its own Ctrl+C', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      // The grid's hidden textarea is where xterm parks focus; from there
+      // the key becomes 0x03 on the data plane and the line discipline
+      // turns it into SIGINT. Two owners for one keystroke would signal
+      // twice — which is a second interrupt the person did not ask for.
+      const textarea = document.createElement('textarea')
+      gridOf(content).append(textarea)
+      textarea.focus()
+
+      textarea.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      expect(signalsSent(content)).toEqual([])
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('with nothing running, Ctrl+C signals nothing', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    const elsewhere = document.createElement('div')
+    elsewhere.tabIndex = -1
+    paneOf(content).append(elsewhere)
+    try {
+      content.setVisible(true)
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      elsewhere.focus()
+
+      elsewhere.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      // Nothing is addressed, because there is no addressee. The wire
+      // method's own honest refusal covers the race where the command ends
+      // between the gesture and the call.
+      expect(signalsSent(content)).toEqual([])
+    } finally {
+      restore()
+      elsewhere.remove()
+      teardown()
+    }
+  })
+
+  it('the editor’s own Ctrl+C sends no ^C to the pty while the question is the submission (nocx-oova)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      summonChord(content)
+      ed.insertText('what is it waiting on')
+      const session = sessionOf(content)
+      session.send.mockClear()
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+
+      // The draft is cancelled, which is what the key means in a prompt.
+      expect(ed.getDoc()).toBe('')
+      // And nothing reached the pty: a submission that is not a shell
+      // command must not carry shell behaviour to the process. Under the
+      // summon this is not academic — the ^C would have killed the very
+      // command the person was composing a question about.
+      expect(session.send).not.toHaveBeenCalledWith('\x03')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('and a bare Enter on an empty question sends no CR either (nocx-oova)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      summonChord(content)
+      const session = sessionOf(content)
+      session.send.mockClear()
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+
+      expect(session.send).not.toHaveBeenCalledWith('\r')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('with the shell target active, Enter and Ctrl+C keep their shell behaviour', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('shell')
+      const session = sessionOf(content)
+      session.send.mockClear()
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      expect(session.send).toHaveBeenCalledWith('\r')
+
+      session.send.mockClear()
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      expect(session.send).toHaveBeenCalledWith('\x03')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  // ── the ⋮ menu, which is what makes both gestures visible ────────────────
+
+  /** Open the running block's overflow menu and return its items. */
+  function runningBlockMenu(content: TerminalContent): HTMLElement[] {
+    const btn = paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')
+    expect(btn, 'the running block has no ⋮ button').not.toBeNull()
+    btn!.click()
+    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+  }
+
+  function itemNamed(items: HTMLElement[], action: string): HTMLElement | undefined {
+    return items.find((el) => el.dataset.action === action)
+  }
+
+  it('the running block’s ⋮ menu offers Ask about this command, and it does what the chord does', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      // A real submit, so the running block is the one a person's Enter
+      // opened rather than a fixture.
+      ed.insertText('sleep 300')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
+      })
+      expect(ed.isVisible).toBe(false)
+
+      const ask = itemNamed(runningBlockMenu(content), 'ask')
+      expect(ask, 'the running block’s menu offers no way to ask about it').toBeDefined()
+      ask!.click()
+
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('agent')
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+
+  it('and Stop, which goes through the escalation ladder rather than a second answer', async () => {
+    const client = makeClient()
+    const { view, ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      ed.insertText('sleep 300')
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
+      })
+
+      const stop = itemNamed(runningBlockMenu(content), 'stop')
+      expect(stop, 'the running block’s menu offers no Stop').toBeDefined()
+      stop!.click()
+
+      // `stop`, not `interrupt`: the menu item promises the command is gone,
+      // and the backend's ladder is what keeps that promise.
+      expect(signalsSent(content)).toEqual(['stop'])
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+})

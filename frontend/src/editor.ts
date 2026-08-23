@@ -73,6 +73,20 @@ export interface EditorActions {
   // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
   // the next command.
   cancel: () => void
+  /** The host's first refusal on Escape, before the editor clears the draft.
+   *  Return true to consume the key.
+   *
+   *  It exists because Escape has one more meaning than the editor knows
+   *  about: when the editor was SUMMONED over a running command
+   *  (nocx-92gfl), Escape means "put this away and give the keys back to the
+   *  process" — and it must not throw the half-typed question away on the
+   *  way out. Anywhere else the host declines and Escape is the clear it has
+   *  always been.
+   *
+   *  Consulted from BOTH Escape entry points — the editor's own keydown and
+   *  the host's document rescue — so the decision order is one order and not
+   *  two (AD-8). The editor stays passive: it asks, it does not decide. */
+  onEscape?: () => boolean
   /** Fired on every user-driven document change with the current value.
    *  Use to drive external filter logic without coupling the data source
    *  to the editor. */
@@ -879,10 +893,12 @@ export class CommandEditor {
       e.stopPropagation()
       return
     }
-    // Escape clears the draft without interrupting the shell (Ctrl-C).
+    // Escape clears the draft without interrupting the shell (Ctrl-C) —
+    // unless the host claims the key first (onEscape).
     if (e.key === 'Escape') {
       e.preventDefault()
       e.stopPropagation()
+      if (this.actions.onEscape?.()) return
       this.escapeClear()
       return
     }
@@ -930,6 +946,10 @@ export class CommandEditor {
   handleExternalEscape(e: KeyboardEvent): boolean {
     if (e.isComposing || e.keyCode === 229) return false
     if (this.keyArbiter?.(e)) return true
+    // The same order the internal path takes: the host's claim, then the
+    // clear. A summoned editor dismissed from out here leaves nothing to
+    // focus, so the focus call belongs after the claim, not before it.
+    if (this.actions.onEscape?.()) return true
     this.escapeClear()
     this.view.focus()
     return true
