@@ -617,10 +617,10 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 }
 
 // FinishAgentRun closes the run and its turn in ONE transaction: the run's
-// terminal state, end and termination reason; the turn's entry; and the
-// answer body (sealed). A run is never reported terminal in the run
-// vocabulary while its entry still says otherwise — both lifecycles close
-// together, or neither does.
+// terminal state, end and termination reason; the turn's entry, with the
+// interval it took; and the answer body (sealed). A run is never reported
+// terminal in the run vocabulary while its entry still says otherwise — both
+// lifecycles close together, or neither does.
 func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in FinishAgentRun) error {
 	if !in.State.IsTerminal() {
 		return fmt.Errorf("content: finish agent run: %s is not terminal", in.State)
@@ -633,8 +633,10 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		defer func() { _ = tx.Rollback() }()
 
 		var entryID, payload string
+		var runStartedAt sql.NullInt64
 		err = tx.QueryRowContext(ctx,
-			`SELECT entry_id, payload FROM executions WHERE id = ?`, runID).Scan(&entryID, &payload)
+			`SELECT entry_id, payload, started_at FROM executions WHERE id = ?`, runID).
+			Scan(&entryID, &payload, &runStartedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNoSuchRun
 		}
@@ -662,8 +664,33 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 			string(in.State), in.EndedAt, string(in.TerminationReason), payload, runID); err != nil {
 			return err
 		}
+		// The turn's terminal facts, and its duration with them (nocx-hoeq3).
+		// A shell command's duration is the RENDERER's measurement because
+		// the renderer is what timed it; nobody times a turn but this
+		// process, which opened the run at submit and is closing it now. So
+		// the two ends here are one clock, and subtracting them is asking
+		// that clock rather than differencing two (see the schema note).
+		//
+		// A run with no start — nothing writes one, but the column is
+		// nullable and a row can be older than the code reading it — leaves
+		// both the start and the duration untouched. Null is "we do not
+		// know", which is a fact the header can draw honestly; a zero would
+		// be the claim that the assistant answered instantly.
+		var startedAt, durationMs *int64
+		if runStartedAt.Valid {
+			started := runStartedAt.Int64
+			startedAt = &started
+			if d := in.EndedAt - started; d >= 0 {
+				durationMs = &d
+			}
+		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`, string(status), entryID); err != nil {
+			`UPDATE entries SET phase = 'closed', status = ?,
+			   started_at = COALESCE(started_at, ?),
+			   ended_at = ?,
+			   duration_ms = COALESCE(?, duration_ms)
+			 WHERE id = ?`,
+			string(status), startedAt, in.EndedAt, durationMs, entryID); err != nil {
 			return err
 		}
 		// The body seals with the run: a terminal run never leaves an

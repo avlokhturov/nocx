@@ -5903,6 +5903,44 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  // ── a duration nobody recorded is not a duration of zero (nocx-hoeq3) ──
+  //
+  // Off the wire `durationMs` is nullable, and null is what the ledger sends
+  // for a time it never measured. It has to reach the header AS null: the
+  // chip is drawn only when there is a duration, and coercing the null to 0
+  // on the way in turns "we do not know" into the confident claim that the
+  // command took no time at all. Same shape as an evicted body versus a
+  // command that printed nothing (ADR-0019 §7) — two facts that must not
+  // render alike.
+  //
+  // Asserted HERE, at the pane's own read, because that is where the
+  // coercion lived: a unit fed a fixture with a number in it cannot see a
+  // null it never receives.
+  it('draws NO duration chip for a time the store never recorded, and 0ms for one it did', async () => {
+    const client = storeWith(
+      [entry({ id: 'e-2', intent: 'true', durationMs: 0 }), entry({ durationMs: null })],
+      '',
+    )
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+      })
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')] as HTMLElement[]
+      const [untimed, instant] = restored
+      expect(untimed.querySelector('.cmd-header-text')?.textContent).toBe('make test')
+      expect(untimed.querySelector('.cmd-header-duration')).toBeNull()
+      // And the other fact still says itself out loud, so the absence above
+      // reads as "unknown" and never as "the chip was dropped".
+      expect(instant.querySelector('.cmd-header-duration')?.textContent).toBe('0ms')
+    } finally {
+      teardown()
+    }
+  })
+
   // ── a restored turn comes back with what it caused (nocx-h1l4o) ───────
   //
   // This is the PRODUCTION path, not the units under it: the pane's own read

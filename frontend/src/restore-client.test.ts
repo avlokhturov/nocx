@@ -158,6 +158,16 @@ describe('restore-client — the pane read', () => {
     expect(block.command).toBe('go test ./...')
   })
 
+  it('carries a duration the store never recorded as NULL, never as zero', async () => {
+    // `durationMs` is nullable on the wire and null is what an entry nobody
+    // timed carries. Zero is a different fact — it is a claim — and the
+    // header draws a chip for it. Coercing here is what made a restored turn
+    // say '0ms' out loud (nocx-hoeq3).
+    const client = fakeQuery([entry({ durationMs: null }), entry({ id: 'e2', durationMs: 0 })])
+    const blocks = await blocksForPane(client, 'pane-1')
+    expect(blocks.map((b) => b.durationMs)).toEqual([0, null])
+  })
+
   it('a command a person typed is authored by the shell', async () => {
     const client = fakeQuery([entry({})])
     const [block] = await blocksForPane(client, 'pane-1')

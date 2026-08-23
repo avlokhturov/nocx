@@ -1020,3 +1020,91 @@ func TestAnAskIsOneEntryWhoseBodyIsTheAnswer(t *testing.T) {
 		}
 	}
 }
+
+// ── the turn's duration is a fact the CLOSE holds (nocx-hoeq3) ────────────
+
+// A restored turn draws a duration chip, and the only clock that can fill it
+// is this one: the renderer measures a shell command because the backend may
+// not read the stream (AD-6), but a turn's whole lifecycle is the backend's —
+// the run's start is written at submit and its end arrives here. Nothing else
+// can answer "how long did the assistant take".
+//
+// Before this the close wrote neither the entry's end nor its duration, so
+// every restored turn came off the wire with `durationMs: null`. That was
+// invisible while a turn drew no duration chip at all; the chip made it a
+// visible "0ms" (nocx-hoeq3), which is a different fact from "unknown" and a
+// wrong one — the duration WAS known and was being dropped.
+func TestFinishAgentRun_RecordsTheTurnsDuration(t *testing.T) {
+	ctx := context.Background()
+	db, led, _ := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+	ask := askIn(t, led, "session-1", "pane-1")
+
+	// The interval OPENS at submit: the run row carries the start, and it is
+	// the start the close must measure from — not the moment of the close.
+	open, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || open == nil {
+		t.Fatalf("Entry(%s) = %+v, %v", ask.EntryID, open, err)
+	}
+	var startedAt int64
+	for _, ex := range open.Executions {
+		if ex.State != nil && ex.StartedAt != nil {
+			startedAt = *ex.StartedAt
+		}
+	}
+	if startedAt == 0 {
+		t.Fatalf("the pending run carries no start: %+v", open.Executions)
+	}
+
+	err = led.FinishAgentRun(ctx, ask.RunID, content.FinishAgentRun{
+		State:             content.RunCompleted,
+		TerminationReason: content.TermCompleted,
+		EndedAt:           startedAt + 1500,
+	})
+	if err != nil {
+		t.Fatalf("FinishAgentRun: %v", err)
+	}
+
+	turn, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("Entry(%s) after close = %+v, %v", ask.EntryID, turn, err)
+	}
+	if turn.DurationMs == nil {
+		t.Fatalf("the closed turn carries no duration — a restored turn can only read 'unknown' for a time the ledger held all along")
+	}
+	if *turn.DurationMs != 1500 {
+		t.Errorf("the turn's duration = %dms, want 1500ms (end − the run's own start)", *turn.DurationMs)
+	}
+	// And its ends, so the row is self-consistent: a duration whose interval
+	// has no start and no finish is a number nothing can be checked against.
+	if turn.StartedAt == nil || *turn.StartedAt != startedAt {
+		t.Errorf("the turn's start = %v, want the run's own start %d", turn.StartedAt, startedAt)
+	}
+	if turn.EndedAt == nil || *turn.EndedAt != startedAt+1500 {
+		t.Errorf("the turn's end = %v, want %d", turn.EndedAt, startedAt+1500)
+	}
+
+	// And through the read the RESTORE actually makes: ledger.query pages
+	// this statement, and a duration the entry holds but the page drops
+	// would reach the renderer as the same null the bug wrote.
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, PaneID: "pane-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	var found bool
+	for _, row := range page.Entries {
+		if row.ID != ask.EntryID {
+			continue
+		}
+		found = true
+		if row.DurationMs == nil || *row.DurationMs != 1500 {
+			t.Errorf("the paged turn's duration = %v, want 1500ms", row.DurationMs)
+		}
+	}
+	if !found {
+		t.Fatalf("the turn is not in its own pane's page: %+v", page.Entries)
+	}
+}

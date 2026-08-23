@@ -34,7 +34,12 @@ export interface RestorableBlock {
    *  makes an inline ssh honest without any code of its own (design §7). */
   host: string
   status: 'success' | 'failure' | 'entered' | 'unknown'
-  durationMs: number
+  /** How long it took, or NULL for a time the store never recorded — which
+   *  is not the same fact as zero and must not draw the same chip. A turn
+   *  whose run predates the close that measures it carries null forever,
+   *  and the header answers that with no duration chip at all (nocx-hoeq3).
+   *  Coercing it to 0 here is what made a restored turn claim '0ms'. */
+  durationMs: number | null
   exitCode: number | null
   /** WHO submitted it — the entry's own kind, which is what that column
    *  means (ledger_command.go: "Author is WHO submitted the command, and it
@@ -90,7 +95,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
       cwd: e.cwd,
       host: e.host ?? '',
       status: frozenStatus(e.status),
-      durationMs: e.durationMs ?? 0,
+      durationMs: e.durationMs,
       exitCode: e.exitCode,
       author: e.kind === 'agent' ? ('agent' as const) : ('shell' as const),
     }))
