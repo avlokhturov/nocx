@@ -3,7 +3,7 @@
 
 // @vitest-environment jsdom
 
-import { describe, it, expect, vi, beforeEach, beforeAll } from 'vitest'
+import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
 import {
   BlockManager,
   createCommandBlock,
@@ -2838,5 +2838,110 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
     expect(fragments[0].querySelector('.cmd-header-exit')).toBeNull()
     expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('900ms')
     expect(fragments[1].querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+  })
+})
+
+/**
+ * WHAT A RUNNING BLOCK'S ⋮ MENU OFFERS (nocx-92gfl, nocx-23rph).
+ *
+ * Both gestures also exist as a keystroke — ⌘/Ctrl+Enter summons the editor
+ * to ask, Ctrl+C interrupts — and the menu is what makes them findable: a
+ * chord nobody can see is a gesture nobody uses. It is a second DOOR to the
+ * host's handlers and never a second implementation, so what this file
+ * asserts is that the items exist, that they call through, and that they
+ * exist ONLY while the command is running.
+ *
+ * They are added to the menu the kit already draws for every block, not to a
+ * menu of their own: one vocabulary for "what can I do with this block".
+ */
+describe('the running block’s ⋮ menu acts on the command, not just its text', () => {
+  const menuItems = (el: HTMLElement): HTMLElement[] => {
+    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+    return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
+  }
+  const named = (items: HTMLElement[], action: string): HTMLElement | undefined =>
+    items.find((i) => i.dataset.action === action)
+
+  afterEach(() => {
+    document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+  })
+
+  it('offers Ask about this command and Stop, and each calls the host’s handler once', () => {
+    const container = document.createElement('div')
+    const ask = vi.fn()
+    const stop = vi.fn()
+    const el = createRunningBlock(
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { ask, stop },
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      expect(named(items, 'ask')?.textContent).toBe('Ask about this command')
+      expect(named(items, 'stop')?.textContent).toBe('Stop')
+      named(items, 'ask')!.click()
+      expect(ask).toHaveBeenCalledTimes(1)
+
+      named(menuItems(el), 'stop')!.click()
+      expect(stop).toHaveBeenCalledTimes(1)
+      // The click closed the menu: an action that acts on the block behind
+      // its own popover would leave the popover over the result.
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    } finally {
+      el.remove()
+    }
+  })
+
+  it('and a block with no running actions wired keeps exactly the menu it had', () => {
+    const container = document.createElement('div')
+    const el = createRunningBlock(1, 'du -Hs /', '~', '', () => container, noopSelect, freshStore())
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      expect(named(items, 'ask')).toBeUndefined()
+      expect(named(items, 'stop')).toBeUndefined()
+      expect(items.map((i) => i.textContent)).toEqual([
+        'Copy command',
+        'Copy output',
+        'Copy all',
+        'Wrap lines',
+      ])
+    } finally {
+      el.remove()
+    }
+  })
+
+  it('a FROZEN block offers neither: there is nothing left to stop, and its output is right there', () => {
+    const container = document.createElement('div')
+    const el = createCommandBlock(
+      'command',
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      '<span class="term-line">12K\t/</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      expect(named(items, 'ask')).toBeUndefined()
+      expect(named(items, 'stop')).toBeUndefined()
+    } finally {
+      el.remove()
+    }
   })
 })

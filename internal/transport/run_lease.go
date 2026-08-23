@@ -39,7 +39,6 @@ package transport
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"syscall"
 	"time"
@@ -47,7 +46,6 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -319,50 +317,21 @@ func (l *runLease) disarm() {
 // KILL is sent (nothing can ignore it), or there is nothing in the
 // foreground to signal — never before, so the caller can assert the
 // execution is dead when this returns. Runs on the caller's goroutine.
+//
+// The ladder itself lives in foreground_signal.go, because the lease is no
+// longer its only caller: a person's Stop on a running block's menu asks
+// the same question — "how do you stop a process" — and a second answer to
+// it would be two policies that agree until the day one of them changes
+// (nocx-23rph, AGENTS.md "look for the existing answer"). What stays here
+// is the lease's own part: which session, and what to say when there is no
+// local process group at all.
 func (l *runLease) escalate() {
 	if l.sess == nil {
 		l.log.Warn("run lease: no local process group to signal — the execution keeps running",
 			"session_id", string(l.sid))
 		return
 	}
-	escalation := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
-	for i, sig := range escalation {
-		err := l.sess.SignalForeground(sig)
-		if err != nil {
-			if errors.Is(err, pty.ErrNoForeground) {
-				return // nothing running to cancel
-			}
-			l.log.Warn("run lease: signal failed", "session_id", string(l.sid), "signal", int(sig), "error", err)
-			continue
-		}
-		if i == len(escalation)-1 {
-			return // KILL — the execution is gone
-		}
-		if l.cooperated() {
-			return
-		}
-		l.log.Info("run lease: execution did not cooperate, escalating",
-			"session_id", string(l.sid), "from", int(sig))
-	}
-}
-
-// cooperated polls the foreground group until it is gone — ErrNoForeground
-// means the shell took the foreground back (or the group vanished) — or
-// SignalGrace elapses. A zombie waits for its parent's reap, so the poll
-// has to outlive it; the shell reaps promptly.
-func (l *runLease) cooperated() bool {
-	grace := l.cfg.SignalGrace
-	if grace <= 0 {
-		grace = defaultRunSignalGrace
-	}
-	deadline := time.Now().Add(grace)
-	for time.Now().Before(deadline) {
-		if err := l.sess.SignalForeground(0); err != nil {
-			return true
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	return false
+	stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace)
 }
 
 // effectiveRunLease returns the server's lease config: the config named by

@@ -5447,3 +5447,98 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 		})
 	}
 }
+
+// ── session.signal ─────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the two enums' spelling and the tags. Every
+// (signal, outcome) pair the handler can produce, because the field the
+// renderer branches on is the outcome and a word it has never seen is a
+// branch it does not have.
+func TestSessionSignal_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	for _, sig := range []string{signalInterrupt, signalStop} {
+		for _, outcome := range []string{
+			string(foregroundDelivered), string(foregroundNothingRunning), "unsupported",
+		} {
+			raw, err := json.Marshal(signalResult{Signal: sig, Outcome: outcome})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, fmt.Sprintf("session.signal DTO (%s/%s)", sig, outcome))
+		}
+	}
+}
+
+// And the negative, which is what makes the pair above evidence: the schema
+// REFUSES an outcome nobody declared, a missing field and an undeclared one.
+func TestSessionSignal_ContractRefusesWhatItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	bad := map[string]string{
+		"an outcome nobody named": `{"signal":"stop","outcome":"maybe"}`,
+		"a signal nobody named":   `{"signal":"sighup","outcome":"delivered"}`,
+		"the outcome missing":     `{"signal":"stop"}`,
+		"the signal missing":      `{"outcome":"delivered"}`,
+		"an undeclared field":     `{"signal":"stop","outcome":"delivered","pid":4242}`,
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the contract accepted %s: %s", name, raw)
+			}
+		})
+	}
+}
+
+// THE REAL RESULT OFF THE REAL SOCKET — the row contracts/README.md says is
+// the reason the directory exists. A payload this test built would prove the
+// struct is well-formed; only driving the method through the socket proves
+// the handler sends it.
+//
+// Both outcomes a local session can produce are driven here, in one
+// connection, because a contract satisfied by only the happy shape is a
+// contract with an untested half: the refusal is the one a person meets when
+// their command has just finished, and it travels in the result rather than
+// as an error precisely so the renderer can read it.
+func TestSessionSignal_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	conn, tap := signalServer(t)
+	sid := openSessionTapped(t, conn, tap)
+
+	// At a prompt: nothing to signal. The shell echoing its own output is
+	// what says the prompt is there — never a sleep.
+	submitCommand(t, conn, sid, "printf %s%s CONTRACT -PROMPT")
+	tapDataFor(t, tap, sid, "CONTRACT-PROMPT", 20*time.Second)
+	atPrompt := tapCall(t, conn, tap, 21, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalInterrupt,
+	})
+	validateJSON(t, schema, resultOf(t, atPrompt), "session.signal result at a prompt (real socket)")
+
+	// And with a job in the foreground: delivered.
+	submitCommand(t, conn, sid, "sh -c 'printf %s%s CONTRACT -RUNNING; sleep 300'")
+	tapDataFor(t, tap, sid, "CONTRACT-RUNNING", 20*time.Second)
+	running := tapCall(t, conn, tap, 22, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalStop,
+	})
+	validateJSON(t, schema, resultOf(t, running), "session.signal result over a running command (real socket)")
+}
+
+// resultOf pulls the `result` out of a JSON-RPC response envelope, failing
+// on an error object — so a schema assertion can never silently validate
+// nothing.
+func resultOf(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal response: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("the method answered an error: %+v", env.Error)
+	}
+	if len(env.Result) == 0 {
+		t.Fatalf("the method answered no result: %s", raw)
+	}
+	return env.Result
+}

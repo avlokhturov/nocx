@@ -284,6 +284,10 @@ export interface SessionFake {
   parent: Open['parent']
   send: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
+  /** Address a signal to the command running in this session (nocx-23rph).
+   *  Resolves `delivered` by default — the case a test that is not about
+   *  the refusal wants; a test that IS overrides the mock. */
+  signal: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
@@ -316,6 +320,10 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     parent: null,
     send: vi.fn(),
     sendResize: vi.fn(),
+    // The signal is ECHOED back, exactly as the wire echoes it: a fixture
+    // that always answered 'interrupt' would let a caller that asked for
+    // 'stop' pass unnoticed.
+    signal: vi.fn((signal: string) => Promise.resolve({ signal, outcome: 'delivered' })),
     close: vi.fn(),
     onData: vi.fn((cb: (data: string) => void) => {
       dataCb = cb

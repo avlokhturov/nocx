@@ -46,6 +46,7 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
   integrationMessage,
@@ -430,6 +431,34 @@ export class TerminalContent extends BasePaneContent {
    *  names only the incoming target. */
   private activeTargetId: string | null = null
   private agentTarget: AgentInputTarget | null = null
+  /** The editor is SUMMONED: the person asked for it over a command that is
+   *  still running (nocx-92gfl).
+   *
+   *  The hidden editor is deliberate and stays. An inline TUI on the normal
+   *  buffer needs both its ROWS and its KEYS, and nocx cannot tell `top`
+   *  from `du -Hs` without sniffing the stream, which AD-6 forbids — so any
+   *  design has to work identically for both, and hiding by default does.
+   *  What was missing was a way back IN, because asking about the command
+   *  is not running a second one: `agent.ask` travels the control plane and
+   *  never touches the pty, so a busy shell is no obstacle to it.
+   *
+   *  It is an axis of the SHOW question only, never of authority: while it
+   *  is true the editor is visible and the grid is read-only, exactly as at
+   *  a prompt, so `inputOwner()` keeps deriving from `editor.isVisible` and
+   *  the invariant `_syncLifecycleOwnership` states about itself — editor
+   *  shown ⟺ grid read-only — is untouched. It is spent the moment the
+   *  command stops running, whichever way it stops. */
+  private _summoned = false
+  /** The target the summon displaced, restored when the summon ends and the
+   *  draft is empty.
+   *
+   *  Restoring what was there rather than assuming "shell" is one line more
+   *  and one defect fewer: the ordinary case IS shell (the person submitted
+   *  a command, so the shell was active), and the case that is not is real —
+   *  the assistant's own `run` puts a pane in `running` while the person is
+   *  in Ask. Forcing shell there would undo a choice the person made and
+   *  the summon never touched. */
+  private _summonRestoreTargetId: string | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -1242,6 +1271,15 @@ export class TerminalContent extends BasePaneContent {
         // text/plain artifact instead of the SGR one — one fetch path, two
         // media types.
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        // The two things a person can do ABOUT a running command, made
+        // visible on the block that is running it (nocx-92gfl, nocx-23rph).
+        // The menu is a second DOOR to the handlers the keystrokes reach —
+        // never a second implementation — so the chord and the item cannot
+        // drift apart.
+        runningActions: {
+          ask: () => void this.summonEditor(),
+          stop: () => this.signalActiveCommand('stop'),
+        },
       })
 
       log.info('nocx: mounting renderer')
@@ -1483,11 +1521,7 @@ export class TerminalContent extends BasePaneContent {
       // the registry's notification repaints the label. Ordinary use
       // never touches it — it is the confirmation that Enter goes to the
       // shell (nocx-4wtlh).
-      this.indicator = new TargetIndicator(() => {
-        const current = this.inputTargets?.active().id
-        if (!this.inputTargets || !current) return
-        this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
-      })
+      this.indicator = new TargetIndicator(() => this.toggleInputTarget())
 
       this.editor = new CommandEditor(
         {
@@ -1598,8 +1632,38 @@ export class TerminalContent extends BasePaneContent {
           // fresh prompt. Deliberately not routed through the submit path —
           // no attempt is opened and no ledger record is written, because
           // nothing was executed (ADR-0024 §5).
-          submitEmpty: () => this.session?.send('\r'),
-          cancel: () => this.session?.send('\x03'),
+          // BOTH OF THESE ARE SHELL BEHAVIOUR, and they run only when the
+          // submission IS a shell command (nocx-oova). The TARGET declares
+          // it — routesToShell, read through the registry, the same one
+          // authority `handoffToShell` below consults — so there is no
+          // per-mode boolean inside the editor and no second derivation of
+          // "which mode am I in".
+          //
+          // It was already the right rule and it is now load-bearing: a
+          // summoned editor is up while a command RUNS (nocx-92gfl), so the
+          // bare CR would go into that program's stdin and the ^C would
+          // kill the very command the person is composing a question about.
+          // Before the summon the editor could only be up at a prompt, where
+          // both were merely wrong rather than destructive.
+          submitEmpty: () => {
+            if (this.inputTargets?.active().routesToShell === false) return
+            this.session?.send('\r')
+          },
+          cancel: () => {
+            if (this.inputTargets?.active().routesToShell === false) return
+            // Ctrl-C at a prompt is a keystroke to the SHELL — its line
+            // editor discards the line and prints a fresh prompt — and the
+            // byte is what delivers that. Over a RUNNING command the same
+            // key is an interrupt addressed to the execution, which is the
+            // active block's business and goes through the one owner of it.
+            if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
+            else this.session?.send('\x03')
+          },
+          // A summoned editor's Escape puts it away and gives the keys back
+          // to the running process, leaving the half-typed question where it
+          // is (nocx-92gfl). Everywhere else this declines and Escape stays
+          // the draft clear it has always been.
+          onEscape: () => this.dismissSummonedEditor(),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
@@ -1659,11 +1723,7 @@ export class TerminalContent extends BasePaneContent {
           // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
-          onToggleTarget: () => {
-            const current = this.inputTargets?.active().id
-            if (!this.inputTargets || !current) return
-            this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
-          },
+          onToggleTarget: () => this.toggleInputTarget(),
           onDismissChip: (id) => {
             this.referenceChips = this.referenceChips.filter((c) => c.id !== id)
             this.editor?.setReferenceChips(this.referenceChips)
@@ -2200,6 +2260,41 @@ export class TerminalContent extends BasePaneContent {
             e.preventDefault()
             return
           }
+        }
+        // ── Ctrl+C is addressed to the ACTIVE BLOCK (nocx-23rph) ────────
+        //
+        // Today the key reaches a running command only as the byte 0x03 on
+        // the data plane, which means only while the grid holds the
+        // keyboard: click a frozen block, another pane, the chrome, and the
+        // same key stops the same command no longer. The address is the
+        // pane's one execution, not whoever has focus — so this branch
+        // covers the gap and nothing else.
+        //
+        // FOUR THINGS KEEP THEIR CTRL+C, and each is somebody else's owner
+        // of the same keystroke (AGENTS.md: two surfaces may never own one
+        // input):
+        //
+        //  - a real selection anywhere: Ctrl+C is COPY, and always was;
+        //  - somebody else's text control: their copy, their interrupt;
+        //  - the editor on screen: its own handler clears the draft and
+        //    decides about the pty from the active target (see `cancel`);
+        //  - the live grid with the editor hidden: xterm is already turning
+        //    this into 0x03 and the line discipline into SIGINT. Signalling
+        //    here as well would be a second interrupt nobody asked for.
+        //
+        // With nothing running there is no addressee and the key is left
+        // alone — signalActiveCommand is the one owner of that check too.
+        if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+          if (!this.hasRunningCommand()) return
+          const sel = window.getSelection()
+          if (sel && !sel.isCollapsed && sel.toString() !== '') return
+          const active = document.activeElement
+          if (isTextEntry(active)) return
+          if (this.editor?.isVisible && active && this.editor.rootContains(active)) return
+          if (active && this.scrollback?.xtermLiveContainer.contains(active) === true) return
+          e.preventDefault()
+          this.signalActiveCommand('interrupt')
+          return
         }
         // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
         // the pane the user clicked — a frozen block, the scrollback, the
@@ -2745,6 +2840,34 @@ export class TerminalContent extends BasePaneContent {
           this.enterNativeMode()
         }
       })
+
+      // ── Summon the editor over a running command (nocx-92gfl) ──────────
+      //
+      // IN THE CAPTURE PHASE, and that is not a style choice. xterm attaches
+      // its own keydown to the hidden textarea, and by the time an event
+      // bubbles to this element xterm has already turned Ctrl+Enter into a
+      // CR and pushed it through onData — into the stdin of the very command
+      // this chord is about. Capture on an ancestor runs before the
+      // textarea's own listener, so the key is intercepted rather than
+      // undone.
+      //
+      // ⌘/Ctrl+Enter and not a new chord, because it already means "I want
+      // the assistant": at a prompt it flips the target to Ask, and here it
+      // brings the box that has that target back. One gesture, one meaning,
+      // two situations.
+      target.addEventListener(
+        'keydown',
+        (e: KeyboardEvent) => {
+          if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+          // The editor on screen owns this chord: it is the explicit target
+          // switch there, and the editor's own handler decides.
+          if (this.editor?.isVisible) return
+          if (!this.summonEditor()) return
+          e.preventDefault()
+          e.stopPropagation()
+        },
+        true,
+      )
 
       this._mounted = true
       // The reference-chip seam: a document selection inside a finished
@@ -3509,6 +3632,166 @@ export class TerminalContent extends BasePaneContent {
     return 'none'
   }
 
+  /** Whether ONE command is running in this pane right now — "the active
+   *  block", in the owner's words.
+   *
+   *  The lifecycle kernel already answers this (ADR-0024 §5: an attempt is
+   *  open from submit or authenticated start until an authenticated
+   *  same-domain completion), so nothing here re-derives it from a block's
+   *  CSS class or from the byte stream. One PTY has one foreground process
+   *  group, so "the active block" is unambiguous: this is the pane's one
+   *  execution, and it is what both the summon and the interrupt address. */
+  private hasRunningCommand(): boolean {
+    const st = this.lifecycle.state
+    // The ATTEMPT's state, not the axis's word. `running` is the kernel's
+    // name for the axis a lane is on once an attempt exists there, and it
+    // keeps that name after the attempt completes — the state carries the
+    // completed record until the next prompt fact arrives. So the axis alone
+    // would say a command is running for the whole window between its exit
+    // status and the shell's next prompt, which is exactly the window a Stop
+    // must refuse in and a summon must not open in.
+    return st.kind === 'running' && st.attempt.state === 'open'
+  }
+
+  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
+   *
+   *  Two gestures land here and nowhere else: ⌘/Ctrl+Enter from the grid,
+   *  and "Ask about this command" on the running block's ⋮ menu. The menu
+   *  item exists because a chord nobody can see is a gesture nobody uses;
+   *  it is a second DOOR, never a second implementation.
+   *
+   *  Refused unless there is something to ask about and the pane is in a
+   *  state where an editor belongs: no running command (the editor is
+   *  already there, or will be), the ALTERNATE buffer (a full-screen program
+   *  owns the pane, and that is its own conversation), or the native-input
+   *  latch (the person's own one-way choice, which nothing may reverse for
+   *  them).
+   *
+   *  Returns whether it summoned, so a caller can leave the key alone. */
+  private summonEditor(): boolean {
+    const editor = this.editor
+    if (editor === null || editor.isVisible) return false
+    if (!this.hasRunningCommand()) return false
+    if (this.lifecycle.buffer !== 'normal' || this.nativeMode) return false
+    const targets = this.inputTargets
+    const agentId = this.agentTarget?.id
+    // No assistant target registered means there is nothing to ask, and a
+    // summoned editor whose only legal target does not exist would be a box
+    // that can do nothing at all.
+    if (!targets || !agentId) return false
+    this._summonRestoreTargetId = targets.active().id
+    this._summoned = true
+    if (targets.active().id !== agentId) targets.setActive(agentId)
+    this._syncLifecycleOwnership()
+    editor.focus()
+    return true
+  }
+
+  /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
+   *
+   *  The DRAFT IS LEFT ALONE, which is the one thing that distinguishes this
+   *  from the Escape the editor has always had. Escape here means "put this
+   *  away" — the person dismissed a surface, they did not cancel their
+   *  question — and a re-summon resumes it. Clearing is still Ctrl-C's, and
+   *  it still means exactly that.
+   *
+   *  Returns whether anything was dismissed, so Escape falls through to the
+   *  clear when it was not. */
+  private dismissSummonedEditor(): boolean {
+    if (!this._summoned) return false
+    // Through _endSummon, which is the ONE place a summon is unwound —
+    // dismissing it and outliving it are two exits from the same state and
+    // must leave the pane in the same condition. Clearing the flag here
+    // instead left the target on Ask after an Escape: the person put the box
+    // away, the command finished, the prompt came back wearing a mode
+    // nobody had chosen, and their next Enter went to the model. Caught by
+    // the e2e, because no unit followed a dismissal past the command's end.
+    this._endSummon()
+    this._syncLifecycleOwnership()
+    return true
+  }
+
+  /** The summon is over — dismissed by Escape, or outlived by the command
+   *  it was opened over. Both exits come through here.
+   *
+   *  The target goes back to what the summon displaced ONLY if the draft is
+   *  empty. A half-typed question re-pointed at the shell would turn the
+   *  person's next Enter into a command they never wrote — the exact reason
+   *  the dropped auto-switching design was dropped. */
+  private _endSummon(): void {
+    this._summoned = false
+    const restore = this._summonRestoreTargetId
+    this._summonRestoreTargetId = null
+    if (restore === null || this.editor === null) return
+    if (this.editor.getDoc() !== '') return
+    if (this.inputTargets?.active().id === restore) return
+    this.inputTargets?.setActive(restore)
+  }
+
+  /** The person's ONE explicit target switch: the caret indicator's click
+   *  and the ⌘/Ctrl+Enter chord are the same gesture, and were two copies
+   *  of it until this existed (AD-8 — one owner per behaviour).
+   *
+   *  It refuses the shell while the editor is summoned, and that refusal is
+   *  the whole of "a second command cannot be started over a running one":
+   *  the summoned editor's only legal target is the assistant, so there is
+   *  no state from which Enter could reach the pty. Said out loud rather
+   *  than swallowed — a deliberate gesture that does nothing in silence
+   *  reads as a broken control. */
+  private toggleInputTarget(): void {
+    const targets = this.inputTargets
+    const current = targets?.active().id
+    if (!targets || !current) return
+    const next = current === 'shell' ? 'agent' : 'shell'
+    if (next === 'shell' && this._summoned) {
+      showToast({
+        level: 'warning',
+        message:
+          'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
+      })
+      return
+    }
+    targets.setActive(next)
+  }
+
+  /** Address a signal to THE ACTIVE BLOCK — the one command running in this
+   *  pane — rather than to whatever holds focus (nocx-23rph).
+   *
+   *  ONE OWNER for both gestures: Ctrl+C from anywhere in the pane, and Stop
+   *  on the running block's ⋮ menu. The escalation policy itself belongs to
+   *  the backend, where it already lived for the agent's run lease; this
+   *  side chooses the INTENT and reports what came back.
+   *
+   *  Nothing is sent when nothing is running: there is no addressee, and the
+   *  wire method's own honest refusal covers the race where the command ends
+   *  between the gesture and the call. Every other answer is said out loud —
+   *  a Stop that quietly did nothing is worse than one that failed. */
+  private signalActiveCommand(signal: SessionSignal['signal']): void {
+    const session = this.session
+    if (session === null || !this.hasRunningCommand()) return
+    void session.signal(signal).then(
+      (result) => {
+        if (result.outcome === 'delivered') return
+        showToast({
+          level: 'warning',
+          message:
+            result.outcome === 'unsupported'
+              ? 'This command is running on the remote host, which nocx cannot signal from here.'
+              : 'Nothing is running in this pane any more, so there was nothing to stop.',
+        })
+      },
+      (err: unknown) => {
+        log.warn('nocx: session.signal failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+        showToast({
+          level: 'danger',
+          message: 'The command could not be reached, so it may still be running.',
+        })
+      },
+    )
+  }
+
   /** Insert a vault secret where the user is actually typing (nocx-fk32).
    *  The target is chosen by who owns input, and the difference is the
    *  point:
@@ -3708,8 +3991,21 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
+    // A SUMMON IS SPENT the moment the command stops running, whichever way
+    // it stops — completed, lost, the integration gone. Reconciled here
+    // rather than on the completion fact alone, because this is the one
+    // place every lifecycle change already arrives, and a second place that
+    // cleared it would be a second owner of the same flag.
+    if (this._summoned && !this.hasRunningCommand()) this._endSummon()
+    // Two ways the editor can be on screen, and the difference is who asked:
+    // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
+    // PERSON summoned it over a running command (nocx-92gfl). The other two
+    // axes gate both alike — the buffer axis is presentation and can never
+    // restore authority, and the native latch is the person's own one-way
+    // choice — so a summon reaches neither an alternate-screen program nor a
+    // pane whose owner has opted out of the editor entirely.
     const show =
-      shouldShowEditor(this.lifecycle.state) &&
+      (shouldShowEditor(this.lifecycle.state) || this._summoned) &&
       this.lifecycle.buffer === 'normal' &&
       !this.nativeMode
     // The grid's writability follows ownership, not the visibility
