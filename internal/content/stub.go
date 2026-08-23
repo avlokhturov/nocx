@@ -182,6 +182,16 @@ func (s *ledgerStub) Edges(_ context.Context, entryID string) ([]Edge, error) {
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) AddCause(_ context.Context, turnID, causedID string) (int, error) {
+	s.log.Info("content stub: LedgerRepository.AddCause", "turn", turnID, "caused", causedID)
+	return 0, ErrNotImplemented
+}
+
+func (s *ledgerStub) Caused(_ context.Context, entryID string) ([]CausedEntry, error) {
+	s.log.Info("content stub: LedgerRepository.Caused", "entry", entryID)
+	return nil, ErrNotImplemented
+}
+
 func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFrameResult, error) {
 	s.log.Info("content stub: LedgerRepository.CaptureFrame", "capture", in.CaptureID, "source", string(in.Source))
 	return CaptureFrameResult{}, ErrNotImplemented

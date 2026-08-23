@@ -232,6 +232,20 @@ type AskParams struct {
 	// is the un-bound shape every caller has today.
 	RunID   string
 	Attempt int
+	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
+	// since ADR-0036, and what everything this run causes is joined to by a
+	// `caused-by` edge (nocx-h1l4o).
+	//
+	// It is passed rather than looked up from RunID, even though the two
+	// name the same thing from either end of `executions.entry_id`: the
+	// transport holds both facts off ONE SubmitAgentAsk result, so a lookup
+	// here would recover what the caller already had and could only ever
+	// disagree with it.
+	//
+	// Empty is the un-bound shape, and it means what it says: the entries
+	// this run causes belong to no turn and are recorded with no relation
+	// rather than with a guessed one.
+	TurnEntryID string
 }
 
 // StreamError is a model-stream failure the transport terminalizes the run

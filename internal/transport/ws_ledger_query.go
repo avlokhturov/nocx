@@ -142,6 +142,44 @@ type ledgerGetResponse struct {
 	Entry     ledgerEntryWire      `json:"entry"`
 	Edges     []ledgerEdgeWire     `json:"edges"`
 	Artifacts []ledgerArtifactWire `json:"artifacts"`
+	// Caused is the entry's causal flow (nocx-h1l4o): the `caused-by` edges
+	// above, resolved and ordered by the position the turn assigned. It is
+	// beside `edges` rather than instead of them because they answer
+	// different questions — `edges` is every relation touching this entry
+	// in either direction, `caused` is the ONE relation the restore draws
+	// with, joined to the rows it points at.
+	Caused []ledgerCausedWire `json:"caused"`
+}
+
+// ledgerCausedWire is one entry a turn caused: where it sits in the turn,
+// and what a reader draws it with. Effect and resource are an ACTION entry's
+// facts and are null on every other kind, honestly — a command a turn ran is
+// not a tool call.
+type ledgerCausedWire struct {
+	EntryID  string              `json:"entryId"`
+	Position int                 `json:"position"`
+	Kind     string              `json:"kind"`
+	Intent   string              `json:"intent"`
+	Effect   *string             `json:"effect"`
+	Resource *content.GrantScope `json:"resource"`
+}
+
+// ledgerCausedWireOf maps one resolved cause to the wire. The empty effect —
+// which is what a non-action row has — becomes null rather than "": the
+// enum on the wire is closed, and an empty string is not in it.
+func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
+	w := ledgerCausedWire{
+		EntryID:  c.EntryID,
+		Position: c.Position,
+		Kind:     string(c.Kind),
+		Intent:   c.Intent,
+		Resource: c.Resource,
+	}
+	if c.Effect != "" {
+		effect := string(c.Effect)
+		w.Effect = &effect
+	}
+	return w
 }
 
 // ── params ────────────────────────────────────────────────────────────────
@@ -301,7 +339,22 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 				artifacts = append(artifacts, wire)
 			}
 		}
-		out = ledgerGetResponse{Entry: entry, Edges: wireEdges, Artifacts: artifacts}
+		// The causal flow: the caused-by edges above, resolved and ordered
+		// by the ledger. A turn that caused nothing answers [], which is
+		// the same answer a reader gets for any entry that is not a turn.
+		// Named apart from the closure's `err` deliberately: reusing it
+		// here makes `err` live past the two loops above, and govet's
+		// shadow check then reports their own inner `err` declarations —
+		// pre-existing lines this change has no business rewriting.
+		caused, causedErr := svc.Caused(ctx, p.ID)
+		if causedErr != nil {
+			return causedErr
+		}
+		wireCaused := make([]ledgerCausedWire, 0, len(caused))
+		for _, c := range caused {
+			wireCaused = append(wireCaused, ledgerCausedWireOf(c))
+		}
+		out = ledgerGetResponse{Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused}
 		return nil
 	})
 	if err != nil {

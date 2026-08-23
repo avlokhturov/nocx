@@ -70,6 +70,16 @@ type runRequestParams struct {
 // own frozen status vocabulary (success | failure | entered | unknown); an
 // entered block (an environment transition — the local `ssh` block) carries
 // no exit code, honestly.
+//
+// AND IT CARRIES NO ARRANGEMENT (nocx-h1l4o). The command this names is
+// joined to the turn that ran it — a `caused-by` edge with a position inside
+// that turn — and none of that is on this wire. The backend owns the run: it
+// is holding the turn's entry id already (askRunContext.entryID, beside the
+// run id it passes to the pipeline) and it receives the command's entry id
+// here, so it makes the join itself. This is ledger.open's paneId precedent
+// applied to a relation instead of an anchor, and for the same reason stated
+// there: a second copy on the wire would put one fact under a second owner,
+// and the renderer's copy would be the one nobody checked.
 type runResolvedParams struct {
 	RequestID string `json:"requestId"`
 	Outcome   string `json:"outcome"` // "completed" | "failed"

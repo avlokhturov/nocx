@@ -13,7 +13,7 @@ package content
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
 // SubmitAgentAsk, TransitionRun, AppendChunk and FinishAgentRun. The READ
 // path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
-// ledger.get drives Entry plus Edges (ws_ledger_query.go), and the query's
+// ledger.get drives Entry plus Edges plus Caused (ws_ledger_query.go), and the query's
 // `host` field is what finally asks a resolved environment row for its host —
 // so Environment.Host has a renderer. history.record drives RecordCompleted
 // (nocx-rtg0.19), which is where a finished command lands now, under the
@@ -22,6 +22,13 @@ package content
 //
 // WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
 // ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+//
+// AddCause and Caused were never on that list: they arrived wired
+// (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for
+// every entry a turn causes (policyMiddleware.noteCause) and ledger.get
+// reaches Caused. Both were checked with `deadcode -tags gtk3 -whylive`,
+// which is the only form that answers this question — see the note below
+// about -filter.
 //
 // EvictEntries and Watermark are the third category, and it is written down
 // rather than rounded to either of the other two: no production caller
@@ -862,9 +869,83 @@ type Edge struct {
 	To   string
 	Rel  Relation
 	// Payload is the edge's sparse extension — for a `references` edge it
-	// is the region JSON (FrameRegion). Default '{}'; the store never
-	// interprets it.
+	// is the region JSON (FrameRegion), for a `caused-by` edge the causal
+	// position (CausePayload). Default '{}'; the store never interprets it,
+	// which is why AddCause — the one writer that DOES need a field read —
+	// is a method of its own rather than a flag on AddEdge.
 	Payload string
+}
+
+// CausePayload is what a `caused-by` edge carries: where the caused entry
+// sits INSIDE the turn that caused it (nocx-h1l4o).
+//
+// WHY THE PAYLOAD AND NOT A COLUMN. An `ordinal` column on `edges` was the
+// other candidate and this repo is greenfield, so no migration argues for
+// either — the merit does. The position is a fact of ONE relation out of
+// six; a column would sit NULL on every `rerun-of`, `cites` and `in-span`
+// row, and it would have to be threaded through the wire shape, the JSON
+// Schema and the generated renderer type as a second way of saying what
+// `payload` already says for `references`. The sparse extension is declared
+// for exactly this, and `ledger.get` already carries an edge's payload
+// verbatim, so the relation reached the renderer with no new wire field at
+// all.
+//
+// WHAT INCREMENTS IT: one entry the turn caused. Not a clock and not
+// `ingest_seq` — ADR-0019 §2 is explicit that commit order is not causality
+// — but a causal index the turn hands out, 0 for the first thing it caused,
+// 1 for the next. Two turns count independently, because the position is a
+// place inside a turn rather than a number the store hands out.
+type CausePayload struct {
+	Pos int `json:"pos"`
+}
+
+// ActionFacts is the part of an ACTION entry's payload the ledger reads
+// back: what the call was, what the gate classed it as, and what it named.
+//
+// The row is written by internal/assistant (policy.go openAttempt and
+// recordProposal), whose payload carries more than this — the raw arguments,
+// the run id, the approval binding, the classifier's verdict — none of which
+// a restored turn draws. This declares the part with a READER, so the
+// contract between the two sides is a type rather than three string literals
+// in two packages.
+type ActionFacts struct {
+	Tool   string `json:"tool"`
+	Effect Effect `json:"effect"`
+	// Resource is what the call named, derived ONCE at the moment the gate
+	// decided about the call and stored with it. Absent when the tool names
+	// no resource in its parameters at all.
+	Resource *GrantScope `json:"resource,omitempty"`
+}
+
+// CausedEntry is one entry a turn caused, resolved: the relation's position
+// and the facts a reader needs to draw it, off the caused entry's own row.
+//
+// The JOIN happens HERE, in the ledger, and that is the point (AD-8). A
+// reader that got raw edges back would have to resolve each id, order the
+// result and decide what a dangling one means — a second owner of the
+// arrangement, in the surface that has the least idea what the relation
+// means. The ledger owns the relation; a reader draws what it is told.
+type CausedEntry struct {
+	// EntryID is the caused entry — a shell command the turn ran, or the
+	// action entry of a tool call it made.
+	EntryID string
+	// Position is the causal index the turn assigned (CausePayload.Pos).
+	Position int
+	Kind     EntryKind
+	// Intent is the caused row's own intent: the command line for a shell
+	// entry, the tool name for an action.
+	Intent string
+	// Effect is the effect class the gate decided for an ACTION entry, read
+	// back off that row's payload. Empty on every other kind — a command a
+	// turn ran is not a tool call and has no effect class.
+	Effect Effect
+	// Resource is what the call named, as the backend derived it at the
+	// moment it decided about the call (internal/assistant namedResource is
+	// the ONE derivation). Nil when the tool names no resource in its
+	// parameters at all, and nil for a non-action entry. It is STORED
+	// rather than re-derived because re-deriving it in a reader would be a
+	// second answer to a question that already has an owner.
+	Resource *GrantScope
 }
 
 // LedgerEntrySummary is one row of the timeline: enough to page and render
@@ -1265,4 +1346,33 @@ type LedgerRepository interface {
 	AddEdge(ctx context.Context, e Edge) error
 	// Edges returns every edge touching entryID, in either direction.
 	Edges(ctx context.Context, entryID string) ([]Edge, error)
+	// AddCause records that causedID happened BECAUSE OF turnID — one
+	// `caused-by` edge carrying the causal position inside that turn — and
+	// returns the position it took (nocx-h1l4o, ADR-0036's closing
+	// sentence).
+	//
+	// THE POSITION IS THE STORE'S, and the caller may not supply one. It is
+	// read and written inside the same transaction that appends the edge,
+	// so two causes recorded at once cannot take the same index and a
+	// process that restarted mid-turn continues from what is stored rather
+	// than from zero — an in-memory counter would restart on every approval
+	// resume, which re-runs the pipeline over a turn that already has
+	// causes.
+	//
+	// IDEMPOTENT ON THE PAIR: recording a cause that is already there
+	// returns its ORIGINAL position and adds nothing. The approval resume
+	// passes the same call through the pipeline a second time, and a
+	// counter that advanced on the replay would move the resumed call to
+	// after everything that followed it.
+	//
+	// Either id naming an entry that is not there is refused, so a
+	// `caused-by` edge can never dangle in the store — the reader's
+	// dangling case is an id whose ROW is not in the page it is drawing,
+	// which is a different thing and handled there.
+	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// Caused returns everything entryID caused, in stored causal position
+	// order, each resolved into what a reader draws it with. Empty — never
+	// an error — for an entry that caused nothing and for an id no row
+	// carries: "what did this cause" has an honest answer either way.
+	Caused(ctx context.Context, entryID string) ([]CausedEntry, error)
 }

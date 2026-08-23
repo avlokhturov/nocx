@@ -12,6 +12,11 @@
 // action gate read — a restored block offers nothing that needs a process.
 import { blockKindRules, createCommandBlock, type BlockKind, type FrozenStatus } from './blocks'
 import { createAnswerBody } from './answer-body'
+import {
+  createToolCallLine,
+  type ToolCallLineDeps,
+  type ToolCallLineSpec,
+} from '../ui/tool-call-line'
 import type { CommandAuthor } from '../command-ledger'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { attrsToStyle, type TerminalSnapshot } from './serializer'
@@ -58,6 +63,31 @@ export interface RestoredBlockFacts {
    *  scraping the painted rows, and a restored turn must copy exactly as a
    *  live one does. */
   entryId?: string
+  /**
+   * The tool calls this TURN made, in the causal order the ledger stored
+   * (nocx-h1l4o) — the `caused-by` relation, resolved by the backend.
+   *
+   * Each becomes the same kit line the live flow places (ui/tool-call-line),
+   * from the same three facts the live wire carries: the tool, the effect the
+   * gate decided, and the resource the backend derived. Nothing here derives
+   * any of them — an effect guessed from a tool name is exactly what
+   * ADR-0028 decision 4 forbids, and the resource has one derivation, in Go.
+   *
+   * WHERE THEY GO, and what is not reproduced. Live, a call is placed in the
+   * body AT THE POINT IT ARRIVED, between the prose before it and the prose
+   * written from its result. A restored turn has the answer as ONE artifact
+   * and no stream, so the offset a call arrived at is not a stored fact: the
+   * calls go at the head of the flow, in causal order, which is where they
+   * are for the ordinary shape of a turn (the model reaches for its tools,
+   * then answers). A turn whose prose preceded a call restores with that
+   * call above the prose. That is a known and deliberate difference, of the
+   * same kind ADR-0036 already accepted for the reasoning note, which is not
+   * persisted at all.
+   *
+   * Ignored for a COMMAND block: an action belongs to the turn that made it,
+   * and a command that grew a call line would be a second owner of it.
+   */
+  calls?: ToolCallLineSpec[]
 }
 
 /** The sentence a block shows where its output used to be. */
@@ -94,6 +124,7 @@ export function restoredBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  deps: ToolCallLineDeps = {},
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
   // the one the live stream draws through (nocx-4em1z). A COMMAND's body is
@@ -124,7 +155,13 @@ export function restoredBlock(
   el.dataset.restored = 'true'
   if (facts.entryId) el.dataset.entryId = facts.entryId
   if (facts.body === null) el.dataset.outputEvicted = 'true'
-  if (isTurn && facts.body !== null) {
+  // The calls, first, so they sit above the prose in the flow — see
+  // RestoredBlockFacts.calls for what that reproduces and what it does not.
+  // They are drawn for a turn whose answer is GONE too: a call is an entry of
+  // its own and survives the loss of the prose, and a block that went silent
+  // about work that really happened is the shape this bead exists to close.
+  const calls = isTurn ? (facts.calls ?? []) : []
+  if (isTurn && (facts.body !== null || calls.length > 0)) {
     // The same body element the live answer builds — the class comes from
     // the kind's rules, which own the wrap policy, so a restored answer
     // wraps exactly as a live one does.
@@ -133,9 +170,10 @@ export function restoredBlock(
     outputEl.dataset.answerBody = ''
     el.appendChild(outputEl)
     const body = createAnswerBody(outputEl, { store })
+    for (const call of calls) body.insert(createToolCallLine(call, deps))
     // The whole answer in one call: the renderer takes chunks, and a caller
     // that has all of it is simply a caller with one chunk.
-    body.append(facts.body)
+    if (facts.body !== null) body.append(facts.body)
     body.finish()
   }
   return el

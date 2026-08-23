@@ -96,6 +96,19 @@ func authorisedRunServer(args string) (*runToolCallingServer, *httptest.Server) 
 // the harness (for the ledger), the ask result and the streamed answer.
 func driveOneCompletedRun(t *testing.T) (*askHarness, askWireResult, string) {
 	t.Helper()
+	// The entry id a renderer that never wrote to the ledger would answer
+	// with. It names no row, which is exactly the shape the caused-by
+	// relation degrades on: the join is refused by the store and the run is
+	// untouched (nocx-h1l4o).
+	return driveOneCompletedRunResolvingWith(t, func(*askHarness, string) string { return "entry-42" })
+}
+
+// driveOneCompletedRunResolvingWith is driveOneCompletedRun with the entry
+// id the renderer resolves the run with decided by the caller — the seam a
+// test needs to answer with a REAL ledger row, the way the renderer does
+// (it submits through ledger.open before it answers).
+func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarness, sid string) string) (*askHarness, askWireResult, string) {
+	t.Helper()
 	fake, srv := newRunToolCallingServer("")
 	t.Cleanup(srv.Close)
 
@@ -134,7 +147,8 @@ func driveOneCompletedRun(t *testing.T) (*askHarness, askWireResult, string) {
 	if req.RequestID == "" {
 		t.Fatal("runRequest carries no requestId")
 	}
-	reply := jsonrpcCall(t, h.conn, "agent.runResolved", runResolvedWire(req.RequestID, "entry-42", 0, "success", 2, 0, 2, "file1\nfile2"))
+	reply := jsonrpcCall(t, h.conn, "agent.runResolved",
+		runResolvedWire(req.RequestID, entryIDFor(h, sid), 0, "success", 2, 0, 2, "file1\nfile2"))
 	var rerr struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}
@@ -446,16 +460,14 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	// ── the answer, which is the TURN'S OWN BODY (nocx-4em1z) ───────────
 	// Not a second entry joined by an edge: the question is the entry's
 	// intent and the answer is what it printed, exactly as a command's
-	// output is. So there is nothing to join, and nothing joins it.
-	edges, err := led.Edges(ctx, res.EntryID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
-	}
-	for i := range edges {
-		if edges[i].Rel == content.RelCausedBy {
-			t.Errorf("edge %+v: the answer is not an entry of its own and joins nothing", edges[i])
-		}
-	}
+	// output is. So no `agent` entry claims to be this turn's answer, and no
+	// edge leaves the turn at all — every caused-by edge here points AT it,
+	// from the things it caused (nocx-h1l4o).
+	assertNothingClaimsToBeTheAnswer(t, led, res.EntryID)
+	// And the escalation the turn made IS one of those things: a proposal
+	// put to a person is an entry of the turn's flow, so a restored turn
+	// shows the question it asked where it asked it.
+	assertCausedByTheTurn(t, led, res.EntryID, action.ID, 0)
 
 	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
@@ -610,17 +622,14 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 			payload.RunID, res.RunID)
 	}
 
-	// ── the answer, joined by its caused-by edge ────────────────────────
-	edges, err := led.Edges(ctx, res.EntryID)
-	if err != nil {
-		t.Fatalf("Edges: %v", err)
-	}
-	// The answer is the turn's own body (nocx-4em1z), so nothing joins it.
-	for i := range edges {
-		if edges[i].Rel == content.RelCausedBy {
-			t.Errorf("edge %+v: the answer is not an entry of its own", edges[i])
-		}
-	}
+	// ── the answer is the turn's own body, and the CALL joins the turn ──
+	// nocx-4em1z put the answer in the turn's own body, so nothing claims
+	// to be it. nocx-h1l4o joins what the turn CAUSED: the tool call the
+	// granted path made is an action entry with no pane, no session and no
+	// conversation, and this edge is the only thing that says which turn it
+	// belongs to.
+	assertNothingClaimsToBeTheAnswer(t, led, res.EntryID)
+	assertCausedByTheTurn(t, led, res.EntryID, action.ID, 0)
 	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
 		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
@@ -820,5 +829,125 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 		if s.Kind == content.EntryAction {
 			t.Errorf("refused exchange recorded an action entry: %+v — the refusal precedes every submission", s)
 		}
+	}
+}
+
+// ── the caused-by relation, read back from the store (nocx-h1l4o) ────────
+
+// assertNothingClaimsToBeTheAnswer is nocx-4em1z's invariant in the form the
+// causal relation left it: the answer is the turn's own body, so no entry is
+// joined to the turn AS its answer. Every caused-by edge touching a turn
+// points AT the turn, from a thing the turn caused, and none of those is an
+// `agent` entry.
+func assertNothingClaimsToBeTheAnswer(t *testing.T, led content.LedgerRepository, turnID string) {
+	t.Helper()
+	edges, err := led.Edges(context.Background(), turnID)
+	if err != nil {
+		t.Fatalf("Edges: %v", err)
+	}
+	for i := range edges {
+		if edges[i].Rel != content.RelCausedBy {
+			continue
+		}
+		if edges[i].From == turnID {
+			t.Errorf("edge %+v: the turn is caused by nothing — the answer is its own body", edges[i])
+		}
+	}
+	caused, err := led.Caused(context.Background(), turnID)
+	if err != nil {
+		t.Fatalf("Caused: %v", err)
+	}
+	for _, c := range caused {
+		if c.Kind == content.EntryAgent {
+			t.Errorf("caused %+v: an agent entry is a turn, never a turn's answer", c)
+		}
+	}
+}
+
+// assertCausedByTheTurn reads the relation back out of the store: the entry
+// is joined to the turn at the position given, and the position is stored on
+// the edge rather than inferred from the order rows came out.
+func assertCausedByTheTurn(t *testing.T, led content.LedgerRepository, turnID, causedID string, position int) {
+	t.Helper()
+	caused, err := led.Caused(context.Background(), turnID)
+	if err != nil {
+		t.Fatalf("Caused: %v", err)
+	}
+	for _, c := range caused {
+		if c.EntryID != causedID {
+			continue
+		}
+		if c.Position != position {
+			t.Errorf("%s is caused by the turn at position %d, want %d", causedID, c.Position, position)
+		}
+		return
+	}
+	t.Errorf("%s is joined to no turn — the relation is what says which turn it belongs to; the turn caused %+v",
+		causedID, caused)
+}
+
+// ── criterion 1, over the real socket: the command joins its turn ─────────
+
+// A command an assistant turn ran carries a stored caused-by to that turn
+// AND a position within it (nocx-h1l4o).
+//
+// The renderer here does what the real one does: it submits the command
+// through ledger.open — the same path a person's Enter takes — and then
+// answers agent.runResolved with the id that submit minted. The join is made
+// by the BACKEND from that id and its own turn; the resolution carries no
+// arrangement of its own, which is criterion 6 and the same rule ledger.open
+// states for paneId.
+func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
+	const commandEntry = "01924f9c-0000-7000-8000-0000000000c1"
+	h, res, _ := driveOneCompletedRunResolvingWith(t, func(h *askHarness, sid string) string {
+		openEntry(t, h.conn, sid, commandEntry, "ls -la", 900)
+		return commandEntry
+	})
+	ctx := context.Background()
+	led := h.db.Ledger()
+
+	caused, err := led.Caused(ctx, res.EntryID)
+	if err != nil {
+		t.Fatalf("Caused: %v", err)
+	}
+	// Two things, in the order the turn caused them: the tool call's own
+	// action entry — the line that says WHEN the assistant reached for run —
+	// and then the command that really opened a block.
+	if len(caused) != 2 {
+		t.Fatalf("the turn caused %+v, want the run call and the command it opened", caused)
+	}
+	if caused[0].Kind != content.EntryAction || caused[0].Intent != "run" || caused[0].Position != 0 {
+		t.Errorf("first cause = %+v, want the run action at position 0", caused[0])
+	}
+	if caused[1].EntryID != commandEntry || caused[1].Kind != content.EntryShell || caused[1].Position != 1 {
+		t.Errorf("second cause = %+v, want the shell entry at position 1", caused[1])
+	}
+	// The command is a command, not a tool call: it has no effect class and
+	// names no resource, and the restore draws it as the block it is.
+	if caused[1].Effect != "" || caused[1].Resource != nil {
+		t.Errorf("the command came back with tool facts: %+v", caused[1])
+	}
+	// And the position is STORED, not inferred from the order rows came out.
+	assertCausedByTheTurn(t, led, res.EntryID, commandEntry, 1)
+	assertNothingClaimsToBeTheAnswer(t, led, res.EntryID)
+}
+
+// Criterion 4's first case, end to end: a resolution naming an entry the
+// ledger does not carry joins nothing, and the run is untouched. This is the
+// state a renderer that could not submit leaves behind, and the honest
+// answer is plain ledger order — never a guessed parent.
+func TestRun_AResolutionNamingNoRowJoinsNothingAndDoesNotFailTheRun(t *testing.T) {
+	h, res, answer := driveOneCompletedRun(t)
+	if answer == "" {
+		t.Fatal("the run produced no answer — a relation that could not be written must not fail the run")
+	}
+	caused, err := h.db.Ledger().Caused(context.Background(), res.EntryID)
+	if err != nil {
+		t.Fatalf("Caused: %v", err)
+	}
+	// The call the turn made is joined; the command that names no row is
+	// not, and nothing was invented in its place.
+	if len(caused) != 1 || caused[0].Intent != "run" {
+		t.Fatalf("the turn caused %+v, want only the call it made", caused)
 	}
 }

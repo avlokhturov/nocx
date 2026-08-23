@@ -22,6 +22,10 @@ export interface LedgerGet {
    * The metadata of every artifact of every execution of this entry, in execution order. Never null: no capture is [].
    */
   artifacts: Artifact[]
+  /**
+   * Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.
+   */
+  caused: Caused[]
 }
 /**
  * One row of recall: the ledger's identity for the entry plus every fact a block or a history row is rendered from.
@@ -245,4 +249,46 @@ export interface Gap {
    * Why the range is missing.
    */
   reason: string
+}
+/**
+ * One entry this turn caused, at its position inside the turn. A command the turn ran is a block the page already carries and is placed by this; a tool call is an action entry that has no block at all and is drawn as a line in the turn's flow.
+ */
+export interface Caused {
+  /**
+   * The caused entry's id — the same id a page row carries for a command, and the address ledger.get takes.
+   */
+  entryId: string
+  /**
+   * Where it sits inside the turn: a causal index the turn assigned, 0 for the first thing it caused. NOT a timestamp and NOT ingest_seq, which is commit order and never causality (ADR-0019 §2).
+   */
+  position: number
+  /**
+   * What kind of entry it is. Closed set, mirroring the store's CHECK constraint.
+   */
+  kind: 'shell' | 'agent' | 'action'
+  /**
+   * The caused entry's own intent: the command line for a shell entry, the declared tool name for an action.
+   */
+  intent: string
+  /**
+   * The effect class the gate decided for an ACTION entry, read back off that row's own record. Null on every other kind — a command a turn ran is not a tool call and has no effect class.
+   */
+  effect:
+    | (
+        | 'observe'
+        | 'mutate-reversible'
+        | 'mutate-destructive'
+        | 'privilege-change'
+        | 'disclose'
+        | 'cross-boundary'
+        | 'delegate'
+      )
+    | null
+  /**
+   * What the call named, as the backend derived it at the moment it decided about the call — never re-derived by a reader. Null when the tool names no resource in its parameters at all, and null for a non-action entry.
+   */
+  resource: {
+    kind: string
+    id: string
+  } | null
 }

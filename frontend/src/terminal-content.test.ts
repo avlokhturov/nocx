@@ -5822,6 +5822,162 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  // ── a restored turn comes back with what it caused (nocx-h1l4o) ───────
+  //
+  // This is the PRODUCTION path, not the units under it: the pane's own read
+  // reaches restoredBody, arrangedByCause and restoredBlock, and the DOM it
+  // produces is what a person sees. A unit that never runs here is a feature
+  // that does not exist (AGENTS.md, "is the code reachable").
+  it('draws a restored turn with the calls it made and the command it ran beside it', async () => {
+    // The three rows in the order they were COMMITTED: the turn opens, a
+    // person types something in the same pane while the assistant works,
+    // and the assistant's own command lands last. ledger.query answers
+    // newest-first and the pane reverses it, so plain ledger order draws
+    // turn, typed, command — with the command two rows from the turn that
+    // ran it. That is the arrangement the relation exists to correct.
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
+    const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
+    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
+    // The store's own answer per entry: the turn caused a tool call and the
+    // command, in that causal order; the two commands caused nothing.
+    const caused: Record<string, unknown[]> = {
+      'turn-1': [
+        {
+          entryId: 'act-1',
+          position: 0,
+          kind: 'action',
+          intent: 'run',
+          effect: 'mutate-destructive',
+          resource: null,
+        },
+        {
+          entryId: 'cmd-1',
+          position: 1,
+          kind: 'shell',
+          intent: 'cat -n a.txt',
+          effect: null,
+          resource: null,
+        },
+      ],
+    }
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? [ranByAgent, typed, turn] : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: true,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        const id = (params as { id: string }).id
+        return Promise.resolve({
+          entry: {},
+          edges: [],
+          // A turn's body is a text/plain original and never a terminal
+          // one; a command's is the SGR grid (nocx-4em1z).
+          artifacts: [
+            { id: `art-${id}`, mediaType: id === 'turn-1' ? 'text/plain' : 'application/vt' },
+          ],
+          caused: caused[id] ?? [],
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({
+          id: (params as { id: string }).id,
+          mediaType: 'text/plain',
+          body: 'line 3 is wrong',
+          truncated: null,
+          byteLen: 15,
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(3)
+      })
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')]
+      // Ledger order alone would leave the command a person typed BETWEEN
+      // the turn and the command the turn ran. The relation puts the caused
+      // command back beside its turn and leaves the typed one where it was
+      // — nothing is reordered that the relation does not name.
+      expect(restored.map((el) => el.querySelector('.cmd-header-text')?.textContent)).toEqual([
+        'what went wrong?',
+        'cat -n a.txt',
+        'git status',
+      ])
+      const turnEl = restored.find(
+        (el) => el.querySelector('.cmd-header-text')?.textContent === 'what went wrong?',
+      ) as HTMLElement
+      // The call the turn made is a line inside the turn's own flow — an
+      // action has no block and never becomes one.
+      expect(turnEl.querySelector('.ui-tool-call__tool')?.textContent).toBe('run')
+      expect(turnEl.dataset.blockKind).toBe('ask')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('falls back to plain ledger order when the relation is not there', async () => {
+    // Criterion 4 in the product: no relation, an unreadable one and a
+    // dangling one all land here, and the answer is the ledger's own order
+    // with the assistant's command drawn as an independent agent block. It
+    // is never attached to the turn that happens to sit above it.
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
+    const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
+    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? [ranByAgent, typed, turn] : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: true,
+          coverage: null,
+        })
+      }
+      // The relation is UNREADABLE: ledger.get fails for every entry, which
+      // is also what a store that cannot be reached looks like.
+      if (method === 'ledger.get') return Promise.reject(new Error('socket closed'))
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(3)
+      })
+      const restored = [...inner.querySelectorAll('[data-restored="true"]')]
+      expect(restored.map((el) => el.querySelector('.cmd-header-text')?.textContent)).toEqual([
+        'what went wrong?',
+        'git status',
+        'cat -n a.txt',
+      ])
+      // Nothing was attached and nothing was invented: no call line anywhere.
+      expect(inner.querySelector('.ui-tool-call')).toBeNull()
+      // And the assistant's command still says the assistant ran it: the
+      // badge is painted from the entry's own kind (nocx-4em1z), which the
+      // relation's absence does not touch.
+      expect(restored[2].querySelector<HTMLElement>('[data-author]')?.dataset.author).toBe('agent')
+    } finally {
+      teardown()
+    }
+  })
+
   it('survives being shown before it is mounted, which is what really happens', async () => {
     // The activation seam calls setVisible(true) while the pane is still
     // being built, so the first show finds no scrollback. Spending the

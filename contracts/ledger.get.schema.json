@@ -5,7 +5,7 @@
   "description": "Result of the ledger.get JSON-RPC method (nocx-rtg0.20, design §6.2) — one entry with its relations and the METADATA of what its runs captured. The bodies are deliberately absent: the recall read must not haul bytes (ADR-0019 §6), so an artifact's content is fetched one artifact at a time by whoever actually wants it. The entry is the same shape a ledger.query page row has, declared once there.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["entry", "edges", "artifacts"],
+  "required": ["entry", "edges", "artifacts", "caused"],
   "properties": {
     "entry": { "$ref": "ledger.query.schema.json#/$defs/entry" },
     "edges": {
@@ -17,6 +17,11 @@
       "description": "The metadata of every artifact of every execution of this entry, in execution order. Never null: no capture is [].",
       "type": "array",
       "items": { "$ref": "#/$defs/artifact" }
+    },
+    "caused": {
+      "description": "Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/caused" }
     }
   },
   "$defs": {
@@ -40,6 +45,63 @@
         "payload": {
           "description": "The edge's sparse extension — for a `references` edge, the region inside the frame it points at. The store never interprets it; an edge that carries none is {}.",
           "type": "object"
+        }
+      }
+    },
+    "caused": {
+      "description": "One entry this turn caused, at its position inside the turn. A command the turn ran is a block the page already carries and is placed by this; a tool call is an action entry that has no block at all and is drawn as a line in the turn's flow.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entryId", "position", "kind", "intent", "effect", "resource"],
+      "properties": {
+        "entryId": {
+          "description": "The caused entry's id — the same id a page row carries for a command, and the address ledger.get takes.",
+          "type": "string"
+        },
+        "position": {
+          "description": "Where it sits inside the turn: a causal index the turn assigned, 0 for the first thing it caused. NOT a timestamp and NOT ingest_seq, which is commit order and never causality (ADR-0019 §2).",
+          "type": "integer",
+          "minimum": 0
+        },
+        "kind": {
+          "description": "What kind of entry it is. Closed set, mirroring the store's CHECK constraint.",
+          "enum": ["shell", "agent", "action"]
+        },
+        "intent": {
+          "description": "The caused entry's own intent: the command line for a shell entry, the declared tool name for an action.",
+          "type": "string"
+        },
+        "effect": {
+          "description": "The effect class the gate decided for an ACTION entry, read back off that row's own record. Null on every other kind — a command a turn ran is not a tool call and has no effect class.",
+          "oneOf": [
+            {
+              "enum": [
+                "observe",
+                "mutate-reversible",
+                "mutate-destructive",
+                "privilege-change",
+                "disclose",
+                "cross-boundary",
+                "delegate"
+              ]
+            },
+            { "type": "null" }
+          ]
+        },
+        "resource": {
+          "description": "What the call named, as the backend derived it at the moment it decided about the call — never re-derived by a reader. Null when the tool names no resource in its parameters at all, and null for a non-action entry.",
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["kind", "id"],
+              "properties": {
+                "kind": { "type": "string" },
+                "id": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
         }
       }
     },
