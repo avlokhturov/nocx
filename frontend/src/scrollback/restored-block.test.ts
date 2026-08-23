@@ -352,6 +352,43 @@ describe('a restored turn and what it caused', () => {
     expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
   })
 
+  it('a command at the very START of the answer still opens the fragment the prose from it goes in', () => {
+    // The shape the e2e drives (criterion 9): the turn reached for the tool
+    // before it said anything, so BOTH causes are anchored at 0. The first
+    // fragment is the question with an empty body, the block stands where
+    // the call happened, and the prose written from its output is the
+    // continuation below it — never the first fragment's body, which would
+    // put the answer above the evidence again.
+    const els = turn(
+      [
+        call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 0 }),
+        call({ entryId: 'cmd-1', kind: 'shell', intent: 'echo hi', effect: null, at: 0 }),
+      ],
+      { body: 'Plenty.' },
+    )
+    expect(els.map((e) => e.dataset.turnFragment ?? 'block')).toEqual(['0', 'block', '1'])
+    expect(els[0].querySelector('[data-answer-body]')?.textContent).toBe('')
+    expect(els[1].querySelector('.cmd-header-text')?.textContent).toBe('cmd cmd-1')
+    expect(els[2].querySelector('[data-answer-body]')?.textContent).toBe('Plenty.')
+  })
+
+  it('the same turn with NO prose after the command opens no continuation at all', () => {
+    // The paired end, and the reason the case above is worth a test of its
+    // own: the two differ ONLY in whether the turn wrote anything after the
+    // command, and the arrangement must differ with them. A continuation
+    // opened here would be an empty block on screen; a continuation MISSING
+    // above would be the answer drawn above the evidence it came from.
+    const els = turn(
+      [
+        call({ intent: 'run', effect: 'mutate-destructive', opensBlock: true, at: 0 }),
+        call({ entryId: 'cmd-1', kind: 'shell', intent: 'echo hi', effect: null, at: 0 }),
+      ],
+      { body: '' },
+    )
+    expect(els.map((e) => e.dataset.turnFragment ?? 'block')).toEqual(['0', 'block'])
+    expect(els[0].querySelector('[data-turn-continuation]')).toBeNull()
+  })
+
   it('a turn whose last act was a command opens no empty fragment under it', () => {
     const els = turn([
       call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 99 }),

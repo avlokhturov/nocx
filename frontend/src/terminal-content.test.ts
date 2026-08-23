@@ -2689,7 +2689,16 @@ describe('the projections consume the kernel through the composition root (ADR-0
       })
 
       const run = await pending
-      expect(run.entryId).toBe(String(ledger.records()[0].id))
+      // THE ENTRY ID IS THE STORE'S, and it is the one history.record's ack
+      // named (nocx-9sqii). It used to be `String(rec.id)` — the renderer's
+      // own record number, which counts blocks in this tab and is not an
+      // entry anywhere. The backend joins the command to the turn that ran
+      // it by writing an edge against this id, and the ledger's foreign key
+      // refuses an id that names no row, so the whole relation was dropped
+      // in a log line nobody read: a restored turn came back with its
+      // command outside it.
+      expect(run.entryId).toBe('e1')
+      expect(run.entryId).not.toBe(String(ledger.records()[0].id))
       expect(run.exitCode).toBe(0)
       expect(run.status).toBe('success')
       expect(run.total).toBeGreaterThanOrEqual(0)
@@ -2698,6 +2707,78 @@ describe('the projections consume the kernel through the composition root (ADR-0
       // resolved on the block's completion, never on a timer.
       expect(withScrollback.scrollback.blockManager.blocks[0].status).toBe('success')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
+    } finally {
+      Element.prototype.scrollTo = protoScrollTo
+      Element.prototype.scrollIntoView = protoScrollIntoView
+      teardown()
+    }
+  })
+
+  it('an agent command the store wrote no row for resolves naming no entry at all (nocx-9sqii)', async () => {
+    // History is off, or the record was dropped: the ack names no row. The
+    // command still RAN and its output is the tool's result, so the run
+    // resolves — with nothing where the entry id goes, which is the honest
+    // answer and the one the backend degrades on (no join, plain ledger
+    // order). Answering the renderer's own record number here instead is
+    // what made the join fail silently when there WAS a row.
+    const client = makeClient()
+    const callMock = client.call
+    callMock.mockImplementation((method: string) => {
+      if (method === 'history.record') {
+        return Promise.resolve({
+          maskedCount: 0,
+          maskedKinds: [],
+          entryId: '',
+          author: 'agent',
+          redactions: [],
+          captures: [],
+          maskedCommand: 'make',
+        })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const handler = factHandler(client)
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const pending = content.submitAgentCommand('make')
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
+      })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-1',
+          state: 'completed',
+          exitCode: 0,
+          fence: 'a'.repeat(64),
+          completedAt: '2026-08-08T12:00:02Z',
+        },
+      })
+      const run = await pending
+      expect(run.entryId).toBe('')
+      // And the command's own outcome is unaffected: a missing row costs
+      // the arrangement, never the result.
+      expect(run.status).toBe('success')
+      expect(run.exitCode).toBe(0)
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView

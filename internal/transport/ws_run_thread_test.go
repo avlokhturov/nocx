@@ -891,12 +891,23 @@ func assertCausedByTheTurn(t *testing.T, led content.LedgerRepository, turnID, c
 // A command an assistant turn ran carries a stored caused-by to that turn
 // AND a position within it (nocx-h1l4o).
 //
-// The renderer here does what the real one does: it submits the command
-// through ledger.open — the same path a person's Enter takes — and then
-// answers agent.runResolved with the id that submit minted. The join is made
-// by the BACKEND from that id and its own turn; the resolution carries no
-// arrangement of its own, which is criterion 6 and the same rule ledger.open
-// states for paneId.
+// The renderer here answers with an id the STORE really carries — the row is
+// made with ledger.open, which is the cheapest way to have one over this
+// socket. That id vocabulary is the whole of it: the real renderer's row is
+// written by history.record at the completion and it answers with the id
+// that ack named (nocx-9sqii). Either way the join is made by the BACKEND
+// from that id and its own turn; the resolution carries no arrangement of
+// its own, which is criterion 6 and the same rule ledger.open states for
+// paneId.
+//
+// WHAT THIS TEST CANNOT SEE, and what let the defect through: it chooses the
+// id it answers with, so it cannot report a renderer answering with an id
+// from some other vocabulary. The real one answered with its OWN record
+// number — a per-tab block counter — and the caused-by edge was refused by
+// the foreign key on every real run, in a log line nobody read. The check
+// that reports that is on the renderer's side of the wire
+// (terminal-content.test.ts, "resolves with the completed run body"), and
+// the one that watches a person see it is e2e/agent-restore.spec.ts.
 func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 	const commandEntry = "01924f9c-0000-7000-8000-0000000000c1"
 	h, res, _ := driveOneCompletedRunResolvingWith(t, func(h *askHarness, sid string) string {

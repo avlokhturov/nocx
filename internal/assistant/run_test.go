@@ -121,6 +121,48 @@ func TestExecuteRun_SessionOutsideGrantNeverRequests(t *testing.T) {
 	}
 }
 
+// A resolution that names NO entry is the store having written no row for
+// the command — History is off, or the record was dropped — and it is not a
+// corrupt resolution. The command RAN: its output is the tool's result and
+// the run is untouched. What is lost is the arrangement, and only that:
+// nothing is joined, because there is nothing to join to.
+//
+// This used to be an error, which read the empty id as "the renderer
+// answered nonsense". It is the paired end of nocx-9sqii's fix: the
+// renderer now answers with the id the STORE minted rather than its own
+// record number, and "" is the honest answer when the store minted none.
+func TestExecuteRun_AResolutionNamingNoEntryStillReturnsTheOutputAndJoinsNothing(t *testing.T) {
+	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
+	req := &recordingRunner{body: runResolvedBody("", new(0), "success", 1, 0, 1, "hello")}
+
+	var joined []string
+	out, err := executeRun(context.Background(), runner, req,
+		json.RawMessage(`{"sessionId":"session-a","command":"ls"}`),
+		func(entryID string) { joined = append(joined, entryID) })
+	if err != nil {
+		t.Fatalf("a run the store wrote no row for failed: %v", err)
+	}
+	var res struct {
+		EntryID string `json:"entryId"`
+		Text    string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("result does not parse: %v", err)
+	}
+	if res.Text != "hello" {
+		t.Fatalf("result text = %q, want the command's output", res.Text)
+	}
+	if res.EntryID != "" {
+		t.Fatalf("result entry id = %q, want none — the store wrote no row", res.EntryID)
+	}
+	// And nothing was joined, rather than a cause recorded against an id
+	// that names no row: the ledger's foreign key would refuse it anyway,
+	// and the reader's answer for a missing relation is plain ledger order.
+	if len(joined) != 0 {
+		t.Fatalf("joined %+v, want nothing — there is no entry to join", joined)
+	}
+}
+
 // TestMiddleware_RunRefusedOutsideGrantTerminates is the policy half of the
 // same rule, through the real middleware: a model call naming a session the
 // grant does not cover is REFUSED (terminal — ErrPolicyRefused), and the
