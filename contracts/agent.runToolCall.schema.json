@@ -13,7 +13,7 @@
       "minimum": 1
     },
     "entryId": {
-      "description": "The ANSWER entry the call is an element of — agent.ask result's answerEntryId, the same routing key agent.runDelta carries. Not the ledger entry the attempt was recorded under; that is actionEntryId.",
+      "description": "The TURN the call is an element of — agent.ask result's entryId, the same routing key agent.runDelta carries. Not the ledger entry the attempt was recorded under; that is actionEntryId.",
       "type": "string",
       "minLength": 1
     },

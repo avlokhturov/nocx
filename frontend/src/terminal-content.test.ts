@@ -761,6 +761,7 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
           else manager._onBlockDeselected(bid)
         },
         new CommandSnapshotStore(),
+        'shell',
       )
       scrollback.scrollbackInner.appendChild(block)
       // Click the block (mousedown + mouseup without movement) → selected.
@@ -1877,6 +1878,7 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       container,
       noop,
       store(),
+      'shell',
     )
     const chips = el.querySelector('.cmd-header-chips')
     expect(chips).not.toBeNull()
@@ -1910,6 +1912,7 @@ describe('the SSH block header keeps cwd left and duration/exit right (nocx-a44m
       container,
       noop,
       store(),
+      'shell',
     )
     const chips = el.querySelector('.cmd-header-chips')
     const cwd = chips?.querySelector('.cmd-header-cwd')
@@ -4301,7 +4304,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       }
       if (method === 'agent.ask') {
         nextRun += 1
-        return Promise.resolve({ runId: nextRun, answerEntryId: `entry-${nextRun}` })
+        return Promise.resolve({ runId: nextRun, entryId: `entry-${nextRun}` })
       }
       if (method === 'agent.status') {
         // `answering` is not optional on the wire (nocx-rikz5, Task 3):
@@ -4833,11 +4836,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         text: ' now',
       })
       const answers = Array.from(
-        scrollback.scrollbackInner.querySelectorAll<HTMLElement>('[data-answer-entry-id]'),
+        scrollback.scrollbackInner.querySelectorAll<HTMLElement>('[data-entry-id]'),
       )
       expect(answers).toHaveLength(2)
       const bodyOf = (entryId: string): string | undefined =>
-        answers.find((a) => a.dataset.answerEntryId === entryId)?.querySelector('.cmd-output')
+        answers.find((a) => a.dataset.entryId === entryId)?.querySelector('.cmd-output')
           ?.textContent
       expect(bodyOf('entry-7')).toBe('docs: a directory of files')
       expect(bodyOf('entry-8')).toBe('fix: the bug now')

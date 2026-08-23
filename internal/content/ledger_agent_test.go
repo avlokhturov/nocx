@@ -112,8 +112,29 @@ func askOne(t *testing.T, led content.LedgerRepository, sessionID string, refs .
 	if res.RunID == 0 {
 		t.Fatal("SubmitAgentAsk returned run id 0")
 	}
-	if res.QuestionID == "" {
-		t.Fatal("SubmitAgentAsk returned an empty question id")
+	if res.EntryID == "" {
+		t.Fatal("SubmitAgentAsk returned an empty entry id")
+	}
+	return res
+}
+
+// askIn records one ask ANCHORED TO A PANE — the shape every block has
+// (nocx-4em1z). askOne above is the same call without one, kept for the tests
+// that are about the run rather than about restore.
+func askIn(t *testing.T, led content.LedgerRepository, sessionID, paneID string, refs ...content.AgentReference) content.AgentAskResult {
+	t.Helper()
+	res, err := led.SubmitAgentAsk(context.Background(), content.AgentAsk{
+		ID:         nextAskID(),
+		Client:     "test-client",
+		Env:        content.Environment{ID: "local", Kind: content.EnvLocal},
+		SessionID:  new(sessionID),
+		PaneID:     new(paneID),
+		Cwd:        "/repo",
+		Question:   "what does this screen mean?",
+		References: refs,
+	})
+	if err != nil {
+		t.Fatalf("SubmitAgentAsk in pane %q: %v", paneID, err)
 	}
 	return res
 }
@@ -334,7 +355,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	res := askOne(t, led, "session-a", content.AgentReference{FrameID: frameID, Region: fullRegion()})
 
 	// The question is an entry of kind=agent with the question as its intent.
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
@@ -370,7 +391,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	// Two edges: the references edge (question → frame, region carried) and
 	// the caused-by edge from the answer entry (design §5 — the answer is
 	// an entry joined to the question, streamed in).
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
@@ -386,7 +407,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if ref == nil {
 		t.Fatalf("edges = %+v, want a references edge", edges)
 	}
-	if ref.From != res.QuestionID || ref.To != frameID {
+	if ref.From != res.EntryID || ref.To != frameID {
 		t.Errorf("references edge = %+v, want question → frame", ref)
 	}
 	var region content.FrameRegion
@@ -396,36 +417,33 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if region.RowStart != 0 || region.RowEnd != 2 {
 		t.Errorf("region = %+v, want rows [0,2)", region)
 	}
-	if caused == nil {
-		t.Fatalf("edges = %+v, want a caused-by edge from the answer", edges)
-	}
-	if caused.To != res.QuestionID {
-		t.Errorf("caused-by edge = %+v, want → the question", caused)
+	// NO caused-by edge, because there is no second entry to join: a turn
+	// is ONE entry whose body is the answer (nocx-4em1z). The relation is
+	// free for what actually needs it — an action belongs to its turn.
+	if caused != nil {
+		t.Errorf("edges = %+v, want no caused-by: the answer is not an entry of its own", caused)
 	}
 
-	// The answer entry exists: an entry in the flow, with its container
-	// execution (not a run) and the empty, open answer artifact.
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
-	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (err %v)", ans, err)
+	// The answer's body is an artifact on the turn's own RUN — open, empty,
+	// waiting for deltas. Not a container execution under a second entry.
+	turn, err := led.Entry(ctx, res.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("turn entry: %v (err %v)", turn, err)
 	}
-	if ans.Kind != content.EntryAgent || ans.Intent != content.AnswerIntent {
-		t.Errorf("answer entry kind/intent = %q/%q, want agent/answer", ans.Kind, ans.Intent)
+	if turn.Phase != content.PhaseOpen || turn.Status != content.EntryPending {
+		t.Errorf("turn phase/status = %q/%q, want open/pending", turn.Phase, turn.Status)
 	}
-	if ans.Phase != content.PhaseOpen || ans.Status != content.EntryPending {
-		t.Errorf("answer entry phase/status = %q/%q, want open/pending", ans.Phase, ans.Status)
+	if len(turn.Executions) != 1 {
+		t.Fatalf("turn executions = %d, want the one run", len(turn.Executions))
 	}
-	if len(ans.Executions) != 1 {
-		t.Fatalf("answer executions = %d, want 1", len(ans.Executions))
+	if turn.Executions[0].State == nil {
+		t.Errorf("the turn's execution has no run state — it IS the run")
 	}
-	if ans.Executions[0].State != nil {
-		t.Errorf("answer execution state = %v, want nil (not a run)", ans.Executions[0].State)
+	if len(turn.Executions[0].Artifacts) != 1 {
+		t.Fatalf("turn artifacts = %d, want the one answer body", len(turn.Executions[0].Artifacts))
 	}
-	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer artifacts = %d, want 1", len(ans.Executions[0].Artifacts))
-	}
-	if ans.Executions[0].Artifacts[0].ID != res.AnswerArtifactID {
-		t.Errorf("answer artifact id = %q, want %q", ans.Executions[0].Artifacts[0].ID, res.AnswerArtifactID)
+	if turn.Executions[0].Artifacts[0].ID != res.AnswerArtifactID {
+		t.Errorf("answer artifact id = %q, want %q", turn.Executions[0].Artifacts[0].ID, res.AnswerArtifactID)
 	}
 }
 
@@ -457,8 +475,8 @@ func TestSubmitAgentAsk_ReplayReturnsOriginalRun(t *testing.T) {
 	if res2.RunID != res1.RunID {
 		t.Errorf("replay run id = %d, want %d", res2.RunID, res1.RunID)
 	}
-	if res2.QuestionID != res1.QuestionID {
-		t.Errorf("replay question id = %q, want %q", res2.QuestionID, res1.QuestionID)
+	if res2.EntryID != res1.EntryID {
+		t.Errorf("replay entry id = %q, want %q", res2.EntryID, res1.EntryID)
 	}
 	if !res2.Replayed {
 		t.Error("replay did not report Replayed")
@@ -628,7 +646,7 @@ func TestStartupSweep_InterruptsNonTerminalRuns(t *testing.T) {
 
 	// First end of the interval: immediately after the ask, the run is
 	// durable and prepared — the model has not been called.
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
@@ -647,7 +665,7 @@ func TestStartupSweep_InterruptsNonTerminalRuns(t *testing.T) {
 	defer func() { _ = db2.Close() }()
 	led2 := db2.Ledger()
 
-	q2, err := led2.Entry(ctx, res.QuestionID)
+	q2, err := led2.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry after reopen: %v", err)
 	}
@@ -708,7 +726,7 @@ func TestStartupSweep_LeavesTerminalRunsAndShellEntriesAlone(t *testing.T) {
 	defer func() { _ = db2.Close() }()
 	led2 := db2.Ledger()
 
-	q2, err := led2.Entry(ctx, res.QuestionID)
+	q2, err := led2.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
@@ -758,7 +776,7 @@ func TestFinishExecution_MapsTerminationToRunState(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("FinishExecution(%s): %v", tc.reason, err)
 		}
-		q, err := led.Entry(ctx, res.QuestionID)
+		q, err := led.Entry(ctx, res.EntryID)
 		if err != nil {
 			t.Fatalf("Entry: %v", err)
 		}
@@ -858,7 +876,7 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 	res := askOne(t, led, "session-a")
 
 	ctx := context.Background()
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
@@ -868,22 +886,18 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 		}
 	}
 	// The run still exists (the question is recorded and answerable): the
-	// question carries a prepared run, and the ANSWER entry carries the
-	// artifact the streamed deltas will land in — the same shape as a
-	// referenced ask, minus the edges.
-	q, err := led.Entry(ctx, res.QuestionID)
+	// turn carries a prepared run, and that run carries the artifact the
+	// streamed deltas will land in — the same shape as a referenced ask,
+	// minus the edges.
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
-		t.Fatalf("question entry: %v (err %v)", q, err)
+		t.Fatalf("turn entry: %v (err %v)", q, err)
 	}
 	if len(q.Executions) != 1 || q.Executions[0].State == nil || *q.Executions[0].State != content.RunPrepared {
-		t.Fatalf("question run = %+v, want one prepared execution", q.Executions)
+		t.Fatalf("turn run = %+v, want one prepared execution", q.Executions)
 	}
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
-	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (err %v)", ans, err)
-	}
-	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer executions = %+v, want one artifact", ans.Executions)
+	if len(q.Executions[0].Artifacts) != 1 {
+		t.Fatalf("turn artifacts = %+v, want the one answer body", q.Executions[0].Artifacts)
 	}
 }
 
@@ -934,5 +948,75 @@ func TestTransitionRun_SkipToApprovalRefused(t *testing.T) {
 	res := askOne(t, led, "session-a")
 	if err := led.TransitionRun(context.Background(), res.RunID, content.RunAwaitingApproval); err == nil {
 		t.Fatal("prepared → awaiting_approval accepted — the machine only suspends a streaming run")
+	}
+}
+
+// ── one turn, one entry (nocx-4em1z) ──────────────────────────────────────
+
+// A TURN IS A BLOCK, and a block is ONE entry: the question is its intent and
+// the answer is its body, exactly as a command line and its output are.
+//
+// Before this it was two entries joined by a caused-by edge (assistant design
+// §5), and nothing depended on the second one except its id being a routing
+// address — which the turn's own id serves. Two rows for one block cost the
+// restore path a fold it should never have had to do: the question entry had
+// no body of its own to draw, and the answer entry had no question in its
+// header.
+//
+// §5's stated reason is untouched by this and is asserted below: the answer is
+// an ARTIFACT with provenance, not a string in a column (ADR-0019 §6).
+func TestAnAskIsOneEntryWhoseBodyIsTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	db, led, _ := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+
+	before, err := led.ListEntries(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListEntries before: %v", err)
+	}
+	ask := askIn(t, led, "session-1", "pane-1")
+
+	after, err := led.ListEntries(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListEntries after: %v", err)
+	}
+	if len(after)-len(before) != 1 {
+		t.Fatalf("one ask wrote %d entries, want exactly 1: %+v", len(after)-len(before), after)
+	}
+
+	turn, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("Entry(%s) = %+v, %v", ask.EntryID, turn, err)
+	}
+	// The question is the entry's own intent — the header of the block a
+	// person reads, not a row of its own.
+	if turn.Intent != "what does this screen mean?" {
+		t.Errorf("the turn's intent = %q, want the question", turn.Intent)
+	}
+	// And the answer's home is an artifact on the turn's run, open for the
+	// deltas that have not arrived yet. One artifact, not two: a turn has no
+	// terminal body, which is exactly what tells a restored block to render
+	// prose rather than a grid.
+	var bodies []content.Artifact
+	for _, ex := range turn.Executions {
+		bodies = append(bodies, ex.Artifacts...)
+	}
+	if len(bodies) != 1 {
+		t.Fatalf("the turn carries %d artifacts, want the one answer body: %+v", len(bodies), bodies)
+	}
+	if bodies[0].MediaType != content.MediaText {
+		t.Errorf("the answer body's media type = %q, want %q", bodies[0].MediaType, content.MediaText)
+	}
+	if bodies[0].ID != ask.AnswerArtifactID {
+		t.Errorf("the ask result names artifact %q, the turn carries %q",
+			ask.AnswerArtifactID, bodies[0].ID)
+	}
+	for _, ex := range turn.Executions {
+		for _, a := range ex.Artifacts {
+			if a.MediaType == content.MediaVT {
+				t.Errorf("a turn carries a terminal body (%q) — nothing may write one", a.ID)
+			}
+		}
 	}
 }

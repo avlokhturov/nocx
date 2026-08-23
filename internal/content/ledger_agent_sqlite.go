@@ -400,10 +400,12 @@ func chunkBytes(b []byte) [][]byte {
 
 // ── agent.ask ─────────────────────────────────────────────────────────────
 
-// SubmitAgentAsk records ONE ask transaction atomically: the question entry
-// (kind=agent, open/pending), its pending run (the backend-minted execution
-// row, state prepared — the model is never called here) and the references
-// edges, each carrying its region. Every reference is validated INSIDE the
+// SubmitAgentAsk records ONE ask transaction atomically: the TURN
+// (kind=agent, open/pending — the question is its intent, anchored to the
+// pane it was asked in), its pending run (the backend-minted execution row,
+// state prepared — the model is never called here) with the open artifact
+// the answer will be streamed into, and the references edges, each carrying
+// its region. Every reference is validated INSIDE the
 // transaction: unknown id, non-frame id, a frame from another session or an
 // out-of-bounds region refuses the WHOLE transaction — the interval "the
 // run record exists from before the ask returns until the run terminalizes"
@@ -449,21 +451,17 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 				}
 				return runErr
 			}
-			// A replay returns the ORIGINAL answer identity too — the
-			// renderer's lost response must not orphan the answer block.
-			var answerID, artifactID string
-			if answerErr := tx.QueryRowContext(ctx,
-				`SELECT from_id FROM edges WHERE to_id = ? AND rel = 'caused-by'`,
-				in.ID).Scan(&answerID); answerErr != nil {
-				return fmt.Errorf("content: submit agent ask: replayed ask %q has no answer entry", in.ID)
-			}
+			// A replay returns the ORIGINAL body identity too — the
+			// renderer's lost response must not orphan the block it will
+			// stream into.
+			var artifactID string
 			if artifactErr := tx.QueryRowContext(ctx,
-				`SELECT a.id FROM artifacts a JOIN executions e ON a.execution_id = e.id
-				  WHERE e.entry_id = ? ORDER BY a.id LIMIT 1`, answerID).Scan(&artifactID); artifactErr != nil {
+				`SELECT id FROM artifacts WHERE execution_id = ? ORDER BY id LIMIT 1`,
+				runID).Scan(&artifactID); artifactErr != nil {
 				return fmt.Errorf("content: submit agent ask: replayed ask %q has no answer artifact", in.ID)
 			}
 			out = AgentAskResult{
-				RunID: runID, QuestionID: in.ID, AnswerEntryID: answerID,
+				RunID: runID, EntryID: in.ID,
 				AnswerArtifactID: artifactID, IngestSeq: haveSeq, Replayed: true,
 			}
 			return tx.Commit()
@@ -482,11 +480,15 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&seq); seqErr != nil {
 			return fmt.Errorf("content: submit agent ask: assign ingest_seq: %w", seqErr)
 		}
+		// The turn: the question is the entry's INTENT, which is what the
+		// block's header renders, and pane_id is the anchor that makes it
+		// restorable at all (nocx-4em1z). session_id beside it is
+		// provenance and is swept on the next Open.
 		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
 			 phase, status, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, 'normal', '{}')`,
-			in.ID, seq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, 'normal', '{}')`,
+			in.ID, seq, in.Client, digest, in.Env.ID, in.PaneID, in.SessionID, in.Cwd,
 			in.Question, now); insertErr != nil {
 			return insertErr
 		}
@@ -529,54 +531,29 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			}
 		}
 
-		// The answer entry: the model's streamed reply lands here — an
-		// entry in the flow, joined to the question by a caused-by edge
-		// (design §5: the answer is an entry, never a string held in a map
-		// that dies with the process). Its identity exists from before the
-		// first delta until the run terminalizes — the same span as the
-		// run: question, run, references, answer entry and artifact commit
-		// together or none does.
-		answerID := mintID()
+		// The answer's body: an artifact on the run itself, open for the
+		// deltas that have not arrived yet (nocx-4em1z). This is what a
+		// command's output is to a command — the entry is the block, the
+		// artifact is what it printed — and the whole reason a turn needs
+		// no second row.
+		//
+		// It stays an ARTIFACT WITH PROVENANCE rather than a string in a
+		// column, which is the part of design §5 that outlives the shape it
+		// was written in (ADR-0019 §6). What §5 also said — that the answer
+		// is an entry of its own, joined by a caused-by edge — is what this
+		// replaces: the second identity was only ever an ADDRESS for the
+		// deltas, and the turn's own id is that address now.
+		//
+		// text/plain, and never application/vt: a turn has no terminal body
+		// and never will. That absence is not an accident to be read
+		// around — it is the stored fact a restored block picks its grammar
+		// from (prose wraps, a grid must not).
 		artifactID := mintID()
-		// The answer gets its own ingest_seq — commit order is the
-		// counter's order (ADR-0019 §2), and a second entry means a second
-		// counter increment, never seq+1 (which the next ask would collide
-		// with).
-		var answerSeq int64
-		if answerSeqErr := tx.QueryRowContext(ctx,
-			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&answerSeq); answerSeqErr != nil {
-			return fmt.Errorf("content: submit agent ask: assign answer ingest_seq: %w", answerSeqErr)
-		}
-		// The entry first — its execution and artifact reference it (FK).
-		if _, answerInsertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
-			 phase, status, conversation_id, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, ?, 'normal', '{}')`,
-			answerID, answerSeq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
-			AnswerIntent, in.ID, now); answerInsertErr != nil {
-			return answerInsertErr
-		}
-		answerExec, err := tx.ExecContext(ctx, `INSERT INTO executions
-			(entry_id, attempt, environment_obs_id, interactivity, started_at)
-			VALUES (?, 1, ?, 'none', ?)`,
-			answerID, obsID, now)
-		if err != nil {
-			return err
-		}
-		answerExecID, err := answerExec.LastInsertId()
-		if err != nil {
-			return err
-		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
 			(id, execution_id, media_type, state, byte_len, capture_method, capture_version,
 			 encoding, gaps, payload)
 			VALUES (?, ?, 'text/plain', 'open', 0, 'none', 1, 'utf-8', '[]', '{}')`,
-			artifactID, answerExecID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO edges (from_id, to_id, rel, payload) VALUES (?, ?, 'caused-by', '{}')`,
-			answerID, in.ID); err != nil {
+			artifactID, runID); err != nil {
 			return err
 		}
 
@@ -584,7 +561,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			return err
 		}
 		out = AgentAskResult{
-			RunID: runID, QuestionID: in.ID, AnswerEntryID: answerID,
+			RunID: runID, EntryID: in.ID,
 			AnswerArtifactID: artifactID, IngestSeq: seq,
 		}
 		return nil
@@ -639,12 +616,11 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 	})
 }
 
-// FinishAgentRun closes the run and its entries in ONE transaction: the
-// run's terminal state, end and termination reason; the question entry; the
-// answer entry (found via its caused-by edge); and the answer artifact
-// (sealed) with the answer execution's end. A run is never reported
-// terminal in the run vocabulary while its entries still say otherwise —
-// both lifecycles close together, or neither does.
+// FinishAgentRun closes the run and its turn in ONE transaction: the run's
+// terminal state, end and termination reason; the turn's entry; and the
+// answer body (sealed). A run is never reported terminal in the run
+// vocabulary while its entry still says otherwise — both lifecycles close
+// together, or neither does.
 func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in FinishAgentRun) error {
 	if !in.State.IsTerminal() {
 		return fmt.Errorf("content: finish agent run: %s is not terminal", in.State)
@@ -690,41 +666,30 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 			`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`, string(status), entryID); err != nil {
 			return err
 		}
-		// The answer entry and its container close with the run.
-		if err := closeAnswerFor(ctx, tx, entryID, status, in.EndedAt, in.TerminationReason); err != nil {
+		// The body seals with the run: a terminal run never leaves an
+		// artifact open for deltas that can no longer arrive.
+		if err := sealTurnBody(ctx, tx, entryID); err != nil {
 			return err
 		}
 		return tx.Commit()
 	})
 }
 
-// closeAnswerFor closes the answer entry joined to questionEntryID by its
-// caused-by edge, seals its artifact and ends its container execution — the
-// terminalizers' shared step, so EVERY path that closes an ask run closes
-// the answer too (a run is never terminal while its answer entry still says
-// pending). No answer entry (a non-ask run) is a no-op.
-func closeAnswerFor(ctx context.Context, tx *sql.Tx, questionEntryID string, status EntryStatus, endedAt int64, reason TerminationReason) error {
-	var answerID string
-	err := tx.QueryRowContext(ctx,
-		`SELECT from_id FROM edges WHERE to_id = ? AND rel = 'caused-by'`, questionEntryID).Scan(&answerID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, closeErr := tx.ExecContext(ctx,
-		`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`, string(status), answerID); closeErr != nil {
-		return closeErr
-	}
-	if _, sealErr := tx.ExecContext(ctx,
+// sealTurnBody seals an ASK turn's answer body — the artifact on the turn's
+// own run execution (lane='agent'). It is the terminalizers' shared step, so
+// EVERY path that closes an ask run closes its body too: a run is never
+// reported terminal while the artifact it streams into still says open.
+//
+// The entry itself is closed by the caller, in the same transaction — that
+// is the whole of what "close the turn" now means, because the turn is one
+// entry (nocx-4em1z). An entry with no agent run — an ordinary command — has
+// no such execution and this is a no-op, which is what keeps the capture
+// path's own artifact out of it.
+func sealTurnBody(ctx context.Context, tx *sql.Tx, entryID string) error {
+	_, err := tx.ExecContext(ctx,
 		`UPDATE artifacts SET state = 'sealed'
-		  WHERE execution_id IN (SELECT id FROM executions WHERE entry_id = ?)`, answerID); sealErr != nil {
-		return sealErr
-	}
-	_, err = tx.ExecContext(ctx,
-		`UPDATE executions SET ended_at = ?, termination_reason = ?
-		  WHERE entry_id = ? AND state IS NULL`, endedAt, string(reason), answerID)
+		  WHERE execution_id IN (SELECT id FROM executions WHERE entry_id = ? AND lane = 'agent')`,
+		entryID)
 	return err
 }
 

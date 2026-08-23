@@ -18,7 +18,7 @@ export interface AgentRunReasoning {
    */
   runId: number
   /**
-   * The answer entry the reasoning belongs to — agent.ask result's answerEntryId, the same routing key agent.runDelta carries.
+   * The TURN the reasoning belongs to — agent.ask result's entryId, the same routing key agent.runDelta carries. The reasoning is NOT persisted (nocx-4em1z, the owner's call): it is streamed, drawn and gone, so a restored turn has no reasoning note at all rather than an empty one.
    */
   entryId: string
   /**

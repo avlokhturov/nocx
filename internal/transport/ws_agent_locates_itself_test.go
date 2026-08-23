@@ -266,7 +266,7 @@ func TestAssistant_LooksAtThePaneTheQuestionWasAskedIn(t *testing.T) {
 	// entry, sealed, carrying the same sentence the person watched stream.
 	led := h.db.Ledger()
 	ctx := context.Background()
-	ans, entryErr := led.Entry(ctx, res.AnswerEntryID)
+	ans, entryErr := led.Entry(ctx, res.EntryID)
 	if entryErr != nil || ans == nil {
 		t.Fatalf("answer entry: %v (err %v)", ans, entryErr)
 	}

@@ -36,6 +36,12 @@ export interface RestorableBlock {
   status: 'success' | 'failure' | 'entered' | 'unknown'
   durationMs: number
   exitCode: number | null
+  /** WHO submitted it — the entry's own kind, which is what that column
+   *  means (ledger_command.go: "Author is WHO submitted the command, and it
+   *  is the entry's own kind"). It is what paints the agent badge on a
+   *  restored block, and dropping it is why a restored tab used to forget
+   *  that the assistant had run the command (nocx-4em1z). */
+  author: 'shell' | 'agent'
 }
 
 /** The ledger's status vocabulary, narrowed to what a frozen block draws.
@@ -65,6 +71,11 @@ function frozenStatus(status: string): RestorableBlock['status'] {
  * (AD-9 — a reconnect is ordinary, and a pane that restored during one would
  * otherwise show an empty past for the rest of the session).
  */
+// An ACTION is not a block and never becomes one: the ledger's own words are
+// "a third kind and can never be an author: an action has no block and no
+// command line" (command-ledger.ts). A tool call is drawn as a line inside
+// the turn's flow (nocx-shxv0), so restoring one as a top-level block would
+// be a second owner of the same fact.
 export async function blocksForPane(client: WSClient, paneId: string): Promise<RestorableBlock[]> {
   const page = await client.call<LedgerQuery>('ledger.query', {
     scope: 'everywhere',
@@ -72,6 +83,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
     limit: RESTORE_BLOCK_LIMIT,
   })
   return page.entries
+    .filter((e) => e.kind !== 'action')
     .map((e) => ({
       entryId: e.id,
       command: e.intent,
@@ -80,6 +92,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
       status: frozenStatus(e.status),
       durationMs: e.durationMs ?? 0,
       exitCode: e.exitCode,
+      author: e.kind === 'agent' ? ('agent' as const) : ('shell' as const),
     }))
     .reverse()
 }
@@ -148,4 +161,51 @@ export async function answerTextForEntry(
   entryId: string,
 ): Promise<string | null> {
   return artifactBody(client, entryId, 'text/plain')
+}
+
+/** What a restored entry turns out to be, and the body to draw it with.
+ *
+ *  `kind` is the block's GRAMMAR (blocks.ts BlockKind): a terminal grid must
+ *  keep the line breaks the serializer gave it, prose must wrap at the
+ *  block's width, and the header of a command is a command line while the
+ *  header of a turn is a question. */
+export interface RestoredBody {
+  kind: 'command' | 'ask'
+  body: string | null
+}
+
+/**
+ * One entry's body, and what that body says the block IS (nocx-4em1z).
+ *
+ * THE KIND IS READ, NOT INFERRED. A command's drawn body is `application/vt`
+ * — the SGR grid — and the `text/plain` beside it is openly marked as
+ * derived from it. An assistant turn's body is a `text/plain` ORIGINAL and it
+ * never has a terminal body, because nothing writes one for a turn. So "does
+ * this entry have a terminal body" is a stored fact with two states, not a
+ * guess about content, and it is the same fact for a block the assistant ran
+ * (a command, with its author badge) as for one a person typed.
+ *
+ * An entry with NO artifact at all — retention took it (ADR-0019 §7), or the
+ * store could not be asked — is a command with no body. That is deliberate:
+ * an evicted command is by far the commoner case, it renders the same
+ * sentence either way, and guessing prose for an empty entry would repaint
+ * every command whose output has aged out.
+ *
+ * ONE round trip pair, shared with bodyForBlock above: the entry, then its
+ * artifact. The kind falls out of the list the first call already returned.
+ */
+export async function restoredBody(client: WSClient, entryId: string): Promise<RestoredBody> {
+  try {
+    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
+    const chosen = vt ?? entry.artifacts.find((a) => a.mediaType === 'text/plain')
+    if (!chosen) return { kind: 'command', body: null }
+    const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
+    return { kind: vt ? 'command' : 'ask', body: body.body }
+  } catch {
+    // Quiet for the same reason bodyForBlock is: fifty restoring blocks
+    // would otherwise log fifty times for one dead socket, and the pane
+    // already says its past could not be read.
+    return { kind: 'command', body: null }
+  }
 }

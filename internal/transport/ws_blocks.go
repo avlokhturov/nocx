@@ -111,6 +111,14 @@ func (s *WSServer) ListBlocks(ctx context.Context, sessionID string, limit int) 
 		More:   !page.Exhausted,
 	}
 	for _, row := range page.Entries {
+		// A block the model can read is one that ENDED. An open entry has no
+		// outcome and no complete body, and since a turn became a block of
+		// its own (nocx-4em1z) the open entry in this pane is usually THE
+		// QUESTION BEING ANSWERED RIGHT NOW — listing it would hand the model
+		// its own unanswered question as context.
+		if row.Phase != content.PhaseClosed {
+			continue
+		}
 		summary := assistant.BlockSummary{
 			ID:      row.ID,
 			Command: row.Intent,

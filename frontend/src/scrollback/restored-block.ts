@@ -10,7 +10,9 @@
 // ADR-0019 §3: nothing in the UI may imply live resumption. Every block this
 // makes carries `data-restored`, which is what the surrounding CSS and any
 // action gate read — a restored block offers nothing that needs a process.
-import { createCommandBlock, type FrozenStatus } from './blocks'
+import { blockKindRules, createCommandBlock, type BlockKind, type FrozenStatus } from './blocks'
+import { createAnswerBody } from './answer-body'
+import type { CommandAuthor } from '../command-ledger'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { attrsToStyle, type TerminalSnapshot } from './serializer'
 import { runsFromSGR } from './sgr-read'
@@ -37,6 +39,25 @@ export interface RestoredBlockFacts {
    * a command that printed nothing — and the two must not render alike.
    */
   body: string | null
+  /** WHO submitted it. Restored from the entry's own kind, which is what
+   *  that column means — and dropping it is the whole of the badge half of
+   *  nocx-4em1z: this call omitted the argument, the parameter defaulted to
+   *  'shell', and every restored tab forgot that the assistant had run the
+   *  command. The parameter is required now, so the omission cannot come
+   *  back silently. */
+  author: CommandAuthor
+  /** What the block IS, read from the body the entry actually has
+   *  (restore-client.ts restoredBody): a terminal body is a command, a
+   *  text/plain original with no terminal body beside it is an assistant
+   *  turn. It decides the grammar — a grid must not re-wrap and prose must
+   *  (nocx-ex636) — and it is the half of nocx-4em1z that brings dialogues
+   *  back as the blocks they were. */
+  kind: BlockKind
+  /** The ledger entry this was built from. Carried into the DOM because the
+   *  copy path reads the STORED answer by it (nocx-v13pd) rather than
+   *  scraping the painted rows, and a restored turn must copy exactly as a
+   *  live one does. */
+  entryId?: string
 }
 
 /** The sentence a block shows where its output used to be. */
@@ -74,12 +95,19 @@ export function restoredBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
 ): HTMLElement {
+  // A TURN's body is prose and is drawn by the answer body's own renderer —
+  // the one the live stream draws through (nocx-4em1z). A COMMAND's body is
+  // an SGR grid and is rendered here, from the bytes the capture stored.
+  // Neither is built twice; this only chooses which owner draws.
+  const isTurn = facts.kind === 'ask'
   const html =
     facts.body === null
       ? `<span class="term-line cmd-output-evicted">${EVICTED}</span>`
-      : bodyToHTML(snapshot, facts.body)
+      : isTurn
+        ? ''
+        : bodyToHTML(snapshot, facts.body)
   const el = createCommandBlock(
-    'command',
+    facts.kind,
     facts.id,
     facts.command,
     facts.cwd,
@@ -91,8 +119,24 @@ export function restoredBlock(
     getContainer,
     onSelect,
     store,
+    facts.author,
   )
   el.dataset.restored = 'true'
+  if (facts.entryId) el.dataset.entryId = facts.entryId
   if (facts.body === null) el.dataset.outputEvicted = 'true'
+  if (isTurn && facts.body !== null) {
+    // The same body element the live answer builds — the class comes from
+    // the kind's rules, which own the wrap policy, so a restored answer
+    // wraps exactly as a live one does.
+    const outputEl = document.createElement('div')
+    outputEl.className = blockKindRules('ask').outputClass
+    outputEl.dataset.answerBody = ''
+    el.appendChild(outputEl)
+    const body = createAnswerBody(outputEl, { store })
+    // The whole answer in one call: the renderer takes chunks, and a caller
+    // that has all of it is simply a caller with one chunk.
+    body.append(facts.body)
+    body.finish()
+  }
   return el
 }

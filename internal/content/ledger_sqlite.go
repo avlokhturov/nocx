@@ -812,12 +812,11 @@ func (s *sqliteContent) FinishExecution(ctx context.Context, executionID int64, 
 			end.Payload, end.Payload, entryID); err != nil {
 			return err
 		}
-		// An ASK run (an entry with a caused-by answer) closes its answer
-		// entry, seals its artifact and ends its container execution in the
-		// same transaction — any terminalizer keeps the ledger consistent,
-		// not just FinishAgentRun. A non-ask run has no answer entry and
+		// An ASK run seals the body it was streaming into, in the same
+		// transaction — any terminalizer keeps the ledger consistent, not
+		// just FinishAgentRun. An ordinary command has no agent run and
 		// this is a no-op.
-		if err := closeAnswerFor(ctx, tx, entryID, end.Status, end.EndedAt, end.TerminationReason); err != nil {
+		if err := sealTurnBody(ctx, tx, entryID); err != nil {
 			return err
 		}
 		return tx.Commit()

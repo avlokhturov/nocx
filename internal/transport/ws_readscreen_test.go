@@ -465,7 +465,7 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	ctx := context.Background()
 	deadline := time.Now().Add(15 * time.Second)
 	for {
-		entry, entryErr := led.Entry(ctx, res.QuestionID)
+		entry, entryErr := led.Entry(ctx, res.EntryID)
 		if entryErr != nil || entry == nil || len(entry.Executions) == 0 {
 			t.Fatalf("question entry: %v (err %v)", entry, entryErr)
 		}

@@ -13,7 +13,7 @@
       "minimum": 1
     },
     "entryId": {
-      "description": "The answer entry the chunk appends to — agent.ask result's answerEntryId. The renderer appends here, never to 'the current answer'.",
+      "description": "The TURN the chunk appends to — agent.ask result's entryId (nocx-4em1z). The renderer appends here, never to 'the current answer'.",
       "type": "string",
       "minLength": 1
     },

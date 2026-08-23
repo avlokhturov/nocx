@@ -689,12 +689,6 @@ type FrameRegion struct {
 	ColEnd   *int
 }
 
-// AnswerIntent marks an answer entry (kind=agent): the model's streamed
-// reply to a question, joined to it by a caused-by edge (design §5 — the
-// answer is an entry, never a string held in a map that dies with the
-// process).
-const AnswerIntent = "answer"
-
 // RunFacts is the run's configuration as it was at the time (design §5:
 // "run mode, endpoint and model as they were at the time") — pinned into
 // the execution's payload at ask time, so a later endpoint change never
@@ -709,19 +703,33 @@ type RunFacts struct {
 
 // AgentAsk is one ask transaction (agent.ask, design §5, §7): the question
 // text plus references to already-captured frames. The backend records the
-// frame references, the question, the answer entry and a PENDING RUN in ONE
-// atomic create, before the model would be called — the identities and the
-// recovery state exist first, or a frame lands with no question, a question
-// with no run, a run with no answer entry, or a retry duplicates both.
+// frame references, the TURN and a PENDING RUN with the body it will stream
+// into, in ONE atomic create, before the model would be called — the
+// identities and the recovery state exist first, or a frame lands with no
+// question, a question with no run, a run with nowhere to write, or a retry
+// duplicates both.
 type AgentAsk struct {
 	// ID is the renderer-minted ask id — the UNTRUSTED idempotency key of
 	// the question entry (the schema's own "client-minted UUIDv7" rule):
 	// bound to Client and a digest of the ask content, so a replay returns
 	// the original run id and the same id with different content is
 	// ErrIDConflict.
-	ID         string
-	Client     string
-	Env        Environment
+	ID     string
+	Client string
+	Env    Environment
+	// PaneID is the turn's DURABLE anchor, and it is the same one a command
+	// carries (design §6.1, nocx-4em1z): a turn IS a block, so it hangs on
+	// the thing that outlives the backend. SessionID beside it is
+	// provenance — which pipe the question was asked in — and is null from
+	// the first Open after that backend exited. Anchoring a turn to the
+	// session alone is what lost every dialogue on restore: the read is by
+	// pane, and by then there is no session to match.
+	//
+	// The TRANSPORT fills it from the live session, exactly as ledger.open
+	// does, and the renderer never sends one: the backend already resolved
+	// which pane a session is the pipe of, and a second copy on the wire
+	// would be one input under two owners.
+	PaneID     *string
 	SessionID  *string
 	Cwd        string
 	Question   string
@@ -733,15 +741,25 @@ type AgentAsk struct {
 }
 
 // AgentAskResult is the answer to an ask: the BACKEND-MINTED run id (the
-// execution row — what agent.cancel/approve/status will address), the
-// question entry id, the ANSWER entry id (where the streamed deltas land —
-// agent.runDelta's entryId), the answer artifact id, the question's
-// ingest_seq and whether this was a replay. The run is in state prepared:
-// recorded, never executed.
+// execution row — what agent.cancel/approve/status will address), the TURN's
+// entry id, the artifact the answer is written into, the entry's ingest_seq
+// and whether this was a replay. The run is in state prepared: recorded,
+// never executed.
+//
+// ONE entry id and not two (nocx-4em1z). A turn is a block: the question is
+// the entry's intent and the answer is its body, the way a command line and
+// its output are. The answer used to be an entry of its own joined by a
+// caused-by edge (assistant design §5) and nothing needed it to be — its id
+// was a routing ADDRESS for deltas, reasoning, tool-call lines and copy, and
+// the turn's own id addresses all four.
 type AgentAskResult struct {
-	RunID            int64
-	QuestionID       string
-	AnswerEntryID    string
+	RunID int64
+	// EntryID is the turn: what the deltas append to, what the flow renders
+	// as a block, and what a restore reads back.
+	EntryID string
+	// AnswerArtifactID is where the streamed text lands — an artifact with
+	// provenance rather than a string in a column (ADR-0019 §6), which is
+	// the part of §5 that this shape keeps.
 	AnswerArtifactID string
 	IngestSeq        int64
 	Replayed         bool
@@ -1236,12 +1254,12 @@ type LedgerRepository interface {
 	// inside that span (after the streaming transition commits, before the
 	// terminal close).
 	TransitionRun(ctx context.Context, runID int64, to RunState) error
-	// FinishAgentRun closes the run AND its entries in ONE transaction —
-	// the terminal state this slice's driver persists: the run's state, end
-	// and termination reason, the question entry, the answer entry (found
-	// via its caused-by edge) and the answer artifact (sealed). A run is
-	// never reported terminal in the run vocabulary while its entries still
-	// say otherwise — both lifecycles close together, or neither does.
+	// FinishAgentRun closes the run AND its turn in ONE transaction — the
+	// terminal state this slice's driver persists: the run's state, end and
+	// termination reason, the turn's entry, and the answer body (sealed).
+	// A run is never reported terminal in the run vocabulary while its
+	// entry still says otherwise — both lifecycles close together, or
+	// neither does.
 	FinishAgentRun(ctx context.Context, runID int64, in FinishAgentRun) error
 	// AddEdge records one relation between two entries.
 	AddEdge(ctx context.Context, e Edge) error

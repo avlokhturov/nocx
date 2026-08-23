@@ -160,19 +160,20 @@ type frameRegionWire struct {
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
 // (the execution row — what agent.cancel/approve/status will address), the
-// question entry id, the ANSWER entry id (where the streamed deltas land —
-// agent.runDelta's entryId; the renderer needs it BEFORE the first delta so
-// a no-delta failure still has an answer block to terminalize), the run's
-// state, ON THE WIRE because the renderer draws it (design §7), the
-// question's ingest_seq and whether this was a replay. The run is prepared:
-// recorded, never executed.
+// TURN's entry id, the run's state, ON THE WIRE because the renderer draws
+// it (design §7), the turn's ingest_seq and whether this was a replay. The
+// run is prepared: recorded, never executed.
+//
+// ONE entry id and not two (nocx-4em1z): a turn is a block whose intent is
+// the question and whose body is the answer, so the id the deltas append to
+// IS the id the flow renders. The renderer needs it BEFORE the first delta,
+// so a run that fails with no text still has a block to terminalize.
 type agentAskResponse struct {
-	RunID         int64  `json:"runId"`
-	QuestionID    string `json:"questionId"`
-	AnswerEntryID string `json:"answerEntryId"`
-	State         string `json:"state"`
-	IngestSeq     int64  `json:"ingestSeq"`
-	Replayed      bool   `json:"replayed"`
+	RunID     int64  `json:"runId"`
+	EntryID   string `json:"entryId"`
+	State     string `json:"state"`
+	IngestSeq int64  `json:"ingestSeq"`
+	Replayed  bool   `json:"replayed"`
 	// Model is the model id the run will answer with — the answering
 	// role's pair, pinned BEFORE the transaction (RunFacts.Model) and
 	// announced on the wire because the renderer draws it: the answer
@@ -543,6 +544,14 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	in.Client = h.clientID
 	sess, _ := h.state.get(sid)
 	in.Env = environmentForSession(sess)
+	// The turn's DURABLE ANCHOR, from the SAME owner the shell path reads it
+	// from (ws_ledger.go's open): the backend already resolved which pane
+	// this session is the pipe of. A paneId on the ask's params would put
+	// one input under two owners, and the renderer's copy would be the one
+	// nobody checked — which is the rule that path states in its own
+	// comment. Nil when the session is attached to no recorded pane, which
+	// costs the restore hint and nothing else (nocx-4em1z).
+	in.PaneID = panePtr(sess.PaneID())
 	// The run's authority is minted here, with the question: the workspace
 	// policy preset the composition root named, scoped to the run's own
 	// session and the observe effect class (ADR-0020 decision 5 — the grant
@@ -624,23 +633,22 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 
-	// The transaction records question + run + answer entry + edges in ONE
-	// commit, and the response is sent with the answer's identity BEFORE
-	// the stream starts — the renderer places the answer block from the
-	// response, then appends deltas to it.
+	// The transaction records the turn + run + body + edges in ONE commit,
+	// and the response is sent with the turn's identity BEFORE the stream
+	// starts — the renderer places the block from the response, then
+	// appends deltas to it.
 	var askRes content.AgentAskResult
 	err = h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		res, submitErr := svc.SubmitAsk(ctx, in)
 		if submitErr == nil {
 			askRes = res
 			_ = h.r.TryResult(req.ID, mustMarshal(agentAskResponse{
-				RunID:         res.RunID,
-				QuestionID:    res.QuestionID,
-				AnswerEntryID: res.AnswerEntryID,
-				State:         string(content.RunPrepared),
-				IngestSeq:     res.IngestSeq,
-				Replayed:      res.Replayed,
-				Model:         facts.Model,
+				RunID:     res.RunID,
+				EntryID:   res.EntryID,
+				State:     string(content.RunPrepared),
+				IngestSeq: res.IngestSeq,
+				Replayed:  res.Replayed,
+				Model:     facts.Model,
 			}))
 		}
 		return submitErr
@@ -657,17 +665,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	rc := askRunContext{
-		secret:        secret,
-		headers:       headers,
-		runID:         askRes.RunID,
-		questionID:    askRes.QuestionID,
-		answerEntryID: askRes.AnswerEntryID,
-		artifactID:    askRes.AnswerArtifactID,
-		question:      in.Question,
-		references:    in.References,
-		endpoint:      endpoint,
-		model:         facts.Model,
-		grant:         runGrant,
+		secret:     secret,
+		headers:    headers,
+		runID:      askRes.RunID,
+		entryID:    askRes.EntryID,
+		artifactID: askRes.AnswerArtifactID,
+		question:   in.Question,
+		references: in.References,
+		endpoint:   endpoint,
+		model:      facts.Model,
+		grant:      runGrant,
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -763,16 +770,15 @@ type askRunContext struct {
 	// handleAsk): the stream is handed what it needs and never reaches for
 	// the vault itself, which is what keeps a sealed vault on the request
 	// path where the unlock seam lives.
-	secret        credential.Secret
-	headers       []assistant.Header
-	runID         int64
-	questionID    string
-	answerEntryID string
-	artifactID    string
-	question      string
-	references    []content.AgentReference
-	endpoint      profile.Endpoint
-	model         string
+	secret     credential.Secret
+	headers    []assistant.Header
+	runID      int64
+	entryID    string
+	artifactID string
+	question   string
+	references []content.AgentReference
+	endpoint   profile.Endpoint
+	model      string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
@@ -942,7 +948,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			}
 			if err := r.TryNotify("agent.runToolCall", mustMarshal(agentRunToolCall{
 				RunID:         rc.runID,
-				EntryID:       rc.answerEntryID,
+				EntryID:       rc.entryID,
 				CallID:        ev.Call.CallID,
 				Tool:          ev.Call.Tool,
 				Effect:        string(ev.Call.Effect),
@@ -967,7 +973,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			// live-view gap like any other.
 			if err := r.TryNotify("agent.runReasoning", mustMarshal(agentRunReasoning{
 				RunID:   rc.runID,
-				EntryID: rc.answerEntryID,
+				EntryID: rc.entryID,
 				Text:    ev.Text,
 			})); err != nil {
 				dropped++
@@ -1002,7 +1008,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// over a dropped REFRESHABLE notification.
 		if err := r.TryNotify("agent.runDelta", mustMarshal(agentRunDelta{
 			RunID:   rc.runID,
-			EntryID: rc.answerEntryID,
+			EntryID: rc.entryID,
 			Seq:     seq,
 			Text:    text,
 		})); err != nil {

@@ -94,13 +94,33 @@ func captureFrameOverWire(t *testing.T, conn *websocket.Conn, params map[string]
 }
 
 type askWireResult struct {
-	RunID         int64  `json:"runId"`
-	QuestionID    string `json:"questionId"`
-	AnswerEntryID string `json:"answerEntryId"`
-	State         string `json:"state"`
-	IngestSeq     int64  `json:"ingestSeq"`
-	Replayed      bool   `json:"replayed"`
-	Model         string `json:"model"`
+	RunID     int64  `json:"runId"`
+	EntryID   string `json:"entryId"`
+	State     string `json:"state"`
+	IngestSeq int64  `json:"ingestSeq"`
+	Replayed  bool   `json:"replayed"`
+	Model     string `json:"model"`
+}
+
+// askPaneID is the pane every ask in these tests is asked in — the harness
+// creates it, because a turn is a block and a block names its pane
+// (nocx-4em1z).
+const askPaneID = "01930000-0000-7000-8000-0000000000a1"
+
+// askPaneIn creates the layout chain a turn hangs on. A turn IS a block
+// (nocx-4em1z), so agent.ask names the pane it was asked in and the FK is
+// what makes that anchor real — an ask naming a pane nobody created is
+// refused, in a harness exactly as in the product. One owner, because every
+// ask harness needs the same chain.
+func askPaneIn(t *testing.T, db content.ContentDB) {
+	t.Helper()
+	if _, err := db.Layout().CreateWorkspace(t.Context(),
+		content.Workspace{ID: "ws-ask", Name: "ask"},
+		content.Tab{ID: "tab-ask", WorkspaceID: "ws-ask", Position: 0, Layout: content.LayoutRow},
+		content.Pane{ID: askPaneID, TabID: "tab-ask", Cwd: "/repo", Kind: content.PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateWorkspace for the ask pane: %v", err)
+	}
 }
 
 // askOverWire sends agent.ask and decodes the result.
@@ -149,8 +169,8 @@ func TestAgentCaptureFrameAndAsk_OverTheWire(t *testing.T) {
 	if errObj != nil {
 		t.Fatalf("ask error: %+v", errObj)
 	}
-	if res.RunID == 0 || res.QuestionID == "" || res.AnswerEntryID == "" {
-		t.Fatalf("ask result = %+v, want run/question/answer ids", res)
+	if res.RunID == 0 || res.EntryID == "" {
+		t.Fatalf("ask result = %+v, want the run id and the turn's entry id", res)
 	}
 	if res.State != "prepared" {
 		t.Errorf("run state = %q, want prepared at the response", res.State)
@@ -179,7 +199,7 @@ func TestAgentCaptureFrameAndAsk_OverTheWire(t *testing.T) {
 	// — the wire answer is not evidence of what was stored).
 	led := db.Ledger()
 	ctx := context.Background()
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (err %v)", q, err)
 	}
@@ -189,7 +209,7 @@ func TestAgentCaptureFrameAndAsk_OverTheWire(t *testing.T) {
 	if q.Executions[0].State == nil || *q.Executions[0].State != content.RunCompleted {
 		t.Errorf("stored run state = %v, want completed", q.Executions[0].State)
 	}
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}

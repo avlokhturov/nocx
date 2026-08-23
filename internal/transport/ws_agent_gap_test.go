@@ -168,11 +168,10 @@ func newGapHandlers(svc *fakeAgentService, client assistant.Client, approvals *a
 
 func gapRunContext() askRunContext {
 	return askRunContext{
-		runID:         7,
-		questionID:    "q-1",
-		answerEntryID: "answer-1",
-		artifactID:    "artifact-1",
-		question:      "q",
+		runID:      7,
+		entryID:    "turn-1",
+		artifactID: "artifact-1",
+		question:   "q",
 	}
 }
 
@@ -227,8 +226,8 @@ func TestAgentAsk_SeqAdvancesPastDroppedDeltas(t *testing.T) {
 		if d.Seq != i {
 			t.Errorf("delta %d seq = %d, want %d — seq must be the stream's, not the delivered count", i, d.Seq, i)
 		}
-		if d.EntryID != "answer-1" || d.RunID != 7 {
-			t.Errorf("delta %d routed to run %d entry %q, want 7/answer-1", i, d.RunID, d.EntryID)
+		if d.EntryID != "turn-1" || d.RunID != 7 {
+			t.Errorf("delta %d routed to run %d entry %q, want 7/turn-1", i, d.RunID, d.EntryID)
 		}
 	}
 	if got := r.deltas[1].Text + r.deltas[2].Text; got != "bc" {
@@ -840,9 +839,9 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 	for run, want := range map[int64]string{resA.RunID: "aaa1aaa2aaa3", resB.RunID: "bbb1bbb2bbb3"} {
 		var entryID string
 		if run == resA.RunID {
-			entryID = resA.AnswerEntryID
+			entryID = resA.EntryID
 		} else {
-			entryID = resB.AnswerEntryID
+			entryID = resB.EntryID
 		}
 		ans, err := led.Entry(context.Background(), entryID)
 		if err != nil || ans == nil {

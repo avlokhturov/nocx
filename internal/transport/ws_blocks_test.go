@@ -323,6 +323,52 @@ func TestBlocks_ABlockWithNoBodyIsStatedNotEmpty(t *testing.T) {
 	}
 }
 
+// The model is offered blocks that ENDED, and never one still open.
+//
+// It matters more since a turn became a block of its own (nocx-4em1z): the
+// open entry in a pane is usually THE QUESTION BEING ANSWERED RIGHT NOW, so
+// without this the model is handed its own unanswered question as context.
+// The same rule covers a command still running — an open entry has no
+// outcome and no complete body, and a summary of one would be a fact that
+// changes under the reader.
+func TestListBlocks_AnOpenEntryIsNotOffered(t *testing.T) {
+	h := newBlockHarness(t)
+	sid := h.openIn(t, blockPaneThis)
+	pane := blockPaneThis
+	ctx := context.Background()
+
+	// One finished block, and one entry still open in the same pane.
+	if _, err := h.db.Ledger().RecordCompleted(ctx, content.CompletedCommand{
+		Client: "test-client",
+		Env:    content.Environment{ID: "local", Kind: content.EnvLocal},
+		PaneID: &pane,
+		Cwd:    "/repo",
+		Intent: "make ci",
+		Status: content.EntrySuccess,
+	}); err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	if _, err := h.db.Ledger().Submit(ctx, content.SubmitEntry{
+		ID:            "0198f2b0-0000-7000-8000-0000000000f1",
+		Client:        "test-client",
+		EnvironmentID: "local",
+		PaneID:        &pane,
+		Cwd:           "/repo",
+		Kind:          content.EntryAgent,
+		Intent:        "why did the build fail?",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+
+	list, err := h.ws.ListBlocks(ctx, sid, 10)
+	if err != nil {
+		t.Fatalf("ListBlocks: %v", err)
+	}
+	if len(list.Blocks) != 1 || list.Blocks[0].Command != "make ci" {
+		t.Fatalf("listed %+v, want only the finished block", list.Blocks)
+	}
+}
+
 // A session this backend does not hold is an ERROR and never an empty list:
 // "there is no such session" and "this session has run nothing" must not
 // look alike, or the model reads the second and tells the person so.

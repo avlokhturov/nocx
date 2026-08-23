@@ -21,7 +21,7 @@ class FakeDispatcher {
       const res = {
         runId: this.next.run,
         questionId: 'ask-1',
-        answerEntryId: this.next.answerEntry,
+        entryId: this.next.answerEntry,
         state: 'prepared',
         ingestSeq: 1,
         replayed: false,
@@ -146,7 +146,7 @@ describe('AgentInputTarget', () => {
     // The answer block opened, associated with the run AND the answer entry
     // id BEFORE the first delta (a no-delta failure still closes the right
     // block).
-    expect(handle.el.dataset.answerEntryId).toBe('answer-1')
+    expect(handle.el.dataset.entryId).toBe('answer-1')
   })
 
   it('a question carries the chips that are in the line and NO others — two blocks selected, one unrelated block absent', async () => {
@@ -461,7 +461,7 @@ describe('AgentInputTarget approval routing', () => {
     const { dispatcher, handle, target } = makeTarget()
     await target.submit('will this need approval?')
     const runId = dispatcher.next.run - 1 // the run the ask minted
-    expect(handle.el.dataset.answerEntryId).toBe('answer-1')
+    expect(handle.el.dataset.entryId).toBe('answer-1')
 
     // The run suspends: the block stays OPEN (nothing closed) and the run
     // stays routable — the question is being decided elsewhere.

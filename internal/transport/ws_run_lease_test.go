@@ -244,6 +244,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 		t.Fatalf("content.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	askPaneIn(t, db)
 
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithReal(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),

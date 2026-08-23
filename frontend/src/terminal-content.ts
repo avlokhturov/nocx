@@ -72,7 +72,7 @@ import {
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { answerTextForEntry, blocksForPane, bodyForBlock } from './restore-client'
+import { answerTextForEntry, blocksForPane, restoredBody } from './restore-client'
 import { restoredBlock } from './scrollback/restored-block'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
@@ -3083,7 +3083,11 @@ export class TerminalContent extends BasePaneContent {
     const snapshot = fromITheme(getCurrentTheme())
     const els: HTMLElement[] = []
     for (const b of blocks) {
-      const body = await bodyForBlock(this.client, b.entryId)
+      // What the entry HAS decides what it is: a terminal body is a
+      // command, a text-only body is an assistant turn (nocx-4em1z). One
+      // read answers both — the fetch already had to ask for the artifact
+      // list.
+      const restored = await restoredBody(this.client, b.entryId)
       els.push(
         restoredBlock(
           {
@@ -3096,7 +3100,13 @@ export class TerminalContent extends BasePaneContent {
             durationMs: b.durationMs,
             exitCode: b.exitCode,
             status: b.status,
-            body,
+            body: restored.body,
+            kind: restored.kind,
+            entryId: b.entryId,
+            // Who ran it, carried from the entry's own kind (nocx-4em1z).
+            // The block's badge is painted from this, so a command the
+            // assistant ran still says so after a restart.
+            author: b.author,
           },
           snapshot,
           () => this.scrollback?.scrollbackInner ?? document.createElement('div'),

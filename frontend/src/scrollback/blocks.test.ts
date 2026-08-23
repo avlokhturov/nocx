@@ -132,6 +132,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.classList.contains('cmd-block')).toBe(true)
     const exit = el.querySelector('.cmd-header-exit-ok')
@@ -152,6 +153,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const exit = el.querySelector('.cmd-header-exit-fail')
     expect(exit?.textContent).toBe('exit 1')
@@ -171,6 +173,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const output = el.querySelector('.cmd-output')
     expect(output?.innerHTML).toContain('file.txt')
@@ -190,6 +193,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     document.body.appendChild(el)
     const line = el.querySelector<HTMLElement>('.term-line')
@@ -253,6 +257,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     document.body.appendChild(el)
     const line = el.querySelector<HTMLElement>('.term-line')
@@ -282,6 +287,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const dur = el.querySelector('.cmd-header-duration')
     expect(dur?.textContent).toBe('1.2s')
@@ -301,6 +307,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.querySelector('.cmd-header-exit')).toBeNull()
   })
@@ -319,6 +326,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.querySelector('.cmd-output')).toBeNull()
   })
@@ -337,6 +345,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.querySelector('.cmd-output')).toBeNull()
   })
@@ -355,6 +364,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const btn = el.querySelector('.cmd-overflow-btn')
     expect(btn).not.toBeNull()
@@ -374,6 +384,7 @@ describe('createCommandBlock', () => {
       c,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const cwdEl = el.querySelector('.cmd-header-cwd')
     expect(cwdEl?.textContent).toBe('\u{1F4C1} user/repos')
@@ -456,6 +467,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
 
     parent.appendChild(el)
@@ -485,6 +497,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     const el2 = createCommandBlock(
       'command',
@@ -499,6 +512,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     parent.append(el1, el2)
 
@@ -533,6 +547,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     parent.appendChild(el)
 
@@ -566,6 +581,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     parent.appendChild(el)
 
@@ -595,6 +611,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     parent.appendChild(el)
 
@@ -626,6 +643,7 @@ describe('block selection model (P1-7, P1-8)', () => {
       makeContainer(parent),
       noopSelect,
       freshStore(),
+      'shell',
     )
     parent.appendChild(el)
 
@@ -875,6 +893,7 @@ describe('overflow menu (P1-6)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     container.appendChild(el)
 
@@ -909,6 +928,7 @@ describe('overflow menu (P1-6)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     container.appendChild(el)
 
@@ -946,6 +966,7 @@ describe('overflow menu (P1-6)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     container.appendChild(el)
 
@@ -978,6 +999,7 @@ describe('overflow menu (P1-6)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     container.appendChild(el)
 
@@ -1017,6 +1039,7 @@ describe('frozen block header highlighting', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     const byClass = new Map<string, string[]>()
     for (const span of el.querySelectorAll<HTMLElement>('.cmd-header-text [class^="tok-"]')) {
@@ -1085,6 +1108,7 @@ describe('frozen headers and the command snapshot', () => {
       c,
       noopSelect,
       makeStore(['pwd']),
+      'shell',
     )
     const span = el.querySelector<HTMLElement>('.cmd-header-text span')
     expect(span?.className).toBe('tok-command tok-unresolved')
@@ -1104,6 +1128,7 @@ describe('frozen headers and the command snapshot', () => {
       c,
       noopSelect,
       makeStore(['pwd']),
+      'shell',
     )
     const span = el.querySelector<HTMLElement>('.cmd-header-text span')
     expect(span?.className).toBe('tok-command')
@@ -1123,6 +1148,7 @@ describe('frozen headers and the command snapshot', () => {
       c,
       noopSelect,
       makeStore(),
+      'shell',
     )
     const span = el.querySelector<HTMLElement>('.cmd-header-text span')
     expect(span?.className).toBe('tok-command')
@@ -1146,6 +1172,7 @@ describe('frozen headers and the command snapshot', () => {
       c,
       noopSelect,
       mine,
+      'shell',
     )
     const span = el.querySelector<HTMLElement>('.cmd-header-text span')
     expect(span?.className).toBe('tok-command tok-unresolved')
@@ -1976,6 +2003,7 @@ describe('BlockManager.addAnswerBlock', () => {
       () => document.createElement('div'),
       noopSelect,
       freshStore(),
+      'shell',
     )
     const cmdRight = cmd.querySelector('.cmd-header-right')!
     expect(cmdRight.lastElementChild?.classList.contains('cmd-overflow-btn')).toBe(true)
@@ -2101,6 +2129,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.querySelector('.cmd-header-text')?.querySelector('.tok-command')).not.toBeNull()
   })
@@ -2257,7 +2286,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     const stored = '## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n'
     const { manager } = newManager(undefined, () => Promise.resolve(stored))
     const h = manager.addAnswerBlock('question?', '/')
-    h.el.dataset.answerEntryId = 'entry-7'
+    h.el.dataset.entryId = 'entry-7'
     h.append('## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n')
     h.close('success')
     // What is on screen has already lost the markers — which is the point.
@@ -2278,7 +2307,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     // Null is retention AND an unreachable store — one refusal for both.
     const { manager } = newManager(undefined, () => Promise.resolve(null))
     const h = manager.addAnswerBlock('question?', '/')
-    h.el.dataset.answerEntryId = 'entry-7'
+    h.el.dataset.entryId = 'entry-7'
     h.append('some answer')
     h.close('success')
 
@@ -2299,7 +2328,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     })
     const { manager } = newManager(undefined, () => pending)
     const h = manager.addAnswerBlock('question?', '/')
-    h.el.dataset.answerEntryId = 'entry-7'
+    h.el.dataset.entryId = 'entry-7'
     h.append('some answer')
     h.close('success')
 
@@ -2392,6 +2421,7 @@ describe('no finished block renders an ask control (nocx-4wtlh)', () => {
       () => container,
       noopSelect,
       freshStore(),
+      'shell',
     )
     expect(el.querySelector('.cmd-ask-btn')).toBeNull()
     expect(el.querySelector('[aria-label="Ask about this block"]')).toBeNull()
@@ -2430,6 +2460,7 @@ it('blockCommandText reads the header, and the recorded command when the ack lan
     () => container,
     noopSelect,
     freshStore(),
+    'shell',
   )
   expect(blockCommandText(el)).toBe('ssh pi@host')
   el.dataset.recordedCommand = 'ssh pi@***'

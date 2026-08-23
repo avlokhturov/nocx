@@ -374,7 +374,7 @@ func TestAgentApprove_NoTerminalizesDeclined(t *testing.T) {
 
 	// The ledger says a person declined: the run row's termination reason.
 	led := h.db.Ledger()
-	q, err := led.Entry(context.Background(), res.QuestionID)
+	q, err := led.Entry(context.Background(), res.EntryID)
 	if err != nil || q == nil || len(q.Executions) == 0 {
 		t.Fatalf("question entry: %v (err %v)", q, err)
 	}

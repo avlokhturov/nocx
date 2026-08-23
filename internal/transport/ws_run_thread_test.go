@@ -349,7 +349,7 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	led := h.db.Ledger()
 
 	// ── the question entry: the proposal ────────────────────────────────
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
@@ -443,39 +443,35 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 			*escalation.EndedAt, *authorised.StartedAt)
 	}
 
-	// ── the answer, joined by its caused-by edge ────────────────────────
-	edges, err := led.Edges(ctx, res.QuestionID)
+	// ── the answer, which is the TURN'S OWN BODY (nocx-4em1z) ───────────
+	// Not a second entry joined by an edge: the question is the entry's
+	// intent and the answer is what it printed, exactly as a command's
+	// output is. So there is nothing to join, and nothing joins it.
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	var caused *content.Edge
 	for i := range edges {
 		if edges[i].Rel == content.RelCausedBy {
-			caused = &edges[i]
+			t.Errorf("edge %+v: the answer is not an entry of its own and joins nothing", edges[i])
 		}
 	}
-	if caused == nil {
-		t.Fatalf("edges = %+v, want a caused-by edge from the answer", edges)
-	}
-	if caused.From != res.AnswerEntryID || caused.To != res.QuestionID {
-		t.Errorf("caused-by edge = %+v, want answer %q → question %q", caused, res.AnswerEntryID, res.QuestionID)
-	}
 
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (nil=%v)", err, ans == nil)
+		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
 	}
-	if ans.Kind != content.EntryAgent || ans.Intent != content.AnswerIntent {
-		t.Errorf("answer kind/intent = %q/%q, want agent/answer", ans.Kind, ans.Intent)
+	if ans.Kind != content.EntryAgent {
+		t.Errorf("turn kind = %q, want agent", ans.Kind)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
-		t.Errorf("answer phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
+		t.Errorf("turn phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
 	}
 	if len(ans.Executions) != 1 {
-		t.Fatalf("answer executions = %d, want exactly 1", len(ans.Executions))
+		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
 	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
 	}
 	a := ans.Executions[0].Artifacts[0]
 	if a.State != content.ArtifactSealed {
@@ -515,11 +511,14 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 
 	// ── the order they happened in ──────────────────────────────────────
 	// Commit order (ADR-0019 §2: ingest_seq is the writer's counter): the
-	// question and its answer entry committed in the ask transaction, the
-	// proposal when the model first called the tool — after both.
-	if q.IngestSeq >= ans.IngestSeq || ans.IngestSeq >= action.IngestSeq {
-		t.Errorf("commit order = question %d, answer %d, action %d, want strictly increasing",
-			q.IngestSeq, ans.IngestSeq, action.IngestSeq)
+	// turn committed in the ask transaction, the proposal when the model
+	// first called the tool — after it. There is no third seq to compare:
+	// the answer is the turn's body, not a row of its own (nocx-4em1z).
+	if q.ID != ans.ID {
+		t.Errorf("the question %q and the answer %q are not the same entry", q.ID, ans.ID)
+	}
+	if q.IngestSeq >= action.IngestSeq {
+		t.Errorf("commit order = turn %d, action %d, want the turn first", q.IngestSeq, action.IngestSeq)
 	}
 	// The run's span bounds the attempts': the run existed from the ask
 	// (before the tool was proposed) and closed after the authorised call
@@ -550,7 +549,7 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	led := h.db.Ledger()
 
 	// ── the question entry ──────────────────────────────────────────────
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
@@ -612,37 +611,31 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	}
 
 	// ── the answer, joined by its caused-by edge ────────────────────────
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	var caused *content.Edge
+	// The answer is the turn's own body (nocx-4em1z), so nothing joins it.
 	for i := range edges {
 		if edges[i].Rel == content.RelCausedBy {
-			caused = &edges[i]
+			t.Errorf("edge %+v: the answer is not an entry of its own", edges[i])
 		}
 	}
-	if caused == nil {
-		t.Fatalf("edges = %+v, want a caused-by edge from the answer", edges)
-	}
-	if caused.From != res.AnswerEntryID || caused.To != res.QuestionID {
-		t.Errorf("caused-by edge = %+v, want answer %q → question %q", caused, res.AnswerEntryID, res.QuestionID)
-	}
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (nil=%v)", err, ans == nil)
+		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
 	}
-	if ans.Kind != content.EntryAgent || ans.Intent != content.AnswerIntent {
-		t.Errorf("answer kind/intent = %q/%q, want agent/answer", ans.Kind, ans.Intent)
+	if ans.Kind != content.EntryAgent {
+		t.Errorf("turn kind = %q, want agent", ans.Kind)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
-		t.Errorf("answer phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
+		t.Errorf("turn phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
 	}
 	if len(ans.Executions) != 1 {
-		t.Fatalf("answer executions = %d, want exactly 1", len(ans.Executions))
+		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
 	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
 	}
 	a := ans.Executions[0].Artifacts[0]
 	if a.State != content.ArtifactSealed {
@@ -661,9 +654,15 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	}
 
 	// ── the order they happened in ──────────────────────────────────────
-	if q.IngestSeq >= ans.IngestSeq || ans.IngestSeq >= action.IngestSeq {
-		t.Errorf("commit order = question %d, answer %d, action %d, want strictly increasing",
-			q.IngestSeq, ans.IngestSeq, action.IngestSeq)
+	// The turn commits before the action it caused. There is no third seq
+	// to compare: the answer is the turn's body, not a row of its own
+	// (nocx-4em1z), so q and ans ARE the same entry.
+	if q.ID != ans.ID {
+		t.Errorf("the question %q and the answer %q are not the same entry", q.ID, ans.ID)
+	}
+	if q.IngestSeq >= action.IngestSeq {
+		t.Errorf("commit order = turn %d, action %d, want the turn first",
+			q.IngestSeq, action.IngestSeq)
 	}
 	if *run.StartedAt > *attempt.StartedAt || *attempt.EndedAt > *run.EndedAt {
 		t.Errorf("attempt span %v..%v outside the run span %v..%v — the tool ran inside the run's lifetime",
@@ -750,7 +749,7 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	ctx := context.Background()
 	led := h.db.Ledger()
 
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
@@ -777,32 +776,28 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 		t.Errorf("run payload = %q, want the refusal sentence — the decision is in the thread, not only in a log", run.Payload)
 	}
 
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	var caused bool
 	for _, e := range edges {
-		if e.Rel == content.RelCausedBy && e.From == res.AnswerEntryID && e.To == res.QuestionID {
-			caused = true
+		if e.Rel == content.RelCausedBy {
+			t.Errorf("edge %+v: the answer is not an entry of its own (nocx-4em1z)", e)
 		}
 	}
-	if !caused {
-		t.Errorf("edges = %+v, want the caused-by edge from the answer", edges)
-	}
 
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (nil=%v)", err, ans == nil)
+		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntryFailure {
-		t.Errorf("answer phase/status = %q/%q, want closed/failure — the answer closes with the run", ans.Phase, ans.Status)
+		t.Errorf("turn phase/status = %q/%q, want closed/failure — the turn closes with the run", ans.Phase, ans.Status)
 	}
 	if len(ans.Executions) != 1 {
-		t.Fatalf("answer executions = %d, want exactly 1", len(ans.Executions))
+		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
 	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
+		t.Fatalf("turn artifacts = %d, want exactly 1", len(ans.Executions[0].Artifacts))
 	}
 	a := ans.Executions[0].Artifacts[0]
 	if a.State != content.ArtifactSealed {
@@ -812,14 +807,14 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 		t.Errorf("answer artifact byte_len = %d, want 0 — nothing streamed", a.ByteLen)
 	}
 
-	// The refusal precedes every submission: the ledger holds the question
-	// and the answer and NOTHING ELSE — no tool attempt was ever opened.
+	// The refusal precedes every submission: the ledger holds the TURN and
+	// NOTHING ELSE — no tool attempt was ever opened.
 	summaries, err := led.ListEntries(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
-	if len(summaries) != 2 {
-		t.Fatalf("ledger has %d entries, want exactly 2 (question + answer)", len(summaries))
+	if len(summaries) != 1 {
+		t.Fatalf("ledger has %d entries, want exactly 1 (the turn)", len(summaries))
 	}
 	for _, s := range summaries {
 		if s.Kind == content.EntryAction {

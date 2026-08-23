@@ -18,7 +18,7 @@ export interface AgentRunToolCall {
    */
   runId: number
   /**
-   * The ANSWER entry the call is an element of — agent.ask result's answerEntryId, the same routing key agent.runDelta carries. Not the ledger entry the attempt was recorded under; that is actionEntryId.
+   * The TURN the call is an element of — agent.ask result's entryId, the same routing key agent.runDelta carries. Not the ledger entry the attempt was recorded under; that is actionEntryId.
    */
   entryId: string
   /**

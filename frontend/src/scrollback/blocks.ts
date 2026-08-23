@@ -6,7 +6,6 @@
 import { serializeRange, serializeRangeSGR, serializeRangeText, fromITheme } from './serializer'
 import type { CapturedBody } from '../capture-client'
 import { getCurrentTheme } from '../renderers/theme-adapter'
-import { highlightShellText, onShellHighlightReady } from '../shell-highlight'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import type { IBufferLine } from '@xterm/xterm'
 import { wordRangeIn } from '../word-selection'
@@ -14,13 +13,14 @@ import { createSecretChipUnresolved } from '../ui/secret-chip'
 import { createToolCallLine, type ToolCallEffect } from '../ui/tool-call-line'
 import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
-import { paintAnswerLine } from '../ui/answer-markdown'
 import { showToast } from '../ui/toast'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import type { CommandAuthor } from '../command-ledger'
+import { createAnswerBody } from './answer-body'
+import { paintShellInto } from './shell-paint'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 function clipboardFallback(text: string): void {
@@ -309,40 +309,6 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
-// ── A fenced block's language ───────────────────────────────────────────────
-//
-// nocx has ONE lexer (shell-highlight.ts, the same tokenizer the command
-// editor and the frozen header use), so a fence is either shell or it is
-// plain. A second highlighter for a second language is exactly the "look for
-// the existing answer before you write a second one" prohibition, and
-// guessing at a grammar we do not have would colour Python as if it were sh.
-//
-// A fence with NO info string is treated as shell. This is a terminal: a bare
-// fence in an assistant's answer is a command far more often than it is
-// anything else, and the tokenizer is purely syntactic — a wrong guess costs
-// colour and never meaning, where leaving every bare fence grey costs the
-// feature the owner asked for.
-const SHELL_FENCE = new Set([
-  '',
-  'sh',
-  'bash',
-  'zsh',
-  'ksh',
-  'fish',
-  'shell',
-  'shellscript',
-  'shell-session',
-  'console',
-  'terminal',
-])
-
-/** The info string of a fence opener: everything after the backticks, lower
- *  cased, first word only (```` ```bash title="x" ```` is bash). */
-function fenceLanguage(openerLine: string): string {
-  const rest = openerLine.trim().replace(/^`+/, '').trim()
-  return rest.split(/\s+/)[0].toLowerCase()
-}
-
 // ── CWD display ────────────────────────────────────────────────────────────
 
 function cwdLabel(cwd: string): string {
@@ -352,37 +318,6 @@ function cwdLabel(cwd: string): string {
   return parts.slice(-2).join('/')
 }
 
-// ── Shell highlight readiness ────────────────────────────────────────────────
-//
-// The Shiki grammar loads asynchronously at module init. Anything painted in
-// the few milliseconds before that resolves would stay plain forever, so
-// spans rendered pre-ready are registered here and repainted by
-// `highlightShellText` once the tokenizer exists. After that the registration
-// is a no-op: the grammar is loaded and every later span is coloured when it
-// is written.
-//
-// Two callers, one registry (nocx-swoje): a frozen block's header, and a row
-// inside a shell fence in an answer. Both write the same lexer's output into
-// innerHTML, so both must catch up the same way — a second list would be a
-// second answer to one question.
-
-let tokenizerLoaded = false
-/** Spans painted before the grammar loaded, keyed by the tab's snapshot
- *  store so the repaint judges against the right tab's command set. */
-const pendingHighlightSpans = new Map<HTMLElement, CommandSnapshotStore>()
-
-function refreshPendingHighlightSpans(): void {
-  for (const [el, store] of pendingHighlightSpans) {
-    const text = el.textContent ?? ''
-    if (text && text !== '(empty)') el.innerHTML = highlightShellText(text, store)
-  }
-  pendingHighlightSpans.clear()
-}
-
-onShellHighlightReady(() => {
-  tokenizerLoaded = true
-  refreshPendingHighlightSpans()
-})
 /**
  * Create the header row for a block — flat, warp-style (P0-1).
  * No card background, no pill/chip styling. Plain muted small text.
@@ -536,8 +471,8 @@ function createHeader(
     } else if (status === 'running') {
       cmdSpan.textContent = command || '(empty)'
     } else {
-      cmdSpan.innerHTML = command ? highlightShellText(command, store) : '(empty)'
-      if (!tokenizerLoaded) pendingHighlightSpans.set(cmdSpan, store)
+      if (command) paintShellInto(cmdSpan, command, store)
+      else cmdSpan.textContent = '(empty)'
     }
   }
   header.appendChild(cmdSpan)
@@ -708,7 +643,7 @@ function buildOverflowMenu(
      *  unreachable, or this window has no source wired. All three are the
      *  same fact to a person: it is not here. */
     const storedAnswer = async (): Promise<string | null> => {
-      const entryId = blockEl.dataset.answerEntryId
+      const entryId = blockEl.dataset.entryId
       if (!entryId || !answerText) return null
       return answerText(entryId)
     }
@@ -926,7 +861,13 @@ export function createCommandBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  author: CommandAuthor = 'shell',
+  // REQUIRED, and deliberately not defaulted (nocx-4em1z). Who wrote a
+  // block is a fact every caller holds and none may shrug off: the restore
+  // path defaulted it by omission and every restored tab forgot that the
+  // assistant had run the command. This is the shape that hid the close
+  // wrapper's dropped model too — an arity the type system was happy to
+  // accept. A call site that forgets it must not compile.
+  author: CommandAuthor,
   answerText?: AnswerTextSource,
 ): HTMLElement {
   const wrapper = document.createElement('div')
@@ -1885,70 +1826,16 @@ export class BlockManager {
       stopTyping()
     }
 
-    // The streamed chunks split MID-LINE, so the body keeps one persistent
-    // partial row: a chunk's final segment stays on it and the next chunk
-    // continues it. Every '\n' completes a row — including a chunk ending
-    // in '\n', whose trailing empty segment starts a fresh (possibly
-    // empty) partial, so "a\n" + "b" renders as two rows, never "ab".
-    //
-    // A fenced block the model returns (```…```) is the one place in an
-    // answer where the command grammar is the right grammar: its rows land
-    // in a `.cmd-output-code` container that stays monospace and unwrapped
-    // (the nocx-juau rule, reachable through the kind, never by accident).
-    // The fence toggles on the COMPLETED line, so a marker split across
-    // chunks still works, and BOTH delimiters belong to the code region:
-    // the opener moves into the container it opens, the closer stays in
-    // the container it closes. A second fence after intervening prose gets
-    // a fresh container, so the order fence → prose → fence survives.
-    let partial: HTMLSpanElement | null = null
-    let inFence = false
-    /** The language the open fence declared — read once, at the opener, and
-     *  used for every row until the closer. */
-    let fenceLang = ''
-    let codeEl: HTMLElement | null = null
-    const fenceMarker = /^\s*```/
-
-    const codeContainer = (): HTMLElement => {
-      if (!codeEl) {
-        codeEl = document.createElement('div')
-        codeEl.className = 'cmd-output-code'
-        outputEl.appendChild(codeEl)
-      }
-      return codeEl
-    }
-
-    const makeRow = (): HTMLSpanElement => {
-      const span = document.createElement('span')
-      span.className = 'term-line'
-      ;(inFence ? codeContainer() : outputEl).appendChild(span)
-      return span
-    }
-
-    // Trim the trailing empty rows the serializer's contract leaves behind
-    // (a stream that ended with '\n' finishes with an empty partial row),
-    // whether they sit in the body or in a fence container.
-    const trimEmptyTail = (): void => {
-      for (;;) {
-        const last = outputEl.lastElementChild
-        if (!last) return
-        if (last.classList.contains('term-line') && last.textContent === '') {
-          last.remove()
-          continue
-        }
-        if (last.classList.contains('cmd-output-code')) {
-          const row = last.lastElementChild
-          if (row?.classList.contains('term-line') && row.textContent === '') {
-            row.remove()
-            continue
-          }
-          if (!last.hasChildNodes()) {
-            last.remove()
-            continue
-          }
-        }
-        return
-      }
-    }
+    // The body is drawn by its ONE owner (answer-body.ts) — the same
+    // function a RESTORED answer draws through, so a turn that comes back
+    // after a restart is painted by the code that painted it live
+    // (nocx-4em1z). What stays here is the block: its header, its chips,
+    // the waiting state, and the elements this flow places through the body
+    // in arrival order.
+    const body = createAnswerBody(outputEl, {
+      store: this._snapshotStore,
+      onContent: stopTyping,
+    })
 
     // The flow's non-text elements (nocx-shxv0, nocx-s92so). Both are
     // placed in the SAME body as the prose, in arrival order, because that
@@ -1960,22 +1847,6 @@ export class BlockManager {
     // the handle's methods are declared `this: void` and are called as bare
     // functions.
     const sessionName = this._sessionName
-    // This tab's command-existence store — the same instance the frozen
-    // headers judge against, so a shell fence in an answer is tokenised
-    // exactly as the same words would be in a block header.
-    const snapshotStore = this._snapshotStore
-
-    // Closing the partial row is what keeps arrival order honest. A chunk
-    // that did not end in '\n' leaves a row open; the next chunk continues
-    // it, and text that arrives AFTER an inserted element would otherwise be
-    // written into a row that sits BEFORE it. Appended to outputEl and never
-    // into a fence container: a call arrives between model responses, so it
-    // cannot land inside one response's fenced block.
-    const insertInFlow = (node: HTMLElement): void => {
-      stopTyping()
-      partial = null
-      outputEl.appendChild(node)
-    }
 
     return {
       id,
@@ -1983,7 +1854,7 @@ export class BlockManager {
       toolCall(call: AnswerToolCall): void {
         if (seenCalls.has(call.callId)) return
         seenCalls.add(call.callId)
-        insertInFlow(
+        body.insert(
           createToolCallLine(
             { tool: call.tool, effect: call.effect, resource: call.resource },
             { sessionName },
@@ -1998,71 +1869,18 @@ export class BlockManager {
           // then switched on is caught by the applier, which walks what is
           // already on screen — this is the other half of the same rule.
           reasoningNote = createReasoningNote({ expanded: reasoningStartsExpanded() })
-          insertInFlow(reasoningNote.el)
+          body.insert(reasoningNote.el)
         }
         reasoningNote.append(text)
       },
       append(text: string): void {
         if (text === '') return
         stopWaiting()
-        const parts = text.split('\n')
-        for (let i = 0; i < parts.length; i++) {
-          const part = parts[i]
-          if (i < parts.length - 1) {
-            // A complete line: finish the current partial (or open one) and
-            // close the row.
-            if (!partial) partial = makeRow()
-            partial.textContent += part
-            const row = partial
-            const line = partial.textContent
-            partial = null
-            if (fenceMarker.test(line)) {
-              const opening = !inFence
-              inFence = !inFence
-              if (opening) {
-                // The opener belongs to the code region it opens: a fresh
-                // container, with the marker as its first row.
-                codeEl = null
-                row.remove()
-                codeContainer().appendChild(row)
-                fenceLang = fenceLanguage(line)
-              }
-              // The closer was created inside the code region and stays
-              // there; the rows after it go back to the prose body.
-              //
-              // NEITHER DELIMITER IS PAINTED. They mark where the region
-              // starts and ends; they are not code, and they are not prose
-              // whose asterisks mean anything. Leaving them as plain text is
-              // also what keeps `Copy output` returning the answer with its
-              // fence markers intact, which is a contract this block already
-              // had (nocx-juau).
-            } else if (inFence) {
-              // A code row. The EXISTING lexer, on a shell fence only
-              // (SHELL_FENCE above says why), and the same pre-ready catch-up
-              // the frozen headers use — an answer that arrives in the first
-              // milliseconds of a launch must not stay grey forever.
-              if (SHELL_FENCE.has(fenceLang) && line !== '') {
-                row.innerHTML = highlightShellText(line, snapshotStore)
-                if (!tokenizerLoaded) pendingHighlightSpans.set(row, snapshotStore)
-              }
-            } else {
-              // Prose. The structure a model actually emits, painted per
-              // completed line, with every byte escaped (nocx-swoje;
-              // ui/answer-markdown.ts owns the whole grammar and says what
-              // it deliberately does not render).
-              paintAnswerLine(row, line)
-            }
-          } else {
-            // The final segment stays partial — the next chunk continues it.
-            if (!partial) partial = makeRow()
-            partial.textContent += part
-          }
-        }
+        body.append(text)
       },
       close(status: 'success' | 'failure', error?: string, model?: string): void {
         stopWaiting()
-        trimEmptyTail()
-        partial = null
+        body.finish()
         // The header's status chip, in the flow's own chip vocabulary —
         // the words come from the ask kind's rules (nocx-ex636).
         const chips = blockKindRules('ask').statusChips

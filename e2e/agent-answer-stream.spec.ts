@@ -201,7 +201,14 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
     const call = body.locator('.ui-tool-call')
     await expect(call).toHaveCount(1)
     await expect(call.locator('.ui-tool-call__tool')).toHaveText('readScreen')
-    await expect(call.locator('.ui-tool-call__resource')).toHaveText(sessionId)
+    // The resource is the PANE'S OWN NAME, never the session id (nocx-vnzek):
+    // a 32-hex handle says nothing to a person. The name is asserted against
+    // the tab strip's, because that is the point — one derivation for "what
+    // is this session called", read by both surfaces, so they cannot drift
+    // apart the way two copies would.
+    const resource = call.locator('.ui-tool-call__resource')
+    await expect(resource).not.toHaveText(sessionId)
+    await expect(resource).toHaveText(await page.locator(TITLE).first().innerText())
 
     // 2. It precedes the answer written from it. Read off the DOM order of
     //    the body's children, which is what a person sees top to bottom.

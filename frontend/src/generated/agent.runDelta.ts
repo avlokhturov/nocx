@@ -18,7 +18,7 @@ export interface AgentRunDelta {
    */
   runId: number
   /**
-   * The answer entry the chunk appends to — agent.ask result's answerEntryId. The renderer appends here, never to 'the current answer'.
+   * The TURN the chunk appends to — agent.ask result's entryId (nocx-4em1z). The renderer appends here, never to 'the current answer'.
    */
   entryId: string
   /**

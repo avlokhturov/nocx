@@ -118,6 +118,7 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 		t.Fatalf("content.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
+	askPaneIn(t, db)
 
 	opts := []WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
@@ -198,7 +199,7 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	if res.State != "prepared" {
 		t.Fatalf("ask state = %q, want prepared", res.State)
 	}
-	if res.AnswerEntryID == "" {
+	if res.EntryID == "" {
 		t.Fatal("ask result carries no answerEntryId — the renderer cannot place the answer block")
 	}
 	if res.Model != "qwen3" {
@@ -223,8 +224,8 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 		if d.RunID != res.RunID {
 			t.Errorf("runDelta runId = %d, want %d", d.RunID, res.RunID)
 		}
-		if d.EntryID != res.AnswerEntryID {
-			t.Errorf("runDelta entryId = %q, want %q — deltas must land on the answer entry", d.EntryID, res.AnswerEntryID)
+		if d.EntryID != res.EntryID {
+			t.Errorf("runDelta entryId = %q, want %q — deltas must land on the answer entry", d.EntryID, res.EntryID)
 		}
 		if d.Seq != wantSeq {
 			t.Errorf("runDelta seq = %d, want %d (ascending from 0)", d.Seq, wantSeq)
@@ -276,26 +277,23 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	// streamed text, sealed, and the run is terminal.
 	led := h.db.Ledger()
 	ctx := context.Background()
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
+	ans, err := led.Entry(ctx, res.EntryID)
 	if err != nil || ans == nil {
 		t.Fatalf("answer entry: %v (err %v)", ans, err)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
 		t.Errorf("answer entry phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
 	}
-	// The answer entry is joined to the question by a caused-by edge.
-	edges, err := led.Edges(ctx, res.QuestionID)
+	// Nothing is joined to it: the answer is the turn's own body, so there
+	// is no second entry to point at (nocx-4em1z).
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	found := false
 	for _, e := range edges {
-		if e.Rel == content.RelCausedBy && e.From == res.AnswerEntryID && e.To == res.QuestionID {
-			found = true
+		if e.Rel == content.RelCausedBy {
+			t.Errorf("edge %+v: the answer is not an entry of its own", e)
 		}
-	}
-	if !found {
-		t.Errorf("no caused-by edge answer → question: %+v", edges)
 	}
 	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
 		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/1", len(ans.Executions), len(ans.Executions[0].Artifacts))
@@ -314,7 +312,7 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	if art.State != content.ArtifactSealed {
 		t.Errorf("answer artifact state = %q, want sealed", art.State)
 	}
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (err %v)", q, err)
 	}
@@ -400,7 +398,7 @@ func TestAgentAsk_ModelFailureTerminalizesFailed(t *testing.T) {
 	if !strings.Contains(st.Error, "no text") {
 		t.Errorf("failed runState error = %q, want the renderable reason", st.Error)
 	}
-	q, err := h.db.Ledger().Entry(context.Background(), res.QuestionID)
+	q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (err %v)", q, err)
 	}
@@ -514,7 +512,7 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	// dropped; the record is what a reconnect reads.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		q, err := h.db.Ledger().Entry(context.Background(), res.QuestionID)
+		q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
 		if err != nil || q == nil {
 			t.Fatalf("question entry: %v (err %v)", q, err)
 		}
@@ -532,7 +530,7 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	}
 	// The failure sentence is recorded on the run's payload — the ledger is
 	// the record, and the reconnect reads the reason there.
-	q, err := h.db.Ledger().Entry(context.Background(), res.QuestionID)
+	q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v", err)
 	}
@@ -900,5 +898,58 @@ func TestAgentAsk_RemovedModelLeavesTheRoleARefusal(t *testing.T) {
 	}
 	if client.askCount() != 0 {
 		t.Error("the model must never run after the assigned model was removed")
+	}
+}
+
+// ── the turn's anchor comes from the SESSION (nocx-4em1z) ─────────────────
+
+// A question asked in a pane is anchored to that pane, and the backend is
+// what anchors it — the renderer never sends one.
+//
+// This is the same rule the shell path states in its own comment
+// (ws_ledger.go's open): "a paneId on the envelope would put the same input
+// under a second owner, and the renderer's copy would be the one nobody
+// checked". The backend already resolved which pane a session is the pipe
+// of, so an ask that names its session has named its pane.
+//
+// It matters because the restore read is BY PANE. Before this the ask wrote
+// session_id and nothing else, and a session is gone by the time a restore
+// runs (D5) — so every question and every answer vanished from a restored
+// tab, which is what the owner reported.
+func TestAgentAsk_TheTurnIsAnchoredToTheSessionsPane(t *testing.T) {
+	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hi"}})
+	h.createEndpoint()
+
+	// A session that IS the pipe of a pane, which is what the product opens.
+	resp := jsonrpcCallWithID(t, h.conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0, "paneId": askPaneID,
+	}, 1)
+	var opened struct {
+		Result struct {
+			SessionID string `json:"sessionId"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(resp, &opened); err != nil || opened.Result.SessionID == "" {
+		t.Fatalf("open with a pane: %v\nraw: %s", err, resp)
+	}
+
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":      "ask-anchored",
+		"sessionId":  opened.Result.SessionID,
+		"question":   "what is this?",
+		"cwd":        "/repo",
+		"references": []any{},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+
+	entry, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
+	if err != nil || entry == nil {
+		t.Fatalf("turn entry: %v (err %v)", entry, err)
+	}
+	if entry.PaneID == nil || *entry.PaneID != askPaneID {
+		t.Fatalf("the turn's paneId = %v, want %q — a turn that names no pane cannot be restored",
+			entry.PaneID, askPaneID)
 	}
 }

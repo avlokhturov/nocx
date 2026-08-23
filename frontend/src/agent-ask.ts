@@ -231,11 +231,13 @@ export class AgentInputTarget implements InputTarget {
         throw err
       })
 
-    // The answer entry id is known once the ask resolves; the run's first
+    // The turn's entry id is known once the ask resolves; the run's first
     // delta cannot arrive before it (the run starts inside agent.ask and
     // the response is on the wire before the first notification), so the
-    // routing check below never sees a stale undefined id.
-    handle.el.dataset.answerEntryId = ask.answerEntryId
+    // routing check below never sees a stale undefined id. ONE id, because
+    // the turn is one entry: the question is its intent and the answer is
+    // its body (nocx-4em1z).
+    handle.el.dataset.entryId = ask.entryId
     // Which model this run answers with — carried on the ask result and
     // kept on the block, so the terminal close can name it: the person
     // must be able to tell which model answered (nocx-e6kn2). The value is
@@ -246,7 +248,7 @@ export class AgentInputTarget implements InputTarget {
 
   /** Subscribe once: deltas append to the run's block; the terminal state
    *  closes it. A runState with no prior delta (a failure before any text)
-   *  still has a block — the ask result's answerEntryId opened it. */
+   *  still has a block — the ask result's entryId opened it. */
   private ensureSubscribed(): void {
     if (this.subscribed) return
     this.subscribed = true
@@ -256,9 +258,9 @@ export class AgentInputTarget implements InputTarget {
       if (!handle) return
       // Both ids are on every delta on purpose (design §7): the run id
       // finds the ask, the entry id confirms the deltas land on the right
-      // answer block — a mismatch is a stale or misrouted notification and
-      // must not append to the wrong block.
-      if (handle.el.dataset.answerEntryId !== d.entryId) return
+      // block — a mismatch is a stale or misrouted notification and must
+      // not append to the wrong one.
+      if (handle.el.dataset.entryId !== d.entryId) return
       handle.append(d.text)
     })
     // A tool call is an element of THIS answer's flow (nocx-shxv0), so it is
@@ -271,7 +273,7 @@ export class AgentInputTarget implements InputTarget {
       const c = params as AgentRunToolCall
       const handle = this.runs.get(c.runId)
       if (!handle) return
-      if (handle.el.dataset.answerEntryId !== c.entryId) return
+      if (handle.el.dataset.entryId !== c.entryId) return
       handle.toolCall({
         callId: c.callId,
         tool: c.tool,
@@ -288,14 +290,14 @@ export class AgentInputTarget implements InputTarget {
       const r = params as AgentRunReasoning
       const handle = this.runs.get(r.runId)
       if (!handle) return
-      if (handle.el.dataset.answerEntryId !== r.entryId) return
+      if (handle.el.dataset.entryId !== r.entryId) return
       handle.reasoning(r.text)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
       const s = params as AgentRunState
       const handle = this.runs.get(s.runId)
       if (!handle) return
-      if (handle.el.dataset.answerEntryId === undefined) {
+      if (handle.el.dataset.entryId === undefined) {
         // A run that failed before its first delta never carried the entry
         // id on a delta — but the block was opened from the ask result, and
         // the entry id was recorded there. If it is still missing, the
