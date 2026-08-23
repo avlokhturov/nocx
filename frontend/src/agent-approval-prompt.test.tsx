@@ -70,20 +70,22 @@ function recordDecisions() {
   }
 }
 
+const SID = '9bb9a7602c27e8ba0741972c7049b54b'
+
 describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek)', () => {
   afterEach(cleanup)
 
   const SESSION_ASK: AgentApprovalRequested = {
     ...POLICY_ASK,
     tool: 'readScreen',
-    arguments: '{"sessionId":"9bb9a7602c27e8ba0741972c7049b54b"}',
-    resource: { kind: 'session', id: '9bb9a7602c27e8ba0741972c7049b54b' },
+    arguments: `{"sessionId":"${SID}"}`,
+    resource: { kind: 'session', id: SID },
   }
 
   it("says which pane the call reaches, in the pane's own name", () => {
     const r = renderPrompt({
       ask: SESSION_ASK,
-      sessionName: (id: string) => (id === '9bb9a7602c27e8ba0741972c7049b54b' ? 'home/dev' : null),
+      sessionWhere: (id: string) => (id === SID ? { tab: 'home/dev', machine: '' } : null),
     })
     expect(r.getByText(/home\/dev/)).toBeTruthy()
   })
@@ -91,20 +93,140 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
   it('leaves the proposed arguments verbatim — the blob is what the model asked for', () => {
     const { container } = renderPrompt({
       ask: SESSION_ASK,
-      sessionName: () => 'home/dev',
+      sessionWhere: () => ({ tab: 'home/dev', machine: '' }),
     })
     const code = container.querySelector('.ui-code-block')
-    expect(code?.textContent).toBe('{"sessionId":"9bb9a7602c27e8ba0741972c7049b54b"}')
+    expect(code?.textContent).toBe(`{"sessionId":"${SID}"}`)
   })
 
   it('says nothing extra when no pane can name the session', () => {
-    const r = renderPrompt({ ask: SESSION_ASK, sessionName: () => null })
+    const r = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => null })
     expect(r.queryByText(/This call reaches/)).toBeNull()
   })
 
   it('says nothing extra for a path — a path is the person’s own word', () => {
-    const r = renderPrompt({ ask: POLICY_ASK, sessionName: () => 'home/dev' })
+    const r = renderPrompt({
+      ask: POLICY_ASK,
+      sessionWhere: () => ({ tab: 'home/dev', machine: '' }),
+    })
     expect(r.queryByText(/This call reaches/)).toBeNull()
+  })
+})
+
+/**
+ * What the person is actually deciding, in a sentence (nocx-njn8s).
+ *
+ * The prompt used to print `{"command": "df -h", "sessionId": "ab607…cf95"}`
+ * and leave the person to parse it by eye — with the session id nocx-vnzek
+ * took off the tool-call line still sitting inside the blob, and the MACHINE,
+ * the fact that decides whether a destructive command lands on this laptop or
+ * on a production host, never named at all.
+ *
+ * The rendering is friendly only when it can be exhaustive: `run` with
+ * exactly the two arguments its schema declares. Anything else falls back to
+ * the verbatim blob, because a sentence that silently drops an argument is
+ * worse than a blob that shows it.
+ */
+describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () => {
+  afterEach(cleanup)
+
+  const RUN_ASK: AgentApprovalRequested = {
+    ...POLICY_ASK,
+    tool: 'run',
+    effect: 'mutate-destructive',
+    arguments: `{"command":"df -h","sessionId":"${SID}"}`,
+    resource: { kind: 'session', id: SID },
+  }
+
+  const LOCAL = { tab: 'home/dev', machine: '' }
+
+  it('reads as a sentence: the command, the machine and the tab', () => {
+    const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
+    const text = container.textContent ?? ''
+    expect(text).toContain('run this command')
+    expect(text).toContain('this machine')
+    expect(text).toContain('home/dev')
+    // The command itself, verbatim and alone — not wrapped in JSON.
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+  })
+
+  it('never prints the session id back, on any surface of the question', () => {
+    const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
+    expect(container.textContent ?? '').not.toContain(SID)
+  })
+
+  it('names the machine the pane is actually talking to', () => {
+    const { container } = renderPrompt({
+      ask: RUN_ASK,
+      sessionWhere: () => ({ tab: 'srv-01', machine: 'deploy@srv-01.example.com' }),
+    })
+    const text = container.textContent ?? ''
+    expect(text).toContain('deploy@srv-01.example.com')
+    // "this machine" would be a lie about where the command lands.
+    expect(text).not.toContain('this machine')
+  })
+
+  it('says nothing about where when no pane holds the session, and still shows the command', () => {
+    const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => null })
+    const text = container.textContent ?? ''
+    expect(text).toContain('run this command')
+    expect(text).not.toContain('in the tab')
+    expect(text).not.toContain('this machine')
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+  })
+
+  it('falls back to the verbatim blob when the proposal carries an argument it has no words for', () => {
+    const args = `{"command":"df -h","sessionId":"${SID}","timeoutMs":5000}`
+    const { container } = renderPrompt({
+      ask: { ...RUN_ASK, arguments: args },
+      sessionWhere: () => LOCAL,
+    })
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe(args)
+    expect(container.textContent ?? '').toContain('with these arguments')
+  })
+
+  it('falls back to the verbatim blob when the arguments are not an object at all', () => {
+    const { container } = renderPrompt({
+      ask: { ...RUN_ASK, arguments: 'not json' },
+      sessionWhere: () => LOCAL,
+    })
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('not json')
+  })
+
+  it('names the machine on the location sentence of every other tool too', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'readScreen',
+        arguments: `{"sessionId":"${SID}"}`,
+        resource: { kind: 'session', id: SID },
+      },
+      sessionWhere: () => ({ tab: 'srv-01', machine: 'deploy@srv-01.example.com' }),
+    })
+    const text = container.textContent ?? ''
+    expect(text).toContain('This call reaches')
+    expect(text).toContain('srv-01')
+    expect(text).toContain('deploy@srv-01.example.com')
+  })
+
+  it('does not say the assistant WANTS to run a command that has already run', () => {
+    // The egress gate screens a tool RESULT, so by the time this question is
+    // asked the command is behind us and what is being decided is whether
+    // what it printed may leave for the provider. "wants to run" there would
+    // misreport what has already happened to the machine.
+    const { container } = renderPrompt({
+      ask: { ...RUN_ASK, reason: 'egress', wasError: false, findings: [] },
+      sessionWhere: () => LOCAL,
+    })
+    const text = container.textContent ?? ''
+    expect(text).not.toContain('wants to run')
+    expect(text).toContain('The command that produced it ran')
+    expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+  })
+
+  it('says what the call can do, in the effect vocabulary and never from the tool name', () => {
+    const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
+    expect(container.textContent ?? '').toContain('make changes that cannot be undone')
   })
 })
 

@@ -1007,8 +1007,14 @@ export class TerminalContent extends BasePaneContent {
    *  bare host when no user is known, and '' for a local shell. Extracted
    *  from `locationLine` rather than copied into `liveWork`: which machine we
    *  are on has one derivation, and a second one would agree everywhere
-   *  anyone looked and disagree in the nested case both of these exist for. */
-  private hostLabel(): string {
+   *  anyone looked and disagree in the nested case both of these exist for.
+   *
+   *  Public since nocx-njn8s, for the third caller: the approval prompt has
+   *  to name the machine a proposed command would land on, and a hand-typed
+   *  ssh is exactly the case where the session's own binding is the wrong
+   *  answer. It reads this through PaneManager.sessionWhere rather than
+   *  deriving anything of its own — same reason as the two above. */
+  hostLabel(): string {
     if (!this._host) return ''
     return this._user ? `${this._user}@${this._host}` : this._host
   }

@@ -290,6 +290,27 @@ describe('PaneManager', () => {
     expect(manager.sessionDisplayName('mock-sid-does-not-exist')).toBeNull()
   })
 
+  // ── where a session IS, in words (nocx-njn8s) ─────────────────────────
+
+  it('says where a session is — the tab it is in and the machine it talks to', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
+    const sessionId = client._sessions[0].sessionId
+    // The tab half is the SAME answer sessionDisplayName gives — this is
+    // that derivation asked together with the machine, never a second one.
+    expect(manager.sessionWhere(sessionId)).toEqual({
+      tab: manager.sessionDisplayName(sessionId),
+      // A local shell has no host, and '' is that fact: the surface turns
+      // it into the product's words for "here". Naming the machine is what
+      // decides whether a destructive command lands on this laptop or on a
+      // production host, so it is a fact the prompt is owed.
+      machine: '',
+    })
+    expect(manager.sessionWhere('mock-sid-does-not-exist')).toBeNull()
+  })
+
   // ── fallback title consistency (badge vs title after close) ───────────
 
   it('fallback title is the directory, not a number that would disagree with the badge', async () => {

@@ -1995,6 +1995,26 @@ export class PaneManager {
     return this.paneForSession(sessionId)?.displayTitle || null
   }
 
+  /** Where a session IS, for a surface that has to say so in a sentence
+   *  (the approval prompt, nocx-njn8s): the tab it is in and the machine its
+   *  ACTIVE domain is talking to. Null when no pane in this window holds it
+   *  — the same "cannot be named" the caller above returns, and a caller
+   *  must treat it the same way rather than printing the id back.
+   *
+   *  `machine` is `user@host` for a remote domain and '' for a local shell,
+   *  and '' is a real answer: the product's words for "here" belong to the
+   *  surface, not to this layer. Neither half is derived here — the tab is
+   *  `sessionDisplayName` and the machine is `TerminalContent.hostLabel`,
+   *  the derivation the block header and the close prompt already read. This
+   *  exists only because a person deciding on a command needs both facts in
+   *  one sentence, and two injected callbacks that could disagree would be
+   *  the defect this is fixing, in a new place. */
+  sessionWhere(sessionId: string): { tab: string; machine: string } | null {
+    const tab = this.sessionDisplayName(sessionId)
+    if (tab === null) return null
+    return { tab, machine: this.terminalContentForSession(sessionId)?.hostLabel() ?? '' }
+  }
+
   /** The active pane's PANE element — the always-visible mount the snippet
    *  palette floats in (design §10.1: it must answer when the editor is
    *  hidden, so it cannot live inside the editor root). Null when no tab

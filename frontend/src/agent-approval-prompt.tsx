@@ -29,12 +29,27 @@
  * resource, and for `kind: 'session'` that derivation IS the session id — an
  * internal handle that says nothing to the person being asked to decide. So
  * the surface names the pane instead, through the SAME derivation the tab
- * strip and the answer's tool-call line use (PaneManager.sessionDisplayName,
- * injected as `sessionName`), and says nothing at all when no pane can be
- * named. The proposed ARGUMENTS are untouched by this: that block is the
- * model's own proposal, quoted verbatim, and paraphrasing an id inside it
- * would misreport what was asked for. The sentence is added beside it, never
- * substituted into it.
+ * strip and the answer's tool-call line use (PaneManager.sessionWhere, which
+ * is sessionDisplayName plus the machine), and says nothing at all when no
+ * pane can be named.
+ *
+ * AND WHAT THE CALL DOES, IN A SENTENCE (nocx-njn8s). That was not enough.
+ * A person approving `run` was shown the effect, then the raw argument blob
+ * — `{"command": "df -h", "sessionId": "ab607…cf95"}` — with the id nocx-vnzek
+ * had just taken off the tool-call line still inside it, and the MACHINE,
+ * the fact that decides whether a destructive command lands on this laptop
+ * or on a production host, never named at all. So a `run` proposal now reads
+ * as a sentence: the command verbatim in its own block, the machine and the
+ * tab in the lead.
+ *
+ * THE BLOB IS THE FALLBACK, AND IT IS NOT A LESSER ONE. That block is the
+ * model's own proposal quoted verbatim, and paraphrasing it is only honest
+ * while the paraphrase is EXHAUSTIVE — every argument accounted for. So the
+ * sentence is used for exactly one shape, `run` with the two arguments its
+ * schema declares and nothing else, and every other shape keeps the blob. A
+ * third argument appearing on `run` tomorrow puts the blob back rather than
+ * silently dropping it, which is the property this is built around: the
+ * check is on the parsed keys, not on the tool name alone.
  *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
@@ -63,11 +78,13 @@ export interface AgentApprovalPromptProps {
    * a surface that split them would invite a call site that forgot one.
    */
   onDecide: (approved: boolean, scope: ApprovalScope) => void
-  /** What a session is called TO A PERSON — the pane's own display title.
+  /** Where a session IS, to a person: the pane's own display title and the
+   *  machine its active domain is talking to (`user@host`, or '' for a local
+   *  shell — the words for "here" are this surface's, not the pane layer's).
    *  Null when no pane in this window holds it, and then the prompt says
-   *  nothing about it rather than printing the id back. Absent in a
+   *  nothing about where rather than printing the id back. Absent in a
    *  bare-bones embedding, which is the same case. */
-  sessionName?: (sessionId: string) => string | null
+  sessionWhere?: (sessionId: string) => { tab: string; machine: string } | null
 }
 
 const TITLE: Record<AgentApprovalRequested['reason'], string> = {
@@ -95,13 +112,62 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const ask = () => props.ask
   const effectLabel = () => EFFECT_LABEL[ask().effect]
 
-  /** The pane this call reaches, when the resource is a session and a pane
-   *  can name it. '' otherwise — for a path, whose id is already the
-   *  person's own word, and for a session nothing on screen holds. */
-  const paneName = () => {
+  /** Where this call lands, when the resource is a session and a pane can
+   *  say. Null otherwise — for a path, whose id is already the person's own
+   *  word, and for a session nothing on screen holds. */
+  const where = () => {
     const res = ask().resource
-    if (!res || res.kind !== 'session') return ''
-    return props.sessionName?.(res.id) ?? ''
+    if (!res || res.kind !== 'session') return null
+    return props.sessionWhere?.(res.id) ?? null
+  }
+
+  /** The product's words for the machine a landed call touches. A local
+   *  shell has no host, and '' is that fact — "this machine" is what a
+   *  person calls it, and saying nothing there would leave the one question
+   *  the sentence exists to answer unanswered. */
+  const machineWords = (machine: string) => machine || 'this machine'
+
+  /**
+   * How the command is introduced, which is a matter of TENSE and not of
+   * taste. A policy question is asked BEFORE the call: the command has not
+   * run, and "wants to run" is the whole point of the prompt. An egress
+   * question is asked AFTER it: the gate screens a tool RESULT, so the
+   * command is already behind us and the thing being decided is whether what
+   * it printed may leave for the provider. Saying "wants to run" there would
+   * misreport what has already happened to the machine.
+   */
+  const runLead = () => {
+    if (ask().reason !== 'egress') return 'The assistant wants to run this command'
+    // The verb only appears when there is somewhere to put it: with no pane
+    // to name, "ran" would trail off into the colon.
+    return where() ? 'The command that produced it ran' : 'The command that produced it'
+  }
+
+  /**
+   * The command a `run` proposal proposes, when the proposal is exactly the
+   * shape this surface has words for. Null otherwise, and then the verbatim
+   * blob is shown instead.
+   *
+   * The gate is the PARSED KEYS, not the tool name: naming the tool alone
+   * would let a third argument arrive one day and vanish from the question a
+   * person is answering. Two keys, both the ones run.schema.json declares, a
+   * non-empty string command — anything else is a proposal we cannot restate
+   * without dropping part of it, so we do not restate it.
+   */
+  const proposedCommand = () => {
+    if (ask().tool !== 'run') return null
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(ask().arguments)
+    } catch {
+      return null
+    }
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
+    const args = parsed as Record<string, unknown>
+    const keys = Object.keys(args)
+    if (keys.length !== 2 || !keys.includes('command') || !keys.includes('sessionId')) return null
+    const command = args.command
+    return typeof command === 'string' && command !== '' ? command : null
   }
 
   const egressIntro = () => {
@@ -175,18 +241,48 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         <Show when={ask().reason === 'egress'}>
           <p>{egressIntro()}</p>
         </Show>
+        <Show
+          when={proposedCommand()}
+          fallback={
+            <>
+              <p>
+                The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
+              </p>
+              <CodeBlock ariaLabel={`Arguments of ${ask().tool}`}>{ask().arguments}</CodeBlock>
+              <Show when={where()}>
+                {(w) => (
+                  <p>
+                    This call reaches the tab <strong>{w().tab}</strong> on{' '}
+                    <strong>{machineWords(w().machine)}</strong>.
+                  </p>
+                )}
+              </Show>
+            </>
+          }
+        >
+          {(command) => (
+            <>
+              <p>
+                {runLead()}
+                <Show when={where()}>
+                  {(w) => (
+                    <>
+                      {' on '}
+                      <strong>{machineWords(w().machine)}</strong>
+                      {', in the tab '}
+                      <strong>{w().tab}</strong>
+                    </>
+                  )}
+                </Show>
+                :
+              </p>
+              <CodeBlock ariaLabel="The command this question is about">{command()}</CodeBlock>
+            </>
+          )}
+        </Show>
         <Show when={ask().reason === 'policy'}>
           <p>
-            The assistant wants to <strong>{effectLabel()}</strong>.
-          </p>
-        </Show>
-        <p>
-          The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
-        </p>
-        <CodeBlock ariaLabel={`Arguments of ${ask().tool}`}>{ask().arguments}</CodeBlock>
-        <Show when={paneName() !== ''}>
-          <p>
-            This call reaches <strong>{paneName()}</strong>.
+            This call can <strong>{effectLabel()}</strong>.
           </p>
         </Show>
         <Show when={(ask().findings?.length ?? 0) > 0}>

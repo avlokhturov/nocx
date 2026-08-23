@@ -1288,8 +1288,10 @@ async function main() {
               onDecide={(approved, scope) => void decideApproval(approved, scope)}
               // A session in the question is named by the pane that holds
               // it, through the tab strip's own derivation (nocx-vnzek) —
-              // the same one the answer's tool-call lines read.
-              sessionName={(id) => tm.sessionDisplayName(id)}
+              // the same one the answer's tool-call lines read — together
+              // with the machine that pane is talking to (nocx-njn8s), so
+              // the question says where a command would actually land.
+              sessionWhere={(id) => tm.sessionWhere(id)}
             />
           )}
         </Show>
