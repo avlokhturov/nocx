@@ -44,12 +44,41 @@
  *
  * THE BLOB IS THE FALLBACK, AND IT IS NOT A LESSER ONE. That block is the
  * model's own proposal quoted verbatim, and paraphrasing it is only honest
- * while the paraphrase is EXHAUSTIVE — every argument accounted for. So the
- * sentence is used for exactly one shape, `run` with the two arguments its
- * schema declares and nothing else, and every other shape keeps the blob. A
- * third argument appearing on `run` tomorrow puts the blob back rather than
- * silently dropping it, which is the property this is built around: the
- * check is on the parsed keys, not on the tool name alone.
+ * while the paraphrase is EXHAUSTIVE — every argument accounted for. That
+ * rule stands; what changed under it is written next.
+ *
+ * EXHAUSTIVE BY CONSTRUCTION, NOT PER TOOL (nocx-n7xha). njn8s satisfied
+ * the rule by writing a sentence for exactly one shape — `run` with the two
+ * arguments its schema declares — and leaving every other shape the blob.
+ * That reading was too narrow twice over. For `readScreen` the blob's only
+ * content IS the session id nocx-vnzek had just taken off the tool-call
+ * line and njn8s off the run sentence, so the one surface still printing
+ * the handle was the one asking a person to decide. And a third argument
+ * on `run` put the whole proposal back into JSON rather than adding one
+ * line. A GENERIC renderer that lists EVERY parsed argument as a named row
+ * is exhaustive by construction — nothing can be dropped, because nothing
+ * is selected — and it is honest for tools nobody has written a sentence
+ * for yet. So the arguments are rows now, the blob is kept for the case a
+ * row list cannot describe (arguments that do not parse, or that are not an
+ * object), and njn8s's `run` sentence is untouched: rows sit beside it.
+ *
+ * WHERE THE CALL LANDS HAS ONE OWNER ON THIS SURFACE. `run` names the tab
+ * and the machine in its lead, so the argument that names the session is
+ * NOT also a row; every other tool has no lead to put it in, so that
+ * argument's row carries it and the "This call reaches the tab …" sentence
+ * is gone. One statement either way — two would be two surfaces owning one
+ * fact, and the loser goes on advertising what it can no longer deliver.
+ *
+ * AND A GUESS IS NOT A FACT (AD-5). The window now says which directory the
+ * call lands in, which nothing on it said before. nocx distinguishes a cwd
+ * an OSC 7 report confirmed from one a session was merely opened with, and
+ * an approval window that printed the second as fact would lie at the exact
+ * moment lying is most expensive — so both cases have their own words, on
+ * the row, through the ONE derivation PaneManager.sessionWhere already
+ * exists to be (a second injected callback could disagree with it). Neither
+ * wording promises more than it knows: the directory is the pane's AS OF
+ * NOW, and a shell can `cd` between the question and the answer. Binding an
+ * effect to its preconditions is nocx-d6gn4.1 and is not claimed here.
  *
  * What the surface must not overstate (design §7.2): approving covers the
  * call that is asking — it has NOT run, and no call after it in that response
@@ -58,7 +87,7 @@
  * where a person deciding reads it.
  */
 import { For, Show } from 'solid-js'
-import { ActionGroup, Badge, Button, CodeBlock, Prompt, Stack } from './ui'
+import { ActionGroup, Badge, Button, CodeBlock, FactList, Prompt, Stack, type Fact } from './ui'
 import { EFFECT_LABEL } from './effect-labels'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { AgentApprove } from './generated/agent.approve'
@@ -78,13 +107,19 @@ export interface AgentApprovalPromptProps {
    * a surface that split them would invite a call site that forgot one.
    */
   onDecide: (approved: boolean, scope: ApprovalScope) => void
-  /** Where a session IS, to a person: the pane's own display title and the
+  /** Where a session IS, to a person: the pane's own display title, the
    *  machine its active domain is talking to (`user@host`, or '' for a local
-   *  shell — the words for "here" are this surface's, not the pane layer's).
-   *  Null when no pane in this window holds it, and then the prompt says
-   *  nothing about where rather than printing the id back. Absent in a
-   *  bare-bones embedding, which is the same case. */
-  sessionWhere?: (sessionId: string) => { tab: string; machine: string } | null
+   *  shell — the words for "here" are this surface's, not the pane layer's),
+   *  and the directory it is in ('' when it has none to report).
+   *  `cwdVerified` says whether an OSC 7 report confirmed that directory or
+   *  it is only the one the session was opened with (AD-5); the two travel
+   *  together because this surface must word them differently.
+   *  Null when no pane in this window holds it, and then the prompt names
+   *  the fact rather than printing the id back. Absent in a bare-bones
+   *  embedding, which is the same case. */
+  sessionWhere?: (
+    sessionId: string,
+  ) => { tab: string; machine: string; cwd: string; cwdVerified: boolean } | null
 }
 
 const TITLE: Record<AgentApprovalRequested['reason'], string> = {
@@ -112,13 +147,18 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const ask = () => props.ask
   const effectLabel = () => EFFECT_LABEL[ask().effect]
 
+  /** What a pane says about a session, through the ONE derivation the tab
+   *  strip and the tool-call line read. Null when nothing on screen holds
+   *  it — never the id, which is what this exists to keep off the surface. */
+  const paneOf = (sessionId: string) => props.sessionWhere?.(sessionId) ?? null
+
   /** Where this call lands, when the resource is a session and a pane can
    *  say. Null otherwise — for a path, whose id is already the person's own
    *  word, and for a session nothing on screen holds. */
   const where = () => {
     const res = ask().resource
     if (!res || res.kind !== 'session') return null
-    return props.sessionWhere?.(res.id) ?? null
+    return paneOf(res.id)
   }
 
   /** The product's words for the machine a landed call touches. A local
@@ -144,18 +184,13 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
-   * The command a `run` proposal proposes, when the proposal is exactly the
-   * shape this surface has words for. Null otherwise, and then the verbatim
-   * blob is shown instead.
-   *
-   * The gate is the PARSED KEYS, not the tool name: naming the tool alone
-   * would let a third argument arrive one day and vanish from the question a
-   * person is answering. Two keys, both the ones run.schema.json declares, a
-   * non-empty string command — anything else is a proposal we cannot restate
-   * without dropping part of it, so we do not restate it.
+   * The model's proposal as an object, or null when it is not one — it did
+   * not parse, or it parsed to an array or a scalar. Null is the ONE case a
+   * row list cannot describe, and it is where the verbatim blob survives:
+   * quoting what we cannot restate is honest, and inventing rows for it
+   * would not be.
    */
-  const proposedCommand = () => {
-    if (ask().tool !== 'run') return null
+  const parsedArguments = (): Record<string, unknown> | null => {
     let parsed: unknown
     try {
       parsed = JSON.parse(ask().arguments)
@@ -163,11 +198,89 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       return null
     }
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null
-    const args = parsed as Record<string, unknown>
-    const keys = Object.keys(args)
-    if (keys.length !== 2 || !keys.includes('command') || !keys.includes('sessionId')) return null
-    const command = args.command
+    return parsed as Record<string, unknown>
+  }
+
+  /**
+   * The command a `run` proposal proposes — njn8s's sentence, kept.
+   *
+   * The key-count gate is gone (nocx-n7xha): it existed so a third argument
+   * could not vanish from the question, and the rows below now guarantee
+   * that directly for every argument the sentence does not itself state. An
+   * empty or non-string command is still no sentence — there is nothing to
+   * put in the block — and then the command is simply one of the rows.
+   */
+  const proposedCommand = () => {
+    if (ask().tool !== 'run') return null
+    const command = parsedArguments()?.command
     return typeof command === 'string' && command !== '' ? command : null
+  }
+
+  /**
+   * The arguments the lead sentence has ALREADY stated, which are therefore
+   * not repeated as rows. Derived from what is actually rendered rather than
+   * from the tool name: `run`'s block states `command`, and its lead states
+   * the session only when a pane can be named — with no pane to name, the
+   * lead says nothing about where and the session argument still owes the
+   * person a row.
+   */
+  const statedInTheLead = (): ReadonlySet<string> => {
+    const keys = new Set<string>()
+    if (proposedCommand() === null) return keys
+    keys.add('command')
+    if (where() !== null) keys.add('sessionId')
+    return keys
+  }
+
+  /** One argument's value, in the product's words where the product has
+   *  them. A `sessionId` is the one value that is an internal handle rather
+   *  than something a person wrote or can read, so it renders as the pane —
+   *  and when no pane holds it, as that fact. Everything else is the
+   *  model's own value, a string as itself and anything else as the JSON it
+   *  arrived as, which is exact and never a paraphrase. */
+  const argumentValue = (key: string, value: unknown): string => {
+    if (key === 'sessionId' && typeof value === 'string') {
+      const pane = paneOf(value)
+      return pane
+        ? `${pane.tab} on ${machineWords(pane.machine)}`
+        : 'a session no tab in this window holds'
+    }
+    return typeof value === 'string' ? value : (JSON.stringify(value) ?? String(value))
+  }
+
+  /**
+   * The facts of this call: every parsed argument the lead has not already
+   * stated, in the model's own order and under the model's own names, and
+   * then the directory the call lands in.
+   *
+   * Exhaustive by construction — the loop selects nothing, so nothing can be
+   * dropped. An argument this surface has never heard of is a row with the
+   * key the model used, which is the honest name for it.
+   */
+  const facts = (): Fact[] => {
+    const args = parsedArguments()
+    if (args === null) return []
+    const stated = statedInTheLead()
+    const rows: Fact[] = []
+    for (const [key, value] of Object.entries(args)) {
+      if (stated.has(key)) continue
+      rows.push({ name: key, value: argumentValue(key, value) })
+    }
+    const pane = where()
+    if (pane !== null && pane.cwd !== '') {
+      rows.push({
+        name: 'working directory',
+        value: pane.cwd,
+        // Two wordings, because nocx knows the difference and this window
+        // is where pretending otherwise costs most (AD-5). Both say "as of
+        // now": the pane's directory is what it is when the question is
+        // asked, and nothing here binds it to the moment of the answer.
+        note: pane.cwdVerified
+          ? "the tab's directory as of now, reported by the shell"
+          : "the tab's directory as of now, and the shell has not confirmed it",
+      })
+    }
+    return rows
   }
 
   const egressIntro = () => {
@@ -242,43 +355,45 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <p>{egressIntro()}</p>
         </Show>
         <Show
-          when={proposedCommand()}
+          when={parsedArguments()}
           fallback={
             <>
               <p>
                 The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
               </p>
               <CodeBlock ariaLabel={`Arguments of ${ask().tool}`}>{ask().arguments}</CodeBlock>
-              <Show when={where()}>
-                {(w) => (
-                  <p>
-                    This call reaches the tab <strong>{w().tab}</strong> on{' '}
-                    <strong>{machineWords(w().machine)}</strong>.
-                  </p>
-                )}
-              </Show>
             </>
           }
         >
-          {(command) => (
-            <>
+          <Show
+            when={proposedCommand()}
+            fallback={
               <p>
-                {runLead()}
-                <Show when={where()}>
-                  {(w) => (
-                    <>
-                      {' on '}
-                      <strong>{machineWords(w().machine)}</strong>
-                      {', in the tab '}
-                      <strong>{w().tab}</strong>
-                    </>
-                  )}
-                </Show>
-                :
+                The assistant is asking to call <strong>{ask().tool}</strong>.
               </p>
-              <CodeBlock ariaLabel="The command this question is about">{command()}</CodeBlock>
-            </>
-          )}
+            }
+          >
+            {(command) => (
+              <>
+                <p>
+                  {runLead()}
+                  <Show when={where()}>
+                    {(w) => (
+                      <>
+                        {' on '}
+                        <strong>{machineWords(w().machine)}</strong>
+                        {', in the tab '}
+                        <strong>{w().tab}</strong>
+                      </>
+                    )}
+                  </Show>
+                  :
+                </p>
+                <CodeBlock ariaLabel="The command this question is about">{command()}</CodeBlock>
+              </>
+            )}
+          </Show>
+          <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
         </Show>
         <Show when={ask().reason === 'policy'}>
           <p>

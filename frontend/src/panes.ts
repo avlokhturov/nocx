@@ -1996,23 +1996,46 @@ export class PaneManager {
   }
 
   /** Where a session IS, for a surface that has to say so in a sentence
-   *  (the approval prompt, nocx-njn8s): the tab it is in and the machine its
-   *  ACTIVE domain is talking to. Null when no pane in this window holds it
-   *  — the same "cannot be named" the caller above returns, and a caller
-   *  must treat it the same way rather than printing the id back.
+   *  (the approval prompt, nocx-njn8s): the tab it is in, the machine its
+   *  ACTIVE domain is talking to, and the directory it is in. Null when no
+   *  pane in this window holds it — the same "cannot be named" the caller
+   *  above returns, and a caller must treat it the same way rather than
+   *  printing the id back.
    *
    *  `machine` is `user@host` for a remote domain and '' for a local shell,
    *  and '' is a real answer: the product's words for "here" belong to the
-   *  surface, not to this layer. Neither half is derived here — the tab is
-   *  `sessionDisplayName` and the machine is `TerminalContent.hostLabel`,
-   *  the derivation the block header and the close prompt already read. This
-   *  exists only because a person deciding on a command needs both facts in
-   *  one sentence, and two injected callbacks that could disagree would be
-   *  the defect this is fixing, in a new place. */
-  sessionWhere(sessionId: string): { tab: string; machine: string } | null {
+   *  surface, not to this layer. `cwd` is '' the same way, for a session
+   *  that has no directory to report (a fresh domain, a lane gap).
+   *
+   *  `cwdVerified` travels WITH `cwd` and is not optional (nocx-n7xha).
+   *  Only a cwd an OSC 7 report confirmed is a claim; the one a session was
+   *  opened with is the provider's fallback question (AD-5), and a surface
+   *  that prints the second as fact lies at the moment lying costs most.
+   *  The pair is `TerminalContent.activeOrigin`'s, which is where the two
+   *  are already held together — a caller reading a bare cwd from somewhere
+   *  else would be the second derivation this method exists to prevent.
+   *
+   *  Nothing here is derived: the tab is `sessionDisplayName`, the machine
+   *  is `TerminalContent.hostLabel` (what the block header and the close
+   *  prompt read), the directory is the origin answer the Files panel
+   *  follows. This exists only because a person deciding on a command needs
+   *  all of it in one question, and several injected callbacks that could
+   *  disagree would be the defect this is fixing, in a new place. */
+  sessionWhere(
+    sessionId: string,
+  ): { tab: string; machine: string; cwd: string; cwdVerified: boolean } | null {
     const tab = this.sessionDisplayName(sessionId)
     if (tab === null) return null
-    return { tab, machine: this.terminalContentForSession(sessionId)?.hostLabel() ?? '' }
+    const content = this.terminalContentForSession(sessionId)
+    // Null for a tab whose shell has exited — the pane is still named and
+    // still on a machine, and there is no longer a directory to report.
+    const origin = content?.activeOrigin() ?? null
+    return {
+      tab,
+      machine: content?.hostLabel() ?? '',
+      cwd: origin?.cwd ?? '',
+      cwdVerified: origin?.cwdVerified ?? false,
+    }
   }
 
   /** The active pane's PANE element — the always-visible mount the snippet
