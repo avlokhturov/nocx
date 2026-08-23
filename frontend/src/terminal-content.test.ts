@@ -6015,6 +6015,117 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  it('puts a command the turn RAN inside the turn, and leaves a typed one where the ledger had it (nocx-dc2fr.4)', async () => {
+    // The relation's property, at the pane's own read: a command the
+    // assistant ran is seated INSIDE its turn at the stored position, and
+    // a command the person typed keeps its ledger place outside. Nothing
+    // is reordered that the relation does not name.
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
+    const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
+    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? [ranByAgent, typed, turn] : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: true,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        const id = (params as { id?: string }).id
+        // The turn caused the two children: the prose run and the command
+        // it ran, in seat order. Its own artifacts are empty, so it reads
+        // as an ask with no body of its own (ADR-0037).
+        if (id === 'turn-1')
+          return Promise.resolve({
+            entry: { ...turn },
+            edges: [],
+            artifacts: [{ id: 'art-t1', mediaType: 'text/plain' }],
+            proseEvicted: false,
+            caused: [
+              {
+                entryId: 'txt-1',
+                position: 0,
+                kind: 'text',
+                intent: '',
+                args: null,
+                effect: null,
+                resource: null,
+                opensBlock: false,
+              },
+              {
+                entryId: 'cmd-1',
+                position: 1,
+                kind: 'shell',
+                intent: 'cat -n a.txt',
+                args: null,
+                effect: null,
+                resource: null,
+                opensBlock: false,
+              },
+            ],
+          })
+        // A top-level block's entry: no body data and no causes.
+        return Promise.resolve({
+          artifacts: [],
+          edges: [],
+          caused: [],
+          proseEvicted: false,
+        })
+      }
+      if (method === 'ledger.artifact') {
+        return Promise.resolve({ body: 'let me look', truncated: null, byteLen: 11 })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        // TWO TOP-LEVEL restored blocks: the turn and the typed command.
+        // The command the turn ran is NOT one of them — it is inside the
+        // turn. The nested children are also marked data-restored, so the
+        // count scopes to the scrollback's own children.
+        const top = Array.from(inner.children).filter(
+          (c) => c instanceof HTMLElement && c.dataset.restored === 'true',
+        )
+        expect(top.length).toBe(2)
+      })
+      const turnBlock = inner.querySelector<HTMLElement>(
+        '.cmd-block[data-block-kind="ask"][data-restored="true"]',
+      )
+      expect(turnBlock).not.toBeNull()
+      // The command the assistant ran is INSIDE the turn, in the seat after
+      // the prose.
+      const children = Array.from(
+        turnBlock!.querySelectorAll<HTMLElement>(':scope > .cmd-children > .cmd-block'),
+      )
+      expect(children.map((c) => c.dataset.blockKind)).toEqual(['text', 'command'])
+      // The typed command is a SEPARATE TOP-LEVEL block at its ledger
+      // place — not a child of the turn (the nested command above is the
+      // first `.cmd-block` match, but it is inside `.cmd-children`).
+      const topLevel = Array.from(inner.children).filter(
+        (c): c is HTMLElement => c instanceof HTMLElement && c.dataset.restored === 'true',
+      )
+      const typedBlock = topLevel.find(
+        (el) =>
+          el.dataset.blockKind === 'command' &&
+          el.querySelector('.cmd-header-text')?.textContent === 'git status',
+      )
+      expect(typedBlock).toBeDefined()
+      expect(typedBlock?.querySelector('.cmd-header-text')?.textContent).toBe('git status')
+    } finally {
+      teardown()
+    }
+  })
+
   it('survives being shown before it is mounted, which is what really happens', async () => {
     // The activation seam calls setVisible(true) while the pane is still
     // being built, so the first show finds no scrollback. Spending the

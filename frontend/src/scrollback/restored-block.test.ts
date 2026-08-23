@@ -182,29 +182,36 @@ describe('a block built from the store', () => {
   })
 
   it('says the answer is gone rather than pretending the model said nothing', () => {
+    // The FACT is what gates the sentence: a turn whose prose retention
+    // took answers ledger.get with proseEvicted true, and the block says
+    // so once.
     const el = restoredBlock(
-      facts({ kind: 'ask', author: 'agent', body: null }),
+      facts({ kind: 'ask', author: 'agent', body: null, proseEvicted: true }),
       S,
       container,
       () => {},
       store(),
     )
-    expect(el.textContent).toContain('Output is no longer kept')
+    expect(el.querySelector('[data-prose-evicted="true"]')?.textContent).toContain(
+      'Output is no longer kept',
+    )
     expect(el.dataset.outputEvicted).toBe('true')
   })
-})
 
-// ── a restored turn and what it caused ─────────────────────────────────────
-//
-// THIS SURFACE IS MID-MOVE, AND THESE TESTS SAY SO. ADR-0037 makes a turn ONE
-// block that CARRIES its children in seat order, and the live path draws
-// exactly that. The restore cannot yet: it needs a body per `text` child,
-// which is a read the page does not do, so the turn is drawn with the prose it
-// has and its caused blocks after it. What is asserted here is what that
-// arrangement really claims — no anchors, no fragments, no repeated question —
-// and the tests that asserted the anchor-and-fragments arrangement are gone
-// with it, because they described a mechanism rather than a property.
-describe('a restored turn and what it caused', () => {
+  it('an EMPTY ask that never streamed a word says nothing of the sort', () => {
+    // The paired positive behind the gate: `body` is null for a turn that
+    // never streamed a word too, and nothing was lost — the sentence must
+    // not be one that is always shown for an empty body.
+    const el = restoredBlock(
+      facts({ kind: 'ask', author: 'agent', body: null, proseEvicted: false }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    expect(el.querySelector('[data-prose-evicted="true"]')).toBeNull()
+    expect(el.textContent).not.toContain('Output is no longer kept')
+  })
   const turn = (causes: RestoredCause[], over: Partial<RestoredTurnFacts> = {}) => {
     let n = 100
     return restoredTurn(
@@ -227,11 +234,16 @@ describe('a restored turn and what it caused', () => {
       container,
       () => {},
       store(),
-      (entryId) =>
-        entryId === 'gone'
+      (cause) =>
+        cause.entryId === 'gone'
           ? null
           : restoredBlock(
-              facts({ id: n++, command: `cmd ${entryId}`, author: 'agent', entryId }),
+              facts({
+                id: n++,
+                command: `cmd ${cause.entryId}`,
+                author: 'agent',
+                entryId: cause.entryId,
+              }),
               S,
               container,
               () => {},
@@ -241,57 +253,78 @@ describe('a restored turn and what it caused', () => {
   }
 
   it('a turn with no causes is ONE block with its prose', () => {
-    const els = turn([])
-    expect(els).toHaveLength(1)
-    expect(els[0].querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
+    const [el] = turn([])
+    expect(el.querySelector('[data-answer-body]')?.textContent).toContain('line 3 is wrong')
   })
 
   it('the question appears exactly once, however many blocks the turn caused', () => {
     // The `continued` badge and the repeated header are gone with the
     // fragments (ADR-0037): a restored turn says its question once, like a
     // live one.
-    const els = turn([
+    const [el] = turn([
       { entryId: 'cmd-1', kind: 'shell' },
       { entryId: 'cmd-2', kind: 'shell' },
     ])
-    const headers = els.flatMap((e) =>
-      Array.from(e.querySelectorAll('.cmd-header-text')).map((h) => h.textContent ?? ''),
+    const headers = Array.from(el.querySelectorAll('.cmd-header-text')).map(
+      (h) => h.textContent ?? '',
     )
     expect(headers.filter((h) => h === 'what went wrong?')).toHaveLength(1)
-    expect(els.some((e) => e.querySelector('[data-turn-continuation]') !== null)).toBe(false)
+    expect(el.querySelector('[data-turn-continuation]')).toBeNull()
   })
 
-  it('the blocks it caused are drawn in the seat order the ledger gave', () => {
-    const els = turn([
+  it('the blocks it caused are drawn inside the turn, in the seat order the ledger gave', () => {
+    // ADR-0037: the turn CARRIES its children. A restored turn is ONE
+    // block whose `.cmd-children` hold the same seats the store recorded,
+    // exactly as the live path draws them.
+    const [el] = turn([
       { entryId: 'cmd-1', kind: 'shell' },
       { entryId: 'cmd-2', kind: 'shell' },
     ])
-    expect(els.map((e) => e.querySelector('.cmd-header-text')?.textContent)).toEqual([
-      'what went wrong?',
-      'cmd cmd-1',
-      'cmd cmd-2',
-    ])
+    const box = el.querySelector(':scope > .cmd-children')
+    expect(box).not.toBeNull()
+    expect(Array.from(box!.querySelectorAll('.cmd-header-text')).map((h) => h.textContent)).toEqual(
+      ['cmd cmd-1', 'cmd cmd-2'],
+    )
   })
 
   it('a DANGLING cause costs the turn that block and nothing else', () => {
     // The command is older than the page limit, or retention took it.
     // Nothing is invented to stand in for it.
-    const els = turn([
+    const [el] = turn([
       { entryId: 'gone', kind: 'shell' },
       { entryId: 'cmd-2', kind: 'shell' },
     ])
-    expect(els.map((e) => e.querySelector('.cmd-header-text')?.textContent)).toEqual([
-      'what went wrong?',
+    const box = el.querySelector(':scope > .cmd-children')!
+    expect(Array.from(box.querySelectorAll('.cmd-header-text')).map((h) => h.textContent)).toEqual([
       'cmd cmd-2',
     ])
   })
 
-  it('a turn whose answer is gone says so rather than pretending the model said nothing', () => {
-    // Retention takes bodies and leaves entries (ADR-0019 §7). The blocks it
-    // caused are entries of their own and survive the loss of the prose.
-    const els = turn([{ entryId: 'cmd-1', kind: 'shell' }], { body: null })
-    expect(els[0].textContent).toContain('Output is no longer kept')
-    expect(els[1].querySelector('.cmd-header-text')?.textContent).toBe('cmd cmd-1')
+  it('a turn whose prose is gone says so once and keeps every child block', () => {
+    // Retention takes bodies and leaves entries (ADR-0019 §7). The blocks a
+    // turn caused are entries of their own and survive the loss of the
+    // prose; the run's loss is the turn's sentence, said ONCE.
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }], { body: null, proseEvicted: true })
+    const notices = el.querySelectorAll('[data-prose-evicted="true"]')
+    expect(notices).toHaveLength(1)
+    expect(notices[0].textContent).toBe('Output is no longer kept')
+    // The children are all still there.
+    const box = el.querySelector(':scope > .cmd-children')!
+    expect(Array.from(box.querySelectorAll('.cmd-header-text')).map((h) => h.textContent)).toEqual([
+      'cmd cmd-1',
+    ])
+  })
+
+  it('a turn whose prose is intact says nothing of the sort', () => {
+    // The paired positive: without it, the sentence above could be one that
+    // is always shown. A whole turn carries its prose and no notice.
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }], { proseEvicted: false })
+    expect(el.querySelector('[data-prose-evicted="true"]')).toBeNull()
+    expect(el.textContent).not.toContain('Output is no longer kept')
+    const box = el.querySelector(':scope > .cmd-children')!
+    expect(Array.from(box.querySelectorAll('.cmd-header-text')).map((h) => h.textContent)).toEqual([
+      'cmd cmd-1',
+    ])
   })
 
   // ── the turn's terminal chip, restored (nocx-hoeq3) ──────────────────────

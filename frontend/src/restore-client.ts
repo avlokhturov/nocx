@@ -187,6 +187,18 @@ export interface RestoredBody {
   kind: 'command' | 'ask'
   body: string | null
   /**
+   * Whether the prose of THIS RUN is no longer kept (ADR-0037's retention
+   * rule, ADR-0019 §7): retention took the bodies of the turn's `text`
+   * children as a unit. It is the ONE place a reader asks that question —
+   * the same receipt the store's own LedgerEntry.ProseEvicted reads — and
+   * it rides ledger.get because a restored turn has to be able to say the
+   * text is gone exactly once, whatever the run was cut into.
+   *
+   * Meaningful only when `kind` is 'ask'. A command whose own body was
+   * evicted says its own sentence on its own block and never sets this.
+   */
+  proseEvicted: boolean
+  /**
    * What this entry CAUSED, in the causal order the turn assigned.
    *
    * EMPTY IS THE DEGRADE AND IT IS THE ONLY ONE: an entry that caused
@@ -203,39 +215,62 @@ export interface RestoredBody {
 /**
  * One entry's body, and what that body says the block IS (nocx-4em1z).
  *
- * THE KIND IS READ, NOT INFERRED. A command's drawn body is `application/vt`
- * — the SGR grid — and the `text/plain` beside it is openly marked as
- * derived from it. An assistant turn's body is a `text/plain` ORIGINAL and it
- * never has a terminal body, because nothing writes one for a turn. So "does
- * this entry have a terminal body" is a stored fact with two states, not a
- * guess about content, and it is the same fact for a block the assistant ran
- * (a command, with its author badge) as for one a person typed.
+ * THE KIND IS READ, NOT INFERRED. Since ADR-0037 the entry's OWN kind is
+ * the durable fact: an `agent` entry is a TURN (ask grammar — prose, wrapped
+ * by the answer body), a `shell` entry is a COMMAND (a terminal grid, which
+ * must not re-wrap). The artifact list decides only what BODY to draw with
+ * it: a command's drawn body is the `application/vt` SGR grid (the
+ * `text/plain` beside it is openly derived from that one), and a turn's
+ * prose lives in its `text` children, so a whole turn answers with NO
+ * artifact of its own — an empty list is the ordinary shape, not a guess
+ * that it was a command.
  *
- * An entry with NO artifact at all — retention took it (ADR-0019 §7), or the
- * store could not be asked — is a command with no body. That is deliberate:
- * an evicted command is by far the commoner case, it renders the same
- * sentence either way, and guessing prose for an empty entry would repaint
- * every command whose output has aged out.
+ * An entry whose artifact is GONE — retention took it (ADR-0019 §7), or the
+ * store could not be asked — keeps its kind and answers `body: null`: the
+ * sentence "this output is no longer kept" is the block's, and a turn says
+ * it for its prose once, never per hole.
  *
  * ONE round trip pair, shared with bodyForBlock above: the entry, then its
- * artifact. The kind falls out of the list the first call already returned —
- * and so does the causal flow, which is why the relation cost this path no
- * round trip at all.
+ * artifact. The kind and the causal flow fall out of the first call — which
+ * is why the relation cost this path no round trip at all.
  */
 export async function restoredBody(client: WSClient, entryId: string): Promise<RestoredBody> {
   try {
     const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
     const caused = entry.caused ?? []
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
-    const chosen = vt ?? entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    if (!chosen) return { kind: 'command', body: null, caused }
+    const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
+    // What the block DRAWS with: a command's grid is the vt; a turn's
+    // prose is text/plain. When both survive on an agent entry, the prose
+    // is what a turn draws — the grid beside it predates the grammar.
+    const chosen = entry.entry.kind === 'agent' ? (text ?? vt) : (vt ?? text)
+    if (!chosen) {
+      // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
+      // artifact survived: since ADR-0037 a turn carries NO artifact of its
+      // own (its prose is a `text` child), so an empty artifact list is the
+      // ordinary shape of a whole turn, not evidence it was a command.
+      return {
+        kind: entry.entry.kind === 'agent' ? 'ask' : 'command',
+        body: null,
+        caused,
+        proseEvicted: !!entry.proseEvicted,
+      }
+    }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
-    return { kind: vt ? 'command' : 'ask', body: body.body, caused }
+    // The kind is the ENTRY's, whatever artifact survived: an agent entry
+    // is a turn, everything else is a command. The VT choice above decided
+    // which artifact is the BODY to draw with, not what the block is.
+    return {
+      kind: entry.entry.kind === 'agent' ? 'ask' : 'command',
+      body: body.body,
+      caused,
+      proseEvicted: !!entry.proseEvicted,
+    }
   } catch {
     // Quiet for the same reason bodyForBlock is: fifty restoring blocks
     // would otherwise log fifty times for one dead socket, and the pane
     // already says its past could not be read.
-    return { kind: 'command', body: null, caused: [] }
+    return { kind: 'command', body: null, caused: [], proseEvicted: false }
   }
 }
 

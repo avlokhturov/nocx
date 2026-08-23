@@ -568,6 +568,107 @@ func TestLedgerGet_UnknownIDIsAnErrorNotAnEmptySuccess(t *testing.T) {
 	}
 }
 
+// The evicted-prose fact reaches the renderer off the REAL socket
+// (nocx-dc2fr.4): a turn whose `text` children retention stripped answers
+// ledger.get with proseEvicted true, and a turn whose prose is whole answers
+// false. Both are validated against the schema — a fixture-built payload
+// could not show a field the handler never sends (AGENTS.md rule 5).
+func TestLedgerGet_ProseEvictedOverTheWire(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	openLocalSession(t, conn)
+	ctx := context.Background()
+	led := db.Ledger()
+	envID := localEnvironmentID()
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID, Criticality: content.CriticalityRoutine, Payload: `{}`,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	// One WHOLE turn: the question, a `text` child under it with a body,
+	// the run closed. The SECOND turn's body is PINNED, so the sweep takes
+	// the first turn's prose and leaves the second — the paired positive.
+	makeTurn := func(id, artifactID string, pinned bool) {
+		if _, err := led.Submit(ctx, content.SubmitEntry{
+			ID: id, Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+			Kind: content.EntryAgent, Intent: "how big is it?", Payload: "{}",
+		}); err != nil {
+			t.Fatalf("submit the turn: %v", err)
+		}
+		execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: id})
+		if err != nil {
+			t.Fatalf("start the turn's run: %v", err)
+		}
+		zero := 0
+		payload := content.ShellPayloadJSON(&zero)
+		if err = led.FinishExecution(ctx, execID, content.FinishExecution{
+			EndedAt: 2_000_000_000_000, TerminationReason: content.TermCompleted,
+			Status: content.EntrySuccess, Payload: &payload,
+		}); err != nil {
+			t.Fatalf("close the turn: %v", err)
+		}
+		pos := 0
+		child := id + "-txt"
+		if _, err = led.Submit(ctx, content.SubmitEntry{
+			ID: child, Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+			ParentID: &id, Pos: &pos, Kind: content.EntryText, Intent: "", Payload: "{}",
+		}); err != nil {
+			t.Fatalf("seat the prose block: %v", err)
+		}
+		aid, err := led.AppendArtifact(ctx, content.AppendArtifact{
+			ID: artifactID, EntryID: child, MediaType: content.MediaText, Pinned: pinned,
+		})
+		if err != nil {
+			t.Fatalf("append the prose artifact: %v", err)
+		}
+		if err := led.AppendChunk(ctx, aid, 1, []byte("the answer the model wrote")); err != nil {
+			t.Fatalf("append the prose body: %v", err)
+		}
+		if _, err := led.EvictBodies(ctx, content.BodyEvictionRequest{KeepBytes: 0, Max: 10}); err != nil {
+			t.Fatalf("evict bodies: %v", err)
+		}
+	}
+
+	schema := loadSchema(t, "ledger.get.schema.json")
+	makeTurn("turn-evicted", "art-aaa", false)
+	got := vaultCall(t, conn, "ledger.get", map[string]any{"id": "turn-evicted"}, 20)
+	if got.Error != nil {
+		t.Fatalf("ledger.get (evicted): %+v", got.Error)
+	}
+	validateJSON(t, schema, got.Result, "ledger.get result (prose evicted)")
+	var evicted struct {
+		ProseEvicted bool `json:"proseEvicted"`
+	}
+	if err := json.Unmarshal(got.Result, &evicted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !evicted.ProseEvicted {
+		t.Fatalf("proseEvicted off the socket = false, want true after the sweep took the body")
+	}
+
+	makeTurn("turn-kept", "art-bbb", true)
+	kept := vaultCall(t, conn, "ledger.get", map[string]any{"id": "turn-kept"}, 21)
+	if kept.Error != nil {
+		t.Fatalf("ledger.get (kept): %+v", kept.Error)
+	}
+	validateJSON(t, schema, kept.Result, "ledger.get result (prose kept)")
+	var intact struct {
+		ProseEvicted bool `json:"proseEvicted"`
+	}
+	if err := json.Unmarshal(kept.Result, &intact); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if intact.ProseEvicted {
+		t.Fatalf("proseEvicted off the socket = true for a turn whose prose is whole")
+	}
+}
+
 // ── the store's failures reach the caller ────────────────────────────────
 
 // Every external call this path makes has a test where it fails. The store

@@ -23,6 +23,10 @@ export interface LedgerGet {
    */
   artifacts: Artifact[]
   /**
+   * Whether the prose of THIS RUN is no longer kept: retention took the bodies of its `text` children (ADR-0037's retention rule, ADR-0019 §7). It is the ONE place a reader asks that question, and it is a fact about the RUN because the run is the unit — the prose of one run is retained or evicted together, so a turn cut into seven pieces and a turn written in one report the same single answer, and the renderer drawing the turn has one sentence to say rather than one per hole. False on every kind that has no prose, which includes a command whose own terminal body was evicted — that block says its own sentence, and a turn does not say it for it.
+   */
+  proseEvicted: boolean
+  /**
    * Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.
    */
   caused: Caused[]

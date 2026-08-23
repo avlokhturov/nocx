@@ -75,6 +75,7 @@ import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
 import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { toolCallTitle } from './scrollback/tool-call-title'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
@@ -3287,32 +3288,99 @@ export class TerminalContent extends BasePaneContent {
         )
         continue
       }
-      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0037), and drawing that
-      // tree from the store is the task that owns this surface next: it
-      // needs a body per `text` child, which this page does not read yet.
-      // Until then the turn is drawn with the prose it has and its caused
-      // blocks after it — restoredTurn says the same thing at more length.
+      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0037), and the restore
+      // draws exactly that: one turn block whose `.cmd-children` hold the
+      // causal sequence — prose, tool calls, commands — in the seats the
+      // ledger stored, through the SAME builders the live path ends at.
       //
-      // A `text` child is skipped rather than drawn: there is nothing to
-      // draw it WITH here, and passing it to drawCaused would name an entry
-      // this page does not hold and dangle.
+      // The PROSE was already fetched: `restoredBody` returned the turn's
+      // text/plain artifact, and the children ride the same `ledger.get`
+      // call as `caused`. A `text` child's body is its own artifact, read
+      // here per child exactly as a top-level block's body is read.
+      const childBody = new Map<string, string | null>()
+      for (const c of restored?.caused ?? []) {
+        if (c.kind !== 'text') continue
+        const art = await answerTextForEntry(this.client, c.entryId)
+        childBody.set(c.entryId, art)
+      }
       els.push(
         ...restoredTurn(
           {
             ...factsOf(b),
-            causes: (restored?.caused ?? []).filter((c) => c.kind !== 'text'),
+            proseEvicted: restored?.proseEvicted ?? false,
+            causes: restored?.caused ?? [],
           },
           snapshot,
           nextId,
           container,
           () => {},
           snapshotStore,
-          (entryId) => {
-            const caused = page.get(entryId)
-            // A cause this page does not hold is DANGLING — older than the
-            // page limit, or evicted. Nothing is invented to stand in for it.
-            if (!caused || placed.has(entryId)) return null
-            placed.add(entryId)
+          (cause) => {
+            // A TEXT child is drawn as the prose block it was, with its own
+            // body — or, when retention took it, as an empty block: the
+            // run's notice is the turn's, said once (proseEvicted above).
+            if (cause.kind === 'text') {
+              return restoredBlock(
+                {
+                  ...factsOf(b),
+                  id: nextId(),
+                  command: '',
+                  cwd: '',
+                  location: '',
+                  kind: 'text',
+                  entryId: cause.entryId,
+                  body: childBody.get(cause.entryId) ?? null,
+                  author: 'agent',
+                  status: 'success',
+                  durationMs: null,
+                  exitCode: null,
+                },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+              )
+            }
+            // An ACTION child is a tool line — a header naming what was
+            // called and with what, never a top-level block — EXCEPT one
+            // that opened a block: the command block it opened IS the
+            // account of that call (ADR-0037), exactly as the live flow
+            // draws it, so a restored turn must not restate it.
+            if (cause.kind === 'action') {
+              if (cause.opensBlock) return null
+              return restoredBlock(
+                {
+                  ...factsOf(b),
+                  id: nextId(),
+                  command: toolCallTitle(
+                    {
+                      tool: cause.intent ?? '',
+                      args: cause.args ?? {},
+                      resource: cause.resource ?? undefined,
+                    },
+                    { sessionName: this.hooks.sessionName },
+                  ),
+                  cwd: '',
+                  location: '',
+                  kind: 'tool',
+                  body: null,
+                  author: 'agent',
+                  status: 'success',
+                  durationMs: null,
+                  exitCode: null,
+                },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+              )
+            }
+            // A block the turn RAN (or a person's, if the ledger
+            // mis-seated): it is already a page row, drawn where the turn
+            // holds it.
+            const caused = page.get(cause.entryId)
+            if (!caused || placed.has(cause.entryId)) return null
+            placed.add(cause.entryId)
             return restoredBlock(
               { ...factsOf(caused), id: nextId() },
               snapshot,

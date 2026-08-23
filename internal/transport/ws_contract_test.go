@@ -5226,10 +5226,11 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				Gaps:    []ledgerGapWire{{Start: 10, End: 20, Reason: "dropped"}},
 				Payload: json.RawMessage(`{}`),
 			}},
+			ProseEvicted: true,
 		},
 		"an entry with no relations and no captures": {
 			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
-			Caused: []ledgerCausedWire{},
+			Caused: []ledgerCausedWire{}, ProseEvicted: false,
 		},
 	}
 	getSchema := loadSchema(t, "ledger.get.schema.json")
@@ -5373,7 +5374,16 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
 		`"redactions":[]}`
 	body := func(caused string) string {
-		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"caused":` + caused + `}`
+		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
+	}
+	// And the shape itself: the schema refuses a ledger.get result that
+	// will not say whether the prose of the run is gone — absent and false
+	// must not be the same wire state for the one fact a turn's reader
+	// cannot re-derive.
+	if err := validateJSONErr(schema, []byte(
+		`{"entry":`+entry+`,"edges":[],"artifacts":[],"caused":[]}`,
+	)); err == nil {
+		t.Fatal("the schema accepted a ledger.get result that omits proseEvicted")
 	}
 	bad := map[string]string{
 		"caused as null": body(`null`),

@@ -61,6 +61,15 @@ export interface RestoredBlockFacts {
    *  scraping the painted rows, and a restored turn must copy exactly as a
    *  live one does. */
   entryId?: string
+  /**
+   * Whether the prose of THIS RUN is no longer kept (ADR-0037's retention
+   * rule, ADR-0019 §7). The TURN's notice is gated on this FACT, never on
+   * `body === null` alone: a turn that never streamed a word has an empty
+   * body and everything is fine (nothing was lost), while a turn whose
+   * prose retention took has the same empty body and one sentence to say.
+   * Meaningless on a non-ask block.
+   */
+  proseEvicted?: boolean
 }
 
 /** The sentence a block shows where its output used to be. */
@@ -99,16 +108,29 @@ export function restoredBlock(
   store: CommandSnapshotStore,
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
-  // the one the live stream draws through (nocx-4em1z). A COMMAND's body is
-  // an SGR grid and is rendered here, from the bytes the capture stored.
-  // Neither is built twice; this only chooses which owner draws.
-  const isTurn = facts.kind === 'ask'
+  // the one the live stream draws through (nocx-4em1z). A `text` CHILD's
+  // body is prose too, and it is drawn by the SAME owner, exactly as the
+  // live path streams a run of prose through createAnswerBody — one owner
+  // of what prose looks like, whichever path produced the block. A
+  // COMMAND's body is an SGR grid and is rendered here, from the bytes the
+  // capture stored.
+  //
+  // The EVICTED SENTENCE is the TURN's alone: a run whose prose is gone is
+  // reported once, on the turn that owns it (ADR-0037's retention rule) —
+  // never one sentence per hole. A text child whose body is null therefore
+  // draws an empty block where its rows used to be, and a command whose
+  // terminal body was evicted says its own sentence on its own block.
+  const proseKind = facts.kind === 'ask' || facts.kind === 'text'
+  // A COMMAND's body is an SGR grid — rendered here from the stored bytes,
+  // exactly as the live path paints a frozen block (the theme is current,
+  // which is why the durable body keeps SGR). A TURN or `text` child has no
+  // grid: its prose goes through the answer body's own renderer below.
   const html =
-    facts.body === null
-      ? `<span class="term-line cmd-output-evicted">${EVICTED}</span>`
-      : isTurn
-        ? ''
+    facts.kind === 'command'
+      ? facts.body === null
+        ? `<span class="term-line cmd-output-evicted">${EVICTED}</span>`
         : bodyToHTML(snapshot, facts.body)
+      : ''
   const el = createCommandBlock(
     facts.kind,
     facts.id,
@@ -126,13 +148,31 @@ export function restoredBlock(
   )
   el.dataset.restored = 'true'
   if (facts.entryId) el.dataset.entryId = facts.entryId
-  if (facts.body === null) el.dataset.outputEvicted = 'true'
-  if (isTurn && facts.body !== null) {
+  // The EVICTED SENTENCE. A COMMAND says it whenever its body is gone; a
+  // TURN says it only when the RUN's prose fact says so — never from
+  // `body === null` alone, because a turn that never streamed a word has
+  // an empty body and nothing was lost. A `text` child stays silent either
+  // way: the run is the unit and the turn says it for all of them.
+  const evicted =
+    facts.kind === 'ask'
+      ? facts.proseEvicted === true
+      : facts.body === null && facts.kind !== 'text'
+  if (evicted) {
+    el.dataset.outputEvicted = 'true'
+    const notice = document.createElement('div')
+    notice.className =
+      facts.kind === 'ask'
+        ? 'cmd-output cmd-output-ask cmd-output-evicted'
+        : 'cmd-output cmd-output-evicted'
+    if (facts.kind === 'ask') notice.dataset.proseEvicted = 'true'
+    notice.textContent = EVICTED
+    el.appendChild(notice)
+  } else if (proseKind && facts.body !== null) {
     // The same body element the live answer builds — the class comes from
     // the kind's rules, which own the wrap policy, so a restored answer
-    // wraps exactly as a live one does.
+    // or a restored prose child wraps exactly as the live one does.
     const outputEl = document.createElement('div')
-    outputEl.className = blockKindRules('ask').outputClass!
+    outputEl.className = blockKindRules(facts.kind).outputClass!
     outputEl.dataset.answerBody = ''
     el.appendChild(outputEl)
     const body = createAnswerBody(outputEl, { store })
@@ -145,39 +185,43 @@ export function restoredBlock(
 }
 
 /** One child of a restored turn, as the ledger returns it (`ledger.get`'s
- *  `caused` row, narrowed to what placing needs). */
+ *  `caused` row). This is the WIRE shape narrowed to what placing needs:
+ *  the seat order is the store's, and the intent/args/effect/resource
+ *  fields are what a child's own block is built from. */
 export interface RestoredCause {
   entryId: string
   kind: 'shell' | 'agent' | 'action' | 'text'
+  intent?: string
+  args?: Record<string, unknown> | null
+  effect?: string | null
+  resource?: { kind: string; id: string } | null
+  opensBlock?: boolean
 }
 
 /** What a restored TURN is made of: the block's own facts, plus the children
- *  the ledger holds for it. */
+ *  the ledger holds for it. `proseEvicted` is inherited from the block
+ *  facts — the turn's own notice is the block's, gated on that fact. */
 export interface RestoredTurnFacts extends Omit<RestoredBlockFacts, 'id'> {
   /** The turn's children, in the seat order the ledger stored (ADR-0037). */
   causes?: RestoredCause[]
 }
 
 /**
- * Build one restored TURN: its block, then the blocks it caused.
+ * Build one restored TURN: its block, then the blocks it caused, drawn
+ * INSIDE the turn exactly as the live path draws its children — one
+ * `.cmd-children` box under the header, each child at its seat (ADR-0037).
+ * The turn and its children are ONE block with ONE question.
  *
- * THIS IS AN INTERMEDIATE STATE AND IT IS DELIBERATE. ADR-0037 makes a turn
- * ONE block that CARRIES its children in seat order, and the live path draws
- * exactly that. Drawing the same tree from the store is the task that owns
- * this surface next: it needs a body per `text` child, which is a read this
- * page does not do yet, and the `tool` child of a call needs the arguments
- * `ledger.get` has only just started sending. Until then the turn is drawn
- * with the prose it has and its caused blocks after it — an honest, flat
- * arrangement rather than a guess at an order it cannot yet read.
- *
- * `id` is asked for per element rather than passed once: every block is an
- * ordinary block with its own identity, selection and copy, and minting them
- * is the caller's (the manager owns the counter).
- *
- * `drawCaused` turns one caused entry id into the block to place. NULL is the
- * DANGLING case and it is deliberate: the entry is older than the page limit,
- * or retention took it. Never a placeholder — a block that is not there is
- * not drawn.
+ * WHAT THE RESTORED TURN DRAWS, AND WHY IT IS THE SAME LIST. Live, the
+ * scrollback holds one turn block whose children are the causal sequence —
+ * prose, a tool call, a command, prose — in the seats the store gave them.
+ * Restored, the page arrived in ledger order and the relation placed it;
+ * the drawer places what it is handed, so a restored turn's children are
+ * exactly the seats the store recorded. Two paths, one list.
+ * `drawCaused` turns one CAUSE into the block to seat. NULL is the
+ * DANGLING case and it is deliberate: the entry is older than the page
+ * limit, or retention took it. Never a placeholder — a block that is not
+ * there is not drawn, and the cost is that child and nothing else.
  */
 export function restoredTurn(
   facts: RestoredTurnFacts,
@@ -186,14 +230,20 @@ export function restoredTurn(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
-  drawCaused: (entryId: string) => HTMLElement | null,
+  drawCaused: (cause: RestoredCause) => HTMLElement | null,
 ): HTMLElement[] {
-  const out: HTMLElement[] = [
-    restoredBlock({ ...facts, id: nextId() }, snapshot, getContainer, onSelect, store),
-  ]
+  const el = restoredBlock({ ...facts, id: nextId() }, snapshot, getContainer, onSelect, store)
+  // The turn's prose, when the run still had it, is drawn by the block
+  // builder's own answer-body path; when it is GONE the block says the
+  // sentence once, in the same words a command says for its output — the
+  // run-level marker (data-prose-evicted) rides that notice, not a second
+  // one appended here.
+  const children = document.createElement('div')
+  children.className = 'cmd-children'
+  el.appendChild(children)
   for (const cause of facts.causes ?? []) {
-    const el = drawCaused(cause.entryId)
-    if (el) out.push(el)
+    const child = drawCaused(cause)
+    if (child) children.appendChild(child)
   }
-  return out
+  return [el]
 }

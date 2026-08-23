@@ -149,6 +149,14 @@ type ledgerGetResponse struct {
 	// in either direction, `caused` is the ONE relation the restore draws
 	// with, joined to the rows it points at.
 	Caused []ledgerCausedWire `json:"caused"`
+	// ProseEvicted says the prose of THIS RUN is no longer kept (ADR-0037's
+	// retention rule, ADR-0019 §7): retention took the bodies of the run's
+	// `text` children as a unit, and the renderer drawing the turn has ONE
+	// sentence to say rather than one per hole. It is the detail read's
+	// fact — the page never asks it, so it is never on the query row; a
+	// command whose own terminal body was evicted says its own sentence and
+	// does not set this.
+	ProseEvicted bool `json:"proseEvicted"`
 }
 
 // ledgerCausedWire is one entry a turn caused: where it sits in the turn,
@@ -371,7 +379,10 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 		for _, c := range caused {
 			wireCaused = append(wireCaused, ledgerCausedWireOf(c))
 		}
-		out = ledgerGetResponse{Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused}
+		out = ledgerGetResponse{
+			Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused,
+			ProseEvicted: row.ProseEvicted,
+		}
 		return nil
 	})
 	if err != nil {

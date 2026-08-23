@@ -18,14 +18,21 @@ import type { WSClient } from './ipc'
 
 /** A ledger that answers `ledger.get` with one entry's artifact list and
  *  `ledger.artifact` with the bytes of whichever id was asked for. */
-function fakeLedger(artifacts: Array<{ id: string; mediaType: string; body: string }>) {
+function fakeLedger(
+  artifacts: Array<{ id: string; mediaType: string; body: string }>,
+  kind = 'shell',
+  proseEvicted = false,
+) {
   const calls: Array<{ method: string; params: unknown }> = []
   const client = {
     call: vi.fn((method: string, params: unknown) => {
       calls.push({ method, params })
       if (method === 'ledger.get') {
         return Promise.resolve({
+          entry: { kind },
           artifacts: artifacts.map((a) => ({ id: a.id, mediaType: a.mediaType })),
+          caused: [],
+          proseEvicted,
         })
       }
       const found = artifacts.find((a) => a.id === (params as { id: string }).id)
@@ -91,29 +98,42 @@ describe('restore-client — a block says what it is by what its body is', () =>
       kind: 'command',
       body: SGR_BODY,
       caused: [],
+      proseEvicted: false,
     })
   })
 
   it('no terminal body makes it an assistant turn, drawn from its text', async () => {
-    const { client } = fakeLedger([BOTH[1]])
+    const { client } = fakeLedger([BOTH[1]], 'agent')
     expect(await restoredBody(client, 'entry-1')).toEqual({
       kind: 'ask',
       body: ANSWER_TEXT,
       caused: [],
+      proseEvicted: false,
     })
   })
 
-  it('a turn whose answer is gone is still a turn — the kind does not follow the loss', async () => {
-    // Retention takes bodies and leaves entries (ADR-0019 §7). An entry with
-    // NO artifact at all is the one case the body cannot answer, and the
-    // honest reading is the command grammar it has always had: a turn that
-    // lost its answer would say "no longer kept" either way, and inventing
-    // prose for an empty entry would repaint every evicted command.
-    const { client } = fakeLedger([])
+  it('a whole agent turn answers with NO artifact and is still an ask (ADR-0037)', async () => {
+    // Since ADR-0037 a turn carries no artifact of its own: its prose is
+    // `text` children. So an empty artifact list is the ORDINARY shape of
+    // a turn, never evidence it was a command — the kind is the entry's.
+    const { client } = fakeLedger([], 'agent')
     expect(await restoredBody(client, 'entry-1')).toEqual({
-      kind: 'command',
+      kind: 'ask',
       body: null,
       caused: [],
+      proseEvicted: false,
+    })
+  })
+  it('a turn whose answer is gone is still an ask — the kind does not follow the loss', async () => {
+    // Retention takes bodies and leaves entries (ADR-0019 §7). A turn that
+    // lost its prose says "no longer kept" through its own notice, and the
+    // kind comes from the entry, never from what artifact survived.
+    const { client } = fakeLedger([], 'agent', true)
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'ask',
+      body: null,
+      caused: [],
+      proseEvicted: true,
     })
   })
 
@@ -125,6 +145,7 @@ describe('restore-client — a block says what it is by what its body is', () =>
       kind: 'command',
       body: null,
       caused: [],
+      proseEvicted: false,
     })
   })
 })
@@ -201,7 +222,13 @@ describe('restore-client — the causal flow of a restored turn', () => {
   function fakeGet(artifacts: Array<{ id: string; mediaType: string }>, caused: unknown[]) {
     return {
       call: vi.fn((method: string) => {
-        if (method === 'ledger.get') return Promise.resolve({ artifacts, caused })
+        if (method === 'ledger.get')
+          return Promise.resolve({
+            entry: { kind: 'agent' },
+            artifacts,
+            caused,
+            proseEvicted: false,
+          })
         return Promise.resolve({ body: 'the answer' })
       }),
     } as unknown as WSClient
@@ -245,6 +272,7 @@ describe('restore-client — the causal flow of a restored turn', () => {
       kind: 'command',
       body: null,
       caused: [],
+      proseEvicted: false,
     })
   })
 
