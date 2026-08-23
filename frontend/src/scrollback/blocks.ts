@@ -77,6 +77,23 @@ type FenceTimer = ReturnType<typeof setTimeout>
  *  terminalized record. */
 export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
 
+/** Where a block is, as its HEADER reports it (nocx-hoeq3).
+ *
+ *  `settled` is the one that had to be named. It means: this block is
+ *  finished and the outcome is NOT HERE — a fragment of a turn that ended
+ *  further down. It used to be spelled `success`, on both the live path and
+ *  the restored one, because nothing read the value and any settled-looking
+ *  status would do. That stops being true the moment the header derives a
+ *  terminal chip from the status, which is what the group's one owner below
+ *  does: a continuation spelled `success` would state an outcome it does not
+ *  have, and tell a reader the turn finished halfway down itself. */
+type HeaderStatus = 'running' | 'waiting' | 'settled' | FrozenStatus
+
+/** The statuses a BUILT block can be handed — everything a header knows
+ *  except `running`, which belongs to createRunningBlock's element and never
+ *  to a block built with its rows already fixed. */
+type BuiltStatus = Exclude<HeaderStatus, 'running'>
+
 // ── Block kind ─────────────────────────────────────────────────────────────
 
 /** A block's content grammar (nocx-ex636). The FRAME — a header, a body,
@@ -111,21 +128,102 @@ export interface BlockKindRules {
     readonly done: string
     readonly failed: string
   } | null
+  /** WHAT THE HEADER'S RIGHT-HAND GROUP HOLDS when the block has settled,
+   *  and in what order (nocx-hoeq3).
+   *
+   *  Here rather than at the call sites because there are two of them and
+   *  they were hundreds of lines apart: the builder filled the group for a
+   *  command, and the answer flow's close filled it again for a turn. They
+   *  agreed on nothing except by accident — the turn's chip was missing the
+   *  `-ok`/`-fail` modifier, and the turn had no duration chip at all
+   *  because it was built with `durationMs = null` and never given one. The
+   *  owner saw the result as two headers whose chips differ in number and
+   *  placement, which is what they were.
+   *
+   *  A kind that declares nothing here does not get the command's group by
+   *  default; it fails in blockKindRules like every other rule. */
+  readonly headerRight: HeaderRightRules
 }
+
+/** The right-hand group's per-kind rules. */
+interface HeaderRightRules {
+  /** The slots the group holds, in DOM order. A slot renders nothing when
+   *  the block has no such fact — no duration known, no outcome here — so
+   *  the order is stable whether one chip is drawn or both. */
+  readonly chips: readonly HeaderChipSlot[]
+  /** The block's outcome as this kind SAYS it, or null when the block has
+   *  none of its own: still running, still waiting, or a fragment of a turn
+   *  that ended further down.
+   *
+   *  The two kinds read different facts on purpose, and that is the whole
+   *  of what is per-kind here (nocx-ex636). A command's outcome is the
+   *  shell's exit code and its words are the shell's. A turn's outcome is
+   *  the run's terminal status and its words are its own — an answer is not
+   *  a command's output and does not borrow "ok". The CHIP the two produce
+   *  is one chip, built once, below. */
+  readonly terminal: (outcome: BlockOutcome) => TerminalChipSpec | null
+}
+
+/** One slot in the header's right-hand group. */
+type HeaderChipSlot = 'duration' | 'terminal'
+
+/** The facts a settled block's header decides its terminal chip from. */
+interface BlockOutcome {
+  readonly status: BuiltStatus
+  /** The shell's code, and null for everything that is not a shell command
+   *  — which is what the store sends for an assistant turn, because the
+   *  exit code lives in the shell arm of an entry's payload and a turn has
+   *  no shell arm (content.ShellExitCodeOf). */
+  readonly exitCode: number | null
+}
+
+/** What a terminal chip says: its tone and its word. The tone is the
+ *  block's outcome; the word is the kind's vocabulary. */
+interface TerminalChipSpec {
+  readonly ok: boolean
+  readonly text: string
+}
+
+/** The ask kind's words, named once so the in-progress chip and the terminal
+ *  chip cannot drift apart: they are one vocabulary. */
+const ASK_STATUS_CHIPS = {
+  inProgress: 'thinking',
+  done: 'completed',
+  failed: 'failed',
+} as const
 
 const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
   command: {
     highlightHeader: true,
     outputClass: 'cmd-output',
     statusChips: null,
+    headerRight: {
+      chips: ['duration', 'terminal'],
+      terminal: ({ status, exitCode }) => {
+        // An 'entered' block froze on environment entry (N6): it carries no
+        // exit code and must never paint success or failure, whatever code
+        // the local D later delivers to the ledger.
+        if (status === 'entered' || exitCode === null) return null
+        return exitCode === 0 ? { ok: true, text: 'ok' } : { ok: false, text: `exit ${exitCode}` }
+      },
+    },
   },
   ask: {
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
-    statusChips: {
-      inProgress: 'thinking',
-      done: 'completed',
-      failed: 'failed',
+    statusChips: ASK_STATUS_CHIPS,
+    headerRight: {
+      chips: ['duration', 'terminal'],
+      // From the STATUS, never from the exit code. A turn's outcome is the
+      // run's, and the store sends no exit code for one; deriving the chip
+      // from the code left a restored turn saying nothing at all about
+      // whether it finished, while the live one said `completed` from a
+      // second construction (nocx-hoeq3).
+      terminal: ({ status }) => {
+        if (status === 'success') return { ok: true, text: ASK_STATUS_CHIPS.done }
+        if (status === 'failure') return { ok: false, text: ASK_STATUS_CHIPS.failed }
+        return null
+      },
     },
   },
 }
@@ -323,6 +421,77 @@ function formatDuration(ms: number): string {
   return `${min}m ${sec}s`
 }
 
+// ── The header's right-hand group: one owner (nocx-hoeq3) ──────────────────
+
+/** THE construction of a header's duration chip, for every kind and for both
+ *  of the states that show one.
+ *
+ *  A turn takes time and that is as worth knowing as `df` taking 27ms, so it
+ *  is drawn with the same chip and the same identity class a command's is —
+ *  which is also what makes the two headers line up, since the width floor
+ *  lives on `.cmd-header-duration`.
+ *
+ *  The TEXT is the caller's, because the two formatters are deliberately
+ *  different: a running command shows whole seconds (the ticker fires once a
+ *  second, so a tenths digit could only read `.0`) and a finished one shows
+ *  the precise figure. Two formatters, one chip. */
+function durationChip(text: string): HTMLElement {
+  const el = document.createElement('span')
+  el.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
+  el.textContent = text
+  return el
+}
+
+/** THE construction of a header's TERMINAL chip, for every kind.
+ *
+ *  There were two. The command's carried `cmd-header-exit-ok`/`-fail` and the
+ *  turn's did not, which was invisible only because no stylesheet paints
+ *  those modifiers — the two would have disagreed the day one did. The WORD
+ *  still comes from the kind (nocx-ex636); the element does not. */
+function terminalChip(spec: TerminalChipSpec): HTMLElement {
+  const el = document.createElement('span')
+  el.className = spec.ok
+    ? 'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok'
+    : 'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail'
+  el.textContent = spec.text
+  return el
+}
+
+/**
+ * Fill a header's right-hand group with what a SETTLED block of this kind
+ * shows, in the order the kind declared (nocx-hoeq3).
+ *
+ * Called from the two moments a block settles, so there is one answer for
+ * both: at BUILD, for a block whose outcome was already known (a frozen
+ * command, a restored anything), and at CLOSE, for a turn that was built
+ * while it was still being written. Before this the close built its own chip
+ * and never a duration, so a turn's header held one chip where a command's
+ * held two — the difference in number and placement the owner reported.
+ *
+ * IDEMPOTENT: the settled chips are cleared first, so settling a header twice
+ * re-states the group rather than growing a second copy of it. The ⋮ is not
+ * ours — placeHeaderChip keeps it last, whether or not it exists yet.
+ */
+function settleHeaderRight(
+  right: Element,
+  kind: BlockKind,
+  durationMs: number | null,
+  outcome: BlockOutcome,
+): void {
+  for (const stale of right.querySelectorAll('.cmd-header-duration, .cmd-header-exit')) {
+    stale.remove()
+  }
+  const rules = blockKindRules(kind).headerRight
+  for (const slot of rules.chips) {
+    if (slot === 'duration') {
+      if (durationMs !== null) placeHeaderChip(right, durationChip(formatDuration(durationMs)))
+      continue
+    }
+    const spec = rules.terminal(outcome)
+    if (spec) placeHeaderChip(right, terminalChip(spec))
+  }
+}
+
 // ── CWD display ────────────────────────────────────────────────────────────
 
 function cwdLabel(cwd: string): string {
@@ -345,7 +514,7 @@ function createHeader(
   location: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'running' | 'success' | 'failure' | 'entered' | 'unknown' | 'waiting',
+  status: HeaderStatus,
   store: CommandSnapshotStore,
   author: CommandAuthor = 'shell',
 ): HTMLElement {
@@ -399,38 +568,14 @@ function createHeader(
     const spinner = document.createElement('span')
     spinner.className = 'cmd-header-spinner'
     right.appendChild(spinner)
-
-    const dur = document.createElement('span')
-    dur.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
-    dur.textContent = formatRunningDuration(0)
-    right.appendChild(dur)
-  } else {
-    if (durationMs !== null) {
-      const dur = document.createElement('span')
-      dur.className = 'nocx-chip nocx-chip-muted cmd-header-duration'
-      dur.textContent = formatDuration(durationMs)
-      right.appendChild(dur)
-    }
-
-    // An 'entered' block froze on environment entry (N6): it carries no
-    // exit code and must never paint success or failure, whatever code the
-    // local D later delivers to the ledger.
-    if (status !== 'entered' && exitCode !== null) {
-      const exit = document.createElement('span')
-      exit.className =
-        exitCode === 0
-          ? 'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok'
-          : 'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail'
-      exit.textContent = exitCode === 0 ? 'ok' : `exit ${exitCode}`
-      right.appendChild(exit)
-    }
-
+    right.appendChild(durationChip(formatRunningDuration(0)))
+  } else if (status === 'waiting') {
     // The kind's own in-progress vocabulary: the ask block says it is
     // thinking until the first delta lands, and the answer
     // lifecycle removes it at exactly that moment (nocx-ex636). The
     // command kind has no in-progress WORD — its running state is the
-    // spinner above.
-    if (rules.statusChips && status === 'waiting') {
+    // spinner above — so a command handed this status shows nothing.
+    if (rules.statusChips) {
       // The SAME pulse a running command's header carries, in the SAME
       // place: a bare dot in the chip row, left of the chip (AD-8 — one
       // owner for "this block is in progress", and one shape for it). A
@@ -450,6 +595,11 @@ function createHeader(
       wait.textContent = rules.statusChips.inProgress
       right.appendChild(wait)
     }
+  } else {
+    // Settled: the group is the kind's, from its one owner. A block whose
+    // outcome arrives LATER — a turn, which is written before it ends —
+    // settles the same group through the same function at its close.
+    settleHeaderRight(right, kind, durationMs, { status, exitCode })
   }
 
   chipsRow.appendChild(right)
@@ -904,7 +1054,7 @@ export function createCommandBlock(
   outputHtml: string,
   durationMs: number | null,
   exitCode: number | null,
-  status: 'success' | 'failure' | 'entered' | 'unknown' | 'waiting',
+  status: BuiltStatus,
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
@@ -1841,6 +1991,15 @@ export class BlockManager {
     // the handle's methods are declared `this: void` and are called as bare
     // functions.
     const sessionName = this._sessionName
+    // WHEN THE TURN STARTED. A turn takes time — the model thinks, the tools
+    // run — and a person wants to know how long as much as they want to know
+    // that `df` took 27ms (nocx-hoeq3). Measured on the RENDERER's clock,
+    // from the question being submitted to the run terminalizing, which is
+    // exactly how a command's duration is measured a few hundred lines up
+    // (_cmdStartTime); a restored turn shows the store's own figure, and a
+    // restored command already does the same.
+    const now = this._now
+    const startedAt = now()
 
     // The waiting chip says the model has not answered yet; it stops the
     // moment the first delta lands, and a run that fails before any text
@@ -1890,10 +2049,14 @@ export class BlockManager {
         // — or a terminal close — removes.
         //
         // A CONTINUATION is opened only once the turn is already writing
-        // into it, so it never waits: it is drawn as a settled block with no
-        // duration and no exit code, and the terminal chip lands on whichever
-        // fragment is last when the turn closes.
-        index === 0 ? 'waiting' : 'success',
+        // into it, so it never waits: it is drawn as SETTLED — finished, with
+        // no outcome of its own — and the duration and the terminal chip land
+        // on whichever fragment is last when the turn closes. It used to say
+        // `success` here, which was harmless only while nothing read the
+        // value; the header reads it now, and a continuation claiming an
+        // outcome would tell a reader the turn ended halfway down itself
+        // (nocx-hoeq3).
+        index === 0 ? 'waiting' : 'settled',
         this._getContainer,
         (bid, sel) => {
           if (sel) this._onBlockSelected(bid)
@@ -2027,19 +2190,13 @@ export class BlockManager {
         // stop there, and opening an empty continuation to carry a chip would
         // put a block on screen with nothing in it.
         const el = current.el
-        // The header's status chip, in the flow's own chip vocabulary — the
-        // words come from the ask kind's rules (nocx-ex636).
-        const chips = blockKindRules('ask').statusChips
+        // The header's right-hand group, from its ONE owner (nocx-hoeq3):
+        // how long the turn took and how it ended, as the ask kind's rules
+        // say them. This used to build a chip of its own here — with the
+        // right words and the wrong class list, and no duration beside it —
+        // so a turn's header held one chip where a command's held two.
         const right = el.querySelector('.cmd-header-right')
-        if (right && chips) {
-          const chip = document.createElement('span')
-          chip.className =
-            status === 'success'
-              ? 'nocx-chip nocx-chip-ok cmd-header-exit'
-              : 'nocx-chip nocx-chip-fail cmd-header-exit'
-          chip.textContent = status === 'success' ? chips.done : chips.failed
-          placeHeaderChip(right, chip)
-        }
+        if (right) settleHeaderRight(right, 'ask', now() - startedAt, { status, exitCode: null })
         // The model that answered, on the answer itself (nocx-e6kn2): the
         // person must be able to tell which model answered without going to
         // look it up. The value is the ask result's pinned model — this run's

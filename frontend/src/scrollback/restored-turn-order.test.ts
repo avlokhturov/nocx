@@ -136,6 +136,60 @@ describe('a restored turn reads the same as the live one it came from', () => {
     expect(fragmentFlows(live)).toEqual([['call:files.read', `text:${BEFORE}`], [`text:${AFTER}`]])
   })
 
+  // ── the header's right-hand group, on both sides (nocx-hoeq3) ───────────
+  //
+  // The chips are read the same way the flow is: off the DOM, from both sides
+  // built by their real owners, and compared with each other rather than with
+  // a fixture. The class list is the whole identity of a chip — its tone, the
+  // shared appearance and the identity class an e2e spec reads — so two
+  // groups that read the same here hold the same chips in the same order.
+  //
+  // The DURATION's VALUE is deliberately not compared: live it is measured on
+  // the renderer's clock and restored it is the entry's stored figure, which
+  // is exactly how a command's duration already works across the two views.
+  it('the fragment the turn ended on carries the same chips on both sides', () => {
+    const live = liveTurn()
+    const page: RestorableBlock[] = [
+      block('turn-1', QUESTION, 'agent'),
+      block('cmd-1', COMMAND, 'agent'),
+    ]
+    const restored = draw(
+      page,
+      (id) =>
+        id === 'turn-1'
+          ? [
+              actionCause('act-1', 0, 'run', BEFORE.length, null, true),
+              shellCause('cmd-1', 1, BEFORE.length),
+            ]
+          : [],
+      ANSWER,
+    )
+    const groups = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll('[data-turn-fragment]')).map((f) =>
+        Array.from(f.querySelector('.cmd-header-right')?.children ?? []).map((c) => c.className),
+      )
+    expect(groups(restored)).toEqual(groups(live))
+    // …and not equal by being empty: the turn ended on the second fragment,
+    // so that is where its duration and its terminal chip are.
+    expect(groups(live)).toEqual([
+      ['cmd-overflow-btn'],
+      [
+        'nocx-chip nocx-chip-muted cmd-header-duration',
+        'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
+        'cmd-overflow-btn',
+      ],
+    ])
+    // Scoped to the FRAGMENTS: the command between them is running on the
+    // live side and frozen on the restored one, which is a difference of
+    // moment and not of kind — the turn's own chips are what is compared.
+    const word = (root: HTMLElement) =>
+      Array.from(root.querySelectorAll('[data-turn-fragment] .cmd-header-exit')).map(
+        (c) => c.textContent,
+      )
+    expect(word(restored)).toEqual(word(live))
+    expect(word(live)).toEqual(['completed'])
+  })
+
   it('the fragments of one turn carry one identity on both sides', () => {
     const live = liveTurn()
     const page: RestorableBlock[] = [

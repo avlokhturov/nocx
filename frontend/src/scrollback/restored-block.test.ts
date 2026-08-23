@@ -352,6 +352,45 @@ describe('a restored turn and what it caused', () => {
     expect(fragments[1].querySelector('.cmd-header-duration')?.textContent).toBe('1.2s')
   })
 
+  // ── the turn's terminal chip, restored (nocx-hoeq3) ──────────────────────
+  //
+  // A restored turn used to show no terminal chip AT ALL, and the reason was
+  // that the header derived it from the exit code: an agent entry is not a
+  // shell arm, so `ledger.query` sends `exitCode: null` for one
+  // (content.ShellExitCodeOf — "a non-shell entry never had one"). The live
+  // turn meanwhile grew a `completed` chip from a second construction in the
+  // answer flow's close. Two views of one turn, disagreeing about whether it
+  // finished.
+  //
+  // The chip is the KIND's now: an ask block reads its terminal word from the
+  // block's status, which is what a turn's outcome actually is.
+  it('a restored turn says it completed, from its status and never from an exit code', () => {
+    const els = turn([call({ entryId: 'cmd-1', kind: 'shell', intent: 'ls', effect: null, at: 4 })])
+    const fragments = els.filter((e) => e.dataset.turnFragment !== undefined)
+    // The fragment the turn ENDED on carries it; the one above states nothing.
+    expect(fragments[0].querySelector('.cmd-header-exit')).toBeNull()
+    expect(fragments[1].querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+    expect(fragments[1].querySelector('.cmd-header-exit')?.className).toBe(
+      'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',
+    )
+  })
+
+  it('a turn that failed says so in its own word, not in the shell’s', () => {
+    const [el] = turn([], { status: 'failure' })
+    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('failed')
+    expect(el.querySelector('.cmd-header-exit')?.className).toBe(
+      'nocx-chip nocx-chip-fail cmd-header-exit cmd-header-exit-fail',
+    )
+  })
+
+  it('a turn handed an exit code still speaks its own vocabulary, never “ok”', () => {
+    // The store cannot send one today, and the point is that the header does
+    // not depend on that staying true: an answer is not a command's output
+    // (nocx-ex636), so the ask kind's chip never reads the shell's code.
+    const [el] = turn([], { exitCode: 0 })
+    expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
+  })
+
   it('a command at the very START of the answer still opens the fragment the prose from it goes in', () => {
     // The shape the e2e drives (criterion 9): the turn reached for the tool
     // before it said anything, so BOTH causes are anchored at 0. The first

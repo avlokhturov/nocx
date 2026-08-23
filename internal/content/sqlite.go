@@ -544,6 +544,15 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 // renderer's measurement and is never the difference of the two: two clocks,
 // deliberately, and a duration is asked of the one that measured it.
 //
+// A TURN is the case where that last sentence names the backend (nocx-hoeq3).
+// The renderer cannot measure an assistant turn — it does not open it and it
+// does not close it — so the clock that measured it is this process's, at
+// both ends: the run's started_at at submit and the terminalizer's own
+// time.Now at the close. FinishAgentRun subtracts THOSE, which is asking one
+// clock and not differencing two. Nothing else can answer how long the
+// assistant took, and a turn nobody times comes off the wire as null — which
+// the header draws as no duration chip at all, never as 0ms.
+//
 // The six open review questions, decided conservatively:
 //
 //  1. CHECK constraints on the closed enums — YES, on every one. The reason
@@ -738,7 +747,7 @@ CREATE TABLE IF NOT EXISTS entries (
   -- the two clocks (nocx-rtg0.23).
   started_at      INTEGER,                 -- renderer wall clock at submit
   ended_at        INTEGER,                 -- backend wall clock at the close
-  duration_ms     INTEGER,                 -- the renderer's measurement
+  duration_ms     INTEGER,                 -- measured by whoever ran the clock
   sensitivity     TEXT NOT NULL DEFAULT 'normal' CHECK (sensitivity IN ('normal','sensitive')),
   reviewed_at     INTEGER,
   -- capture_key is the renderer's idempotency key for a FRAME capture

@@ -503,6 +503,10 @@ type Grant struct {
 // entries close in ONE transaction (FinishAgentRun); the failure sentence —
 // what agent.runState's error carries, a sentence a person reads, never a
 // Go error string — is recorded on the run's payload.
+//
+// EndedAt closes the turn's interval and is what its duration is measured
+// against: unlike a shell command, nobody but this process times a turn, so
+// the close is the only place the number can come from (nocx-hoeq3).
 type FinishAgentRun struct {
 	State             RunState // RunCompleted or RunFailed (this slice)
 	TerminationReason TerminationReason
@@ -1379,7 +1383,8 @@ type LedgerRepository interface {
 	TransitionRun(ctx context.Context, runID int64, to RunState) error
 	// FinishAgentRun closes the run AND its turn in ONE transaction — the
 	// terminal state this slice's driver persists: the run's state, end and
-	// termination reason, the turn's entry, and the answer body (sealed).
+	// termination reason, the turn's entry and the interval it took, and
+	// the answer body (sealed).
 	// A run is never reported terminal in the run vocabulary while its
 	// entry still says otherwise — both lifecycles close together, or
 	// neither does.
