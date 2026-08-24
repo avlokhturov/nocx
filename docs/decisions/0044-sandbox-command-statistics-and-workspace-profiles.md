@@ -18,7 +18,7 @@ Each named workspace has at most one optional sandbox profile in the `sandboxPro
 
 A denied-access promotion targets the event's backend-owned workspace. A named workspace without an explicit profile receives a copy-on-write profile initialized from the current standard profile. A default-workspace event updates the standard profile. The renderer supplies only a backend-minted event ID and decision; it cannot redirect authority to another workspace.
 
-A dedicated global activity-bar action opens one non-restorable singleton Sandbox statistics tab. It is distinct from the active-tab conversion shield. The tab owns live backend/observer status, active grant provenance, effective profile, the bounded memory-only denied-access inbox, and profile editing. Settings retains sandbox configuration and the standard profile but no longer owns the Sandbox access page.
+A dedicated global activity-bar action opens one non-restorable singleton Sandbox statistics tab. It is distinct from the active-tab conversion shield. Pane-scoped sections bind to the source terminal selected when the action opens or retargets the singleton, because the statistics tab itself becomes active; relaunch reactivates that source before using the shared controller. The tab owns live backend/observer status, source grant provenance, effective profile, the bounded memory-only denied-access inbox, and profile editing. Settings retains sandbox configuration and the standard profile but no longer owns the Sandbox access page.
 
 Statistics remain product state, not telemetry: no durable denial counters, time series, rankings, export, cloud logging, PTY bytes, argv, environment, command text, or secrets.
 
@@ -27,9 +27,9 @@ Statistics remain product state, not telemetry: no durable denial counters, time
 - Shield and `/sandbox` share one conversion state machine and in-flight guard.
 - `/sandbox` has no path or policy arguments; one-launch narrowing stays in the native-picker permissions dialog.
 - `workspaces.payload` gains a typed reader/writer that preserves unrelated keys and uses the existing content writer goroutine.
-- Open requests carry the profile revision displayed by the dialog; the backend re-resolves pane → workspace and refuses stale revisions before process start.
-- Grant payloads gain backward-tolerant workspace/profile provenance.
-- Access events gain backend-owned pane/workspace provenance in their explicit PrivateMetadata list result; change notifications remain path-free.
+- Open requests always carry the displayed settings revision and carry a workspace profile revision only for an explicit workspace source; the backend re-resolves pane → workspace and refuses either stale revision before process start.
+- Grant payloads gain backward-tolerant workspace/profile provenance and record the effective settings/workspace profile revision; only legacy grants have no revision.
+- Access events gain backend-owned pane/workspace provenance in their explicit PrivateMetadata list result; change notifications remain path-free. Resolve decisions are `dismiss`, `workspaceReadOnly`, or `workspaceReadWrite` and cannot redirect the backend-owned target.
 - Named workspace profiles replace rather than merge the standard profile. Absence is the only inheritance state.
 - Running sandbox panes remain non-restorable and immutable. A profile change is applied only by an explicitly confirmed relaunch.
 

@@ -202,6 +202,7 @@ describe('sandboxed session launch', () => {
   const sandboxRequest = {
     workspace: '/w',
     settingsRevision: 0,
+    profileRevision: null,
     addWritable: [],
     removeWritable: [],
     addReadOnly: [],

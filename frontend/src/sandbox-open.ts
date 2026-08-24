@@ -15,6 +15,13 @@ import type {
 export interface SandboxOpenFlowDeps {
   /** One fresh settings snapshot (revision + values), read after the action. */
   getSnapshot(): Promise<{ values: Record<string, unknown>; revision: number }>
+  /** Effective profile resolved by the backend from the source pane. */
+  getProfile(paneId: string): Promise<{
+    source: 'standard' | 'workspace'
+    revision: number
+    writablePaths: string[]
+    readOnlyPaths: string[]
+  }>
   /** The native folder picker for the workspace and for ephemeral additions. */
   openDirectory(): Promise<{ path: string }>
   /** The permission dialog. Resolves to deltas, or null when cancelled. */
@@ -39,18 +46,13 @@ export const SANDBOX_READ_ONLY_PATHS_KEY = 'sandbox.allowedReadOnlyPaths'
  */
 export async function openSandboxedShell(
   deps: SandboxOpenFlowDeps,
-  options?: { workspace?: string },
+  options: { workspace?: string; paneId: string },
 ): Promise<void> {
   try {
     const snap = await deps.getSnapshot()
-    const rawWritable = snap.values[SANDBOX_WRITABLE_PATHS_KEY]
-    const rawReadOnly = snap.values[SANDBOX_READ_ONLY_PATHS_KEY]
-    const baselineWritable = Array.isArray(rawWritable)
-      ? rawWritable.filter((x): x is string => typeof x === 'string')
-      : []
-    const baselineReadOnly = Array.isArray(rawReadOnly)
-      ? rawReadOnly.filter((x): x is string => typeof x === 'string')
-      : []
+    const profile = await deps.getProfile(options.paneId)
+    const baselineWritable = [...profile.writablePaths]
+    const baselineReadOnly = [...profile.readOnlyPaths]
 
     const workspace = options?.workspace ?? (await deps.openDirectory()).path
     if (!workspace) return
@@ -65,6 +67,7 @@ export async function openSandboxedShell(
 
     deps.newSandboxedTab(workspace, {
       settingsRevision: snap.revision,
+      profileRevision: profile.source === 'workspace' ? profile.revision : null,
       addWritable: result.addWritable,
       removeWritable: result.removeWritable,
       addReadOnly: result.addReadOnly,

@@ -2247,6 +2247,7 @@ describe('newSandboxedPane', () => {
     const { manager } = await mountPaneManager(client)
     const launch = {
       settingsRevision: 1,
+      profileRevision: null,
       addWritable: ['/a'],
       removeWritable: ['/b'],
       addReadOnly: ['/r1'],
@@ -2266,6 +2267,7 @@ describe('newSandboxedPane', () => {
       {
         workspace: '/w',
         settingsRevision: 1,
+        profileRevision: null,
         addWritable: ['/a'],
         removeWritable: ['/b'],
         addReadOnly: ['/r1'],

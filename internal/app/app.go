@@ -669,7 +669,10 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
-	accessInbox.SetGrantStore(sandboxGrantStore{registry: settingsRegistry})
+	accessInbox.SetGrantStore(sandboxGrantStore{
+		registry: settingsRegistry,
+		layout:   func() sandboxWorkspaceProfiles { return contentDB.Layout() },
+	})
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -2424,17 +2427,93 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 	}, adapter, nil
 }
 
-type sandboxGrantStore struct {
-	registry *settings.Registry
+type sandboxSettingsStore interface {
+	AppendSandboxPath(profile *settings.PathList, path string) (int, error)
+	GetSnapshot() (settings.SettingsSnapshot, error)
 }
 
-func (s sandboxGrantStore) AppendSandboxPath(access sandbox.AccessClass, path string) (int, error) {
-	switch access {
-	case sandbox.AccessReadOnly:
-		return s.registry.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, path)
-	case sandbox.AccessReadWrite:
-		return s.registry.AppendSandboxPath(settings.SandboxAllowedWritablePaths, path)
-	default:
-		return 0, sandbox.ErrInvalidAccessDecision
+type sandboxWorkspaceProfiles interface {
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*content.WorkspaceSandboxProfile, error)
+	SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile content.WorkspaceSandboxProfile) (int64, error)
+}
+
+type sandboxGrantStore struct {
+	registry sandboxSettingsStore
+	layout   func() sandboxWorkspaceProfiles
+}
+
+func (s sandboxGrantStore) PromoteSandboxPath(workspaceID string, access sandbox.AccessClass, path string) (int64, error) {
+	if workspaceID == content.DefaultWorkspaceID {
+		var (
+			revision int
+			err      error
+		)
+		switch access {
+		case sandbox.AccessReadOnly:
+			revision, err = s.registry.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, path)
+		case sandbox.AccessReadWrite:
+			revision, err = s.registry.AppendSandboxPath(settings.SandboxAllowedWritablePaths, path)
+		default:
+			return 0, sandbox.ErrInvalidAccessDecision
+		}
+		return int64(revision), err
 	}
+	if s.layout == nil {
+		return 0, sandbox.ErrAccessGrantUnavailable
+	}
+	layout := s.layout()
+	for range 3 {
+		profile, err := layout.WorkspaceSandboxProfile(context.Background(), workspaceID)
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		var expected int64
+		if profile == nil {
+			profile, err = s.standardSandboxProfile()
+			if err != nil {
+				return 0, sandbox.ErrAccessGrantUnavailable
+			}
+		} else {
+			expected = profile.Revision
+		}
+		switch access {
+		case sandbox.AccessReadOnly:
+			profile.ReadOnlyPaths = append(profile.ReadOnlyPaths, path)
+		case sandbox.AccessReadWrite:
+			profile.WritablePaths = append(profile.WritablePaths, path)
+		default:
+			return 0, sandbox.ErrInvalidAccessDecision
+		}
+		profile.WritablePaths, profile.ReadOnlyPaths, err = settings.CanonicalizeSandboxProfile(
+			profile.WritablePaths, profile.ReadOnlyPaths,
+		)
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		revision, err := layout.SetWorkspaceSandboxProfile(context.Background(), workspaceID, expected, *profile)
+		if errors.Is(err, content.ErrSandboxProfileRevision) {
+			continue
+		}
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		return revision, nil
+	}
+	return 0, sandbox.ErrAccessGrantUnavailable
+}
+
+func (s sandboxGrantStore) standardSandboxProfile() (*content.WorkspaceSandboxProfile, error) {
+	snapshot, err := s.registry.GetSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	writable, readOnly, err := settings.SandboxProfileFromSnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return &content.WorkspaceSandboxProfile{
+		SchemaVersion: 1,
+		WritablePaths: writable,
+		ReadOnlyPaths: readOnly,
+	}, nil
 }

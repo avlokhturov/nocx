@@ -68,6 +68,7 @@ import {
   type HostKeyErrorEvidence,
   type PaneIdentity,
 } from './terminal-content'
+import type { InternalCommandOutcome } from './sandbox-command'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -707,6 +708,9 @@ export class PaneManager {
    *  the acceptance it delegates (design §10.2). Set once by the
    *  composition root; handed to each TerminalContent as it is built. */
   snippets?: SnippetProviderDeps
+  /** The typed `/sandbox` command seam, forwarded to every pane's editor.
+   *  Wired by main.tsx to the shared conversion controller's runCommand. */
+  sandboxCommand?: (doc: string) => InternalCommandOutcome
   onSnippetAccepted?: (snippetId: string) => void
 
   constructor(
@@ -1023,6 +1027,7 @@ export class PaneManager {
     const request: SandboxRequest = {
       workspace,
       settingsRevision: launch.settingsRevision,
+      profileRevision: launch.profileRevision,
       addWritable: [...launch.addWritable],
       removeWritable: [...launch.removeWritable],
       addReadOnly: [...launch.addReadOnly],
@@ -1069,6 +1074,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        sandboxCommand: this.sandboxCommand,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         sandbox,
         initialCwd,
@@ -1168,6 +1174,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        sandboxCommand: this.sandboxCommand,
       },
     )
     const descriptor: ContentDescriptor = {
@@ -2087,6 +2094,16 @@ export class PaneManager {
   /** Whether the active renderer pane is confirmed filesystem-sandboxed. */
   activePaneSandboxed(): boolean {
     return this.activePane?.sandboxed === true
+  }
+  /** Durable backend pane identity for explicit pane-scoped RPC reads. */
+  activePaneWireId(): string | null {
+    return this.activePane?.wireId ?? null
+  }
+  async activatePaneByWireId(paneId: string): Promise<boolean> {
+    const pane = this.panes.find((candidate) => candidate.wireId === paneId)
+    if (!pane) return false
+    await this.activate(pane)
+    return true
   }
 
   /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer

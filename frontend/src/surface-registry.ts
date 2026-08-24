@@ -17,6 +17,7 @@ import type { PaneContent, ContentDescriptor, SurfaceType, SingletonKey } from '
 // build() where it cannot.
 
 export const SURFACE_ID_SETTINGS = 'settings'
+export const SURFACE_ID_SANDBOX_STATISTICS = 'sandbox-statistics'
 
 // ── Registration ──────────────────────────────────────────────────────────
 

@@ -18,7 +18,6 @@ import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
-import type { SandboxAccessClient } from './sandbox-access-settings'
 import type { AboutClient } from './about-client'
 import type { ClipboardAccess } from './clipboard'
 
@@ -50,7 +49,6 @@ export class SettingsContent extends SolidPaneContent {
      *  retention age and a two-number budget that govern nothing when the
      *  store never opened. */
     private readonly historyStatus?: HistoryStatusStore,
-    private readonly sandboxAccessClient?: SandboxAccessClient,
     private readonly aboutClient?: AboutClient,
     private readonly clipboard?: ClipboardAccess,
   ) {
@@ -72,7 +70,6 @@ export class SettingsContent extends SolidPaneContent {
           historyStatus: this.historyStatus,
           aboutClient: this.aboutClient,
           clipboard: this.clipboard,
-          sandboxAccessClient: this.sandboxAccessClient,
           observer: this.observer,
           onConnect: (profile: SSHProfile) => {
             this.onConnect?.(profile)

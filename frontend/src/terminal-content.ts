@@ -39,6 +39,7 @@ import {
   isSubmitFailure,
   type SubmitPlan,
 } from './submit'
+import type { InternalCommandOutcome } from './sandbox-command'
 import { secretChipExtension } from './secret-chip'
 import { secretCandidateExtension } from './secret-candidate'
 import { unresolvedRedactionField } from './unresolved-redactions'
@@ -314,6 +315,10 @@ export interface TerminalContentHooks {
    *  endpoint editor so the refusal comes with its repair — wired by
    *  main.tsx to the Settings tab's Endpoints page. */
   onCreateEndpoint?: () => void
+  /** The typed `/sandbox` command seam — wired by main.tsx to the shared
+   *  conversion controller's `runCommand`. Absent in tests and any host that
+   *  does not wire it: the editor then treats every line as ordinary input. */
+  sandboxCommand?: (doc: string) => InternalCommandOutcome
   /** Backend-authorized filesystem sandbox request for this local pane. */
   sandbox?: SandboxRequest
   /** Verified cwd for a replacement local shell; empty uses backend default. */
@@ -1506,6 +1511,15 @@ export class TerminalContent extends BasePaneContent {
           // an ordinary Enter keeps its no-gap atomic handoff. A recalled
           // masked row is refused first: the draft stays and resolution
           // opens on the first chip (ADR-0021's consequence).
+          // The typed `/sandbox` command is recognized BEFORE any secret
+          // resolution (design §5.1): it is a nocx command, not shell input,
+          // and a consumed one must produce no PTY bytes, history, or ledger.
+          // The hook is the shared controller's runCommand; unwired (tests,
+          // any pane built before main wires it) it is a notHandled no-op.
+          internalCommand: (doc) =>
+            this.inputTargets?.active().routesToShell
+              ? (this.hooks.sandboxCommand?.(doc) ?? { kind: 'notHandled' })
+              : { kind: 'notHandled' },
           beforeSubmit: (doc) => {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)

@@ -93,6 +93,8 @@ Selected storage approach: workspace payload JSON. Normalized profile/path table
 
 `profileSource` is `standard` or `workspace`. Decoding first inspects the top-level `realized` member: when present, decode the envelope strictly; when absent, decode the whole object as legacy `SessionInfo`. A legacy result exposes realized roots but sets provenance to `{profileSource: "legacy", profileRevision: null}`. The statistics tab labels it `Legacy grant — profile provenance unavailable` and offers no profile-staleness relaunch decision. Entry-point names are not persisted: shield and `/sandbox` mint identical authority, and recording UI behavior would add data without changing enforcement.
 
+A newly written standard grant stores the settings revision it realized; a workspace grant stores its per-workspace revision. Only legacy grants report a null revision, so the statistics surface can detect stale grants for either current profile source.
+
 ## 4. Backend seams
 
 ### 4.1 Repository
@@ -245,24 +247,26 @@ The existing top-zone shield remains the apply/remove action for the active term
 
 The singleton tab contains four sections:
 
+Because opening a tab makes the statistics surface itself active, pane-scoped sections bind to the source terminal selected immediately before the activity-bar action. Activating the singleton again from another terminal retargets that same tab. Switching to another terminal hides statistics, so no stale context is visible. Relaunch first activates the bound source pane, waits for its activation callback, and then invokes the pane-checked conversion controller.
+
 1. **Enforcement** — backend, available/unavailable reason, ABI, observer state.
-2. **Active tab** — ordinary/sandboxed, grant issue time, workspace, profile source/revision, realized RO/RW/projection counts and explicit root lists.
+2. **Source tab** — ordinary/sandboxed, grant issue time, workspace, profile source/revision, realized RO/RW/projection counts and explicit root lists.
 3. **Workspace profile** — inherited standard or explicit workspace profile, edit action, stale/relaunch notice. Editing affects future grants only.
 4. **Denied access** — the existing bounded inbox, lost counter, filter, dismiss, add read-only, and add read/write actions.
 
 State table:
 
-| State                             | Rendering                                                                            |
-| --------------------------------- | ------------------------------------------------------------------------------------ |
-| loading                           | existing `EmptyState` loading treatment                                              |
-| backend unavailable               | persistent `StatusCard` with safe reason/detail; inbox may still render if available |
-| no active terminal                | active-tab section explains selection requirement; global status/inbox remain usable |
-| ordinary active tab               | effective profile shown; no grant section                                            |
-| sandbox active tab                | realized grant and provenance shown                                                  |
-| profile revision newer than grant | `Relaunch to use updated profile`; action delegates to shared conversion controller  |
-| inbox empty                       | existing empty collection treatment                                                  |
-| inbox lost > 0                    | persistent warning, not toast                                                        |
-| RPC failure                       | section-local retry; other sections remain usable                                    |
+| State                             | Rendering                                                                                |
+| --------------------------------- | ---------------------------------------------------------------------------------------- |
+| loading                           | existing `EmptyState` loading treatment                                                  |
+| backend unavailable               | persistent `StatusCard` with safe reason/detail; inbox may still render if available     |
+| no bound terminal                 | source-tab section explains selection requirement; global status/inbox remain usable     |
+| ordinary source tab               | effective profile shown; no grant section                                                |
+| sandbox source tab                | realized grant and provenance shown                                                      |
+| profile revision newer than grant | `Relaunch to use updated profile`; activates source, then delegates to shared controller |
+| inbox empty                       | existing empty collection treatment                                                      |
+| inbox lost > 0                    | persistent warning, not toast                                                            |
+| RPC failure                       | section-local retry; other sections remain usable                                        |
 
 Accessibility:
 
@@ -292,10 +296,9 @@ The default workspace has no visible workspace chrome; its standard profile rema
 ## 8. Failure and concurrency rules
 
 - Profile reads may use the read pool. Every profile mutation runs through the content writer goroutine and opens one SQL transaction; inside it the repository reads the current payload, checks `expectedRevision`, replaces only `sandboxProfile` in the decoded object, and updates the row. `sqliteContent.run` supplies writer ordering; the transaction supplies atomic read-modify-write.
-- Grant insertion/rollback and startup sweep remain unchanged.
-- A profile edit racing a launch causes revision refusal before process start.
-- A tab move racing a launch is caught by re-resolving pane → workspace before grant insertion.
-- Promotion takes no renderer-supplied expected revision. Inside one serialized writer transaction it reads the latest workspace payload (or snapshots the latest standard profile for copy-on-write), appends the validated path, increments revision, and writes. A concurrent user edit is ordered before or after that whole transaction, so neither update is lost and no retry/backoff loop exists.
+- Immediately before helper start, issuance calls `settings.Registry.WithSnapshot` with the displayed settings revision. While that settings snapshot is locked, `InsertSandboxGrantIfCurrent` enters the content writer transaction, re-resolves the open pane's workspace, rechecks whether the workspace profile is absent or at the expected revision, and inserts the provisional grant. A tab move, standard-profile edit, workspace-profile edit/delete, duplicate launch, or pane close therefore refuses before process start; the check and insert cannot separate.
+- Grant rollback after start/readiness failure and startup sweep remain unchanged.
+- Promotion takes no renderer-supplied expected revision. For a named workspace, the application service reads the latest explicit profile or snapshots the standard profile for copy-on-write, appends and canonicalizes the path, then uses the repository's expected-revision compare-and-set. A concurrent profile edit causes a bounded retry from a fresh read; after three lost races the promotion refuses without resolving the event. Every individual write remains a serialized SQL transaction, so no partial profile is visible and neither successful update is lost.
 - Closing/deleting a workspace invalidates later promotion for its stale events.
 - Statistics RPC failures do not disable enforcement or widen policy.
 

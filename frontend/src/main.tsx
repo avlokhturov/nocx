@@ -11,7 +11,7 @@ import App from './App'
 import { log } from './log'
 import { installBrowserTransport } from './wails-runtime'
 import { WSClient, type SandboxStatus } from './ipc'
-import { openSandboxedShell } from './sandbox-open'
+import { createSandboxConvertController } from './sandbox-convert'
 import { shieldState } from './sandbox-shield'
 import { showSandboxPermissions } from './sandbox-permissions-dialog'
 import { LayoutStore } from './layout/layout-store'
@@ -30,16 +30,25 @@ import type { ConnectionsPasswordRequest } from './generated/connections.passwor
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import {
+  SandboxStatisticsContent,
+  SINGLETON_SANDBOX_STATISTICS,
+  SURFACE_SANDBOX_STATISTICS,
+} from './sandbox-statistics-content'
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
-import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import {
+  SurfaceRegistry,
+  SURFACE_ID_SETTINGS,
+  SURFACE_ID_SANDBOX_STATISTICS,
+} from './surface-registry'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, ShieldIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SandboxReportIcon, SettingsIcon, ShieldIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -379,6 +388,8 @@ async function main() {
   // the same surface) reaches a screen that is already on the section.
   const historyStatusStore = new HistoryStatusStore(client)
   historyStatusStore.start()
+  const [sandboxStatisticsPaneId, setSandboxStatisticsPaneId] = createSignal<string | null>(null)
+  let relaunchSandbox: (paneId: string) => Promise<void> = async () => {}
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -398,7 +409,6 @@ async function main() {
         agentClient,
         snippetsStore,
         historyStatusStore,
-        client,
         aboutClient,
         clipboard,
       )
@@ -423,6 +433,24 @@ async function main() {
       restoreDescriptor: null,
       supportsAttention: false,
       defaultTitle: 'Settings',
+    },
+  })
+  registry.register(SURFACE_ID_SANDBOX_STATISTICS, {
+    surfaceType: SURFACE_SANDBOX_STATISTICS,
+    singletonKey: SINGLETON_SANDBOX_STATISTICS,
+    factory: () =>
+      new SandboxStatisticsContent(client, {
+        activePaneId: () => sandboxStatisticsPaneId(),
+        relaunch: () => {
+          const paneId = sandboxStatisticsPaneId()
+          if (paneId) void relaunchSandbox(paneId)
+        },
+        openDirectory: () => dialogClient.openDirectoryDialog(),
+      }),
+    descriptor: {
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Sandbox',
     },
   })
 
@@ -683,6 +711,17 @@ async function main() {
     }
     return live
   }
+  function openSandboxStatisticsPane(): SandboxStatisticsContent {
+    if (tm.activeOrigin() !== null) {
+      setSandboxStatisticsPaneId(tm.activePaneWireId())
+    }
+    const { content, descriptor } = registry.build(SURFACE_ID_SANDBOX_STATISTICS)
+    const live = tm.openPane(content, descriptor).content
+    if (!(live instanceof SandboxStatisticsContent)) {
+      throw new Error('nocx: the Sandbox singleton is not a SandboxStatisticsContent')
+    }
+    return live
+  }
 
   // The sidebar width controller (nocx-qmcu): the single owner of the
   // panel's width between the drag handle, the settings observer and the
@@ -809,12 +848,21 @@ async function main() {
   // by their order field — the field then means what it says, and a future
   // view cannot slip in front by registration order. Files registers below
   // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
-  // zone — an owner requirement, asserted here and in files-view.test.tsx.
   const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,
     sidebarViews,
     /* actions */ [
+      {
+        id: 'sandbox-statistics',
+        title: 'Sandbox statistics',
+        icon: SandboxReportIcon,
+        selected: () => activeSurfaceType() === SURFACE_SANDBOX_STATISTICS,
+        onActivate: () => {
+          log.info('nocx: opening Sandbox statistics tab')
+          openSandboxStatisticsPane()
+        },
+      },
       {
         id: 'settings',
         title: 'Settings',
@@ -846,7 +894,9 @@ async function main() {
     () => portsTargetId(),
     () => activeOrigin(),
     sidebarWidthCtrl,
-    () => activeSurfaceType() === SURFACE_SETTINGS,
+    () =>
+      activeSurfaceType() === SURFACE_SETTINGS ||
+      activeSurfaceType() === SURFACE_SANDBOX_STATISTICS,
     [
       {
         id: 'sandbox-shield',
@@ -1025,95 +1075,38 @@ async function main() {
     showToast({ level: 'danger', message: 'Could not convert this tab: replacement shell failed' })
   }
 
-  convertActiveTabToSandboxed = async (): Promise<void> => {
-    if (sandboxConversionInFlight()) return
-    const ready = currentShieldState()
-    if (ready.kind !== 'ready') return
-    const source = tm.activeOrigin()
-    const oldPane = source ? tm.paneOf(source.paneId) : undefined
-    if (!source || !oldPane || !tm.tabOf(source.paneId)) return
-
-    setSandboxConversionInFlight(true)
-    let conversionContinues = false
-    try {
-      if (ready.action === 'remove') {
-        const transcript = tm.captureConversionTranscript(oldPane.id)
-        const made = tm.newLocalPaneAt(ready.workspace)
-        const created = await made.created
-        const installed =
-          created &&
-          (await tm.installConversionTranscript(
-            made.pane.id,
-            transcript,
-            'Sandbox removed — new shell',
-          ))
-        if (!installed) {
-          if (created) {
-            void tm.closePane(made.pane)
-            reportSandboxConversionError()
-          }
-          return
-        }
-        tm.replaceTabPosition(oldPane.id, made.pane.id)
-        void tm.closePane(oldPane)
-        return
-      }
-
-      let state: { enabled: boolean; status: SandboxStatus | null }
-      try {
-        state = await getSandboxState()
-      } catch (err) {
-        reportSandboxOpenError(err instanceof Error ? err.message : 'sandbox status unavailable')
-        return
-      }
-      if (!state.enabled) return
-      if (!state.status?.available) {
-        reportSandboxOpenError(
-          `Sandbox unavailable (${state.status?.reason || 'status-unavailable'})`,
-        )
-        return
-      }
-      await openSandboxedShell(
-        {
-          getSnapshot: () => profileClient.getSnapshot(),
-          openDirectory: () => dialogClient.openDirectoryDialog(),
-          showPermissions: showSandboxPermissions,
-          newSandboxedTab: (_workspace, launch) => {
-            conversionContinues = true
-            const transcript = tm.captureConversionTranscript(oldPane.id)
-            const made = tm.newSandboxedPane(ready.workspace, launch)
-            void (async () => {
-              try {
-                const created = await made.created
-                const installed =
-                  created &&
-                  (await tm.installConversionTranscript(
-                    made.pane.id,
-                    transcript,
-                    'Sandbox enabled — new shell',
-                  ))
-                if (!installed) {
-                  if (created) {
-                    void tm.closePane(made.pane)
-                    reportSandboxConversionError()
-                  }
-                  return
-                }
-                tm.replaceTabPosition(oldPane.id, made.pane.id)
-                void tm.closePane(oldPane)
-              } finally {
-                setSandboxConversionInFlight(false)
-              }
-            })()
-          },
-          reportError: reportSandboxOpenError,
-        },
-        { workspace: ready.workspace },
-      )
-    } finally {
-      if (!conversionContinues) setSandboxConversionInFlight(false)
+  // The ONE conversion controller (design §5.2): the sidebar shield and the
+  // typed `/sandbox` command both call it, and the statistics tab's future
+  // relaunch reuses `toggle`. The shared in-flight guard is the same signal
+  // the shield reads for its disabled state above.
+  const sandboxConvert = createSandboxConvertController({
+    shieldInput: () => ({
+      enabled: sandboxEnabledLive(),
+      status: sandboxStatus(),
+      origin: activeOrigin(),
+      sandboxed: activeSandboxed(),
+    }),
+    inFlight: () => sandboxConversionInFlight(),
+    setInFlight: setSandboxConversionInFlight,
+    paneManager: tm,
+    getSandboxState,
+    getSnapshot: () => profileClient.getSnapshot(),
+    getProfile: (paneId) => client.sandboxProfileGet(paneId),
+    openDirectory: () => dialogClient.openDirectoryDialog(),
+    showPermissions: showSandboxPermissions,
+    reportOpenError: reportSandboxOpenError,
+    reportConversionError: reportSandboxConversionError,
+    reportRefusal: (message) => showToast({ message, level: 'warning' }),
+  })
+  relaunchSandbox = async (paneId) => {
+    if (await tm.activatePaneByWireId(paneId)) {
+      await sandboxConvert.relaunch()
     }
   }
+  convertActiveTabToSandboxed = () => sandboxConvert.toggle()
+  // The `/sandbox` command seam, forwarded through PaneManager to every
+  // pane's editor. Set before openInitialPane() so restored panes carry it.
+  tm.sandboxCommand = (doc) => sandboxConvert.runCommand(doc)
 
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(

@@ -28,7 +28,6 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
-import { SandboxAccessSettings, type SandboxAccessClient } from './sandbox-access-settings'
 import { classConflict } from './sandbox-path-classes'
 import { SANDBOX_READ_ONLY_PATHS_KEY, SANDBOX_WRITABLE_PATHS_KEY } from './sandbox-open'
 import type { SnippetsStore } from './snippets/snippets-store'
@@ -187,7 +186,6 @@ export interface SettingsComponentProps {
    *  exist survives a release. Absent in an embedding with no backend; the
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
-  sandboxAccessClient?: SandboxAccessClient
   aboutClient?: AboutClient
   clipboard?: ClipboardAccess
   ref?: { current: SettingsComponentHandle | null }
@@ -533,14 +531,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
-    const sandboxAccessPage: SettingsPage = {
-      kind: 'component',
-      id: 'sandbox-access',
-      title: 'Sandbox access',
-      groupId: 'developer',
-      scrollMode: 'page',
-      renderContent: () => <SandboxAccessSettings client={props.sandboxAccessClient} />,
-    }
     const aboutPage: SettingsPage = {
       kind: 'component',
       id: 'about',
@@ -567,7 +557,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       endpointsPage,
       snippetsPage,
       aboutPage,
-      sandboxAccessPage,
     ]
   })
 

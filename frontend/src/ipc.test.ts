@@ -463,6 +463,7 @@ describe('openSandboxedSession', () => {
       {
         workspace: '/workspace',
         settingsRevision: 7,
+        profileRevision: null,
         addWritable: ['/d'],
         removeWritable: ['/b'],
         addReadOnly: ['/r'],
@@ -485,6 +486,7 @@ describe('openSandboxedSession', () => {
       sandbox: {
         workspace: '/workspace',
         settingsRevision: 7,
+        profileRevision: null,
         addWritable: ['/d'],
         removeWritable: ['/b'],
         addReadOnly: ['/r'],
@@ -506,6 +508,7 @@ describe('openSandboxedSession', () => {
       {
         workspace: '/workspace',
         settingsRevision: 0,
+        profileRevision: null,
         addWritable: [],
         removeWritable: [],
         addReadOnly: [],
@@ -521,7 +524,7 @@ describe('openSandboxedSession', () => {
       xpixel: 0,
       ypixel: 0,
       paneId: PANE,
-      sandbox: { workspace: '/workspace', settingsRevision: 0 },
+      sandbox: { workspace: '/workspace', settingsRevision: 0, profileRevision: null },
     })
   })
 })

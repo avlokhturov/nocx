@@ -10,6 +10,8 @@ import { test, expect } from './harness'
 
 const PALETTE_MOD = process.platform === 'darwin' ? 'Meta' : 'Control'
 const SHIELD = '[data-testid="sandbox-shield"]'
+const STATISTICS = '[data-action="sandbox-statistics"]'
+const EDITOR = '.pane.active .nocx-editor-input'
 
 async function openSettings(page: Page): Promise<void> {
   await page.keyboard.press(`${PALETTE_MOD}+,`)
@@ -53,6 +55,23 @@ test.describe('sandbox shield', () => {
     await expect(page.getByText('Sandboxed shell…', { exact: true })).toHaveCount(0)
   })
 
+  test('statistics is a singleton tab and Sandbox access is no longer in Settings', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await expect(page.getByRole('tab')).toHaveCount(1, { timeout: 20_000 })
+    await openSettings(page)
+    await expect(page.getByText('Sandbox access', { exact: true })).toHaveCount(0)
+    await page.getByRole('tab').first().click()
+
+    const before = await page.getByRole('tab').count()
+    await page.locator(STATISTICS).click()
+    await expect(page.getByRole('tab')).toHaveCount(before + 1)
+    await expect(page.getByRole('heading', { name: 'Enforcement status' })).toBeVisible()
+    await page.locator(STATISTICS).click()
+    await expect(page.getByRole('tab')).toHaveCount(before + 1)
+  })
+
   test('flag on exposes exactly one shield and never restores palette or More-menu launch', async ({
     page,
   }) => {
@@ -80,9 +99,11 @@ test.describe('sandbox shield', () => {
 
     if (await shield.isEnabled()) {
       const before = await page.getByRole('tab').count()
-      await shield.click()
+      await page.locator(EDITOR).fill('/sandbox')
+      await page.keyboard.press('Enter')
       await expect(page.getByRole('heading', { name: 'Sandbox permissions' })).toBeVisible()
       await page.getByRole('button', { name: 'Open sandboxed tab' }).click()
+      await expect(page.locator('.cmd-block', { hasText: '/sandbox' })).toHaveCount(0)
       await expect(page.getByRole('tab')).toHaveCount(before)
       const selected = page.getByRole('tab', { selected: true })
       await expect(selected.locator('.nocx-tab-line > :first-child')).toHaveClass(
@@ -92,7 +113,8 @@ test.describe('sandbox shield', () => {
       await expect(shield).toHaveAttribute('aria-selected', 'true')
       await expect(shield).toHaveAttribute('title', /Remove sandbox from this tab/)
 
-      await shield.click()
+      await page.locator(EDITOR).fill('/sandbox')
+      await page.keyboard.press('Enter')
       await expect(page.getByRole('tab')).toHaveCount(before)
       await expect(
         page.getByRole('tab', { selected: true }).locator('.nocx-tab-sandboxed-marker'),

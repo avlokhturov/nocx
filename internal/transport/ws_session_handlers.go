@@ -126,8 +126,9 @@ type openHandlers struct {
 // realized grant before native enforcement starts.
 type paneWorkspaces interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*content.WorkspaceSandboxProfile, error)
 	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
-	InsertSandboxGrant(ctx context.Context, grant content.SandboxGrant) error
+	InsertSandboxGrantIfCurrent(ctx context.Context, grant content.SandboxGrant, expectation content.SandboxGrantExpectation) error
 	RemoveSandboxGrant(ctx context.Context, paneID string) error
 }
 
@@ -247,6 +248,14 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 		})
 		return
 	}
+	if errors.Is(err, content.ErrSandboxGrantStale) ||
+		errors.Is(err, content.ErrNoSuchPane) ||
+		errors.Is(err, settings.ErrRevisionMismatch) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: sandbox context changed before launch",
+		})
+		return
+	}
 	var statusErr *sandbox.StatusError
 	if errors.As(err, &statusErr) {
 		h.log.Warn("sandbox backend unavailable",
@@ -357,6 +366,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	var sandboxReq *sandbox.Request
+	var effProfile effectiveSandboxProfile
 	if params.Sandbox != nil {
 		if params.Kind == "ssh" || params.ProfileID != "" || params.Host != "" {
 			_ = r.TryError(req.ID, RPCError{
@@ -394,15 +404,6 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			})
 			return
 		}
-		globalWritable, globalReadOnly, baselineErr := sandboxBaselines(snap)
-		if baselineErr != nil {
-			h.log.Error("sandbox setup failed", "reason", "setup-failed")
-			_ = r.TryError(req.ID, RPCError{
-				Code: -32007, Message: "sandbox setup failed",
-				Data: map[string]any{"reason": "setup-failed"},
-			})
-			return
-		}
 		workspacePath, workspaceErr := sandbox.CanonicalizeWorkspace(params.Sandbox.Workspace)
 		if workspaceErr != nil {
 			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
@@ -432,14 +433,36 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 			})
 			return
 		}
+		// Resolve the effective profile and gate the displayed revision
+		// (design 2026-08-23 §4.3). The backend derives the source from
+		// pane → workspace; a standard-source launch must carry
+		// profileRevision null, a workspace-source launch the exact
+		// per-workspace revision. A workspace profile replaces the standard
+		// roots rather than merging with them.
+		eff, profileErr := resolveEffectiveSandboxProfile(ctx, h.panes, snap, workspaceID)
+		if profileErr != nil {
+			h.log.Error("sandbox setup failed", "reason", "setup-failed")
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32007, Message: "sandbox setup failed",
+				Data: map[string]any{"reason": "setup-failed"},
+			})
+			return
+		}
+		if revErr := checkSandboxProfileRevision(params.Sandbox.ProfileRevision, eff); revErr != nil {
+			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + revErr.Error()})
+			return
+		}
+		effProfile = eff
 		sandboxReq = &sandbox.Request{
 			Workspace:      workspacePath,
-			GlobalWritable: globalWritable,
-			GlobalReadOnly: globalReadOnly,
+			GlobalWritable: eff.WritablePaths,
+			GlobalReadOnly: eff.ReadOnlyPaths,
 			AddWritable:    params.Sandbox.AddWritable,
 			RemoveWritable: params.Sandbox.RemoveWritable,
 			AddReadOnly:    params.Sandbox.AddReadOnly,
 			RemoveReadOnly: params.Sandbox.RemoveReadOnly,
+			PaneID:         params.PaneID,
+			WorkspaceID:    workspaceID,
 		}
 	}
 
@@ -492,13 +515,31 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 				ReadOnlyRoots:   append([]string(nil), prepared.Policy.ReadOnlyRoots...),
 				HomeProjections: append([]sandbox.HomeProjection(nil), prepared.Policy.HomeProjections...),
 			}
-			payload, marshalErr := json.Marshal(info)
+			profileRevision := effProfile.Revision
+			payload, marshalErr := json.Marshal(sandbox.GrantPayload{
+				Realized: &info,
+				Provenance: &sandbox.GrantProvenance{
+					WorkspaceID:     workspaceID,
+					ProfileSource:   effProfile.Source,
+					ProfileRevision: &profileRevision,
+				},
+			})
 			if marshalErr != nil {
 				return marshalErr
 			}
-			return h.panes.InsertSandboxGrant(ctx, content.SandboxGrant{
-				PaneID: params.PaneID, Version: 1, IssuedAt: time.Now().UnixMilli(),
-				Workspace: sandboxReq.Workspace, Payload: string(payload),
+			var workspaceProfileRevision *int64
+			if effProfile.Source == sandbox.ProfileSourceWorkspace {
+				revision := effProfile.Revision
+				workspaceProfileRevision = &revision
+			}
+			return h.settings.WithSnapshot(params.Sandbox.SettingsRevision, func(_ settings.SettingsSnapshot) error {
+				return h.panes.InsertSandboxGrantIfCurrent(ctx, content.SandboxGrant{
+					PaneID: params.PaneID, Version: 1, IssuedAt: time.Now().UnixMilli(),
+					Workspace: sandboxReq.Workspace, Payload: string(payload),
+				}, content.SandboxGrantExpectation{
+					WorkspaceID:              workspaceID,
+					WorkspaceProfileRevision: workspaceProfileRevision,
+				})
 			})
 		}
 		cfg.SandboxStartFailed = func() error {
@@ -1488,6 +1529,16 @@ func decodeOpenSandbox(dec *json.Decoder) (*openSandboxParams, error) {
 					sb.SettingsRevision = *n
 				}
 			}
+		case "profileRevision":
+			var n *int64
+			err = dec.Decode(&n)
+			if err == nil {
+				if n != nil && *n < 0 {
+					err = errors.New("must be a non-negative integer or null")
+				} else {
+					sb.ProfileRevision = n
+				}
+			}
 		case "addWritable":
 			sb.AddWritable, err = decodeStringArray(dec)
 		case "removeWritable":
@@ -1554,25 +1605,5 @@ func decodeStringField(dec *json.Decoder) (string, error) {
 }
 
 func sandboxBaselines(snap settings.SettingsSnapshot) (writable, readOnly []string, err error) {
-	writable, err = sandboxPathList(snap, settings.SandboxAllowedWritablePaths.Key())
-	if err != nil {
-		return nil, nil, err
-	}
-	readOnly, err = sandboxPathList(snap, settings.SandboxAllowedReadOnlyPaths.Key())
-	if err != nil {
-		return nil, nil, err
-	}
-	return writable, readOnly, nil
-}
-
-func sandboxPathList(snap settings.SettingsSnapshot, key string) ([]string, error) {
-	raw, ok := snap.Values[key]
-	if !ok {
-		return nil, fmt.Errorf("%s missing from settings snapshot", key)
-	}
-	paths, ok := raw.([]string)
-	if !ok || len(paths) > maxSandboxPaths {
-		return nil, fmt.Errorf("%s is not a valid bounded path list", key)
-	}
-	return append([]string(nil), paths...), nil
+	return settings.SandboxProfileFromSnapshot(snap)
 }

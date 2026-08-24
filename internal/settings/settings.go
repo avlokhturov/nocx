@@ -863,33 +863,33 @@ var SandboxEnabled = MustRegisterBool(BoolSpec{
 	Key:         "sandbox.enabled",
 	Section:     "Experimental",
 	Label:       "Filesystem sandbox",
-	Description: "Expose the activity-bar shield beside Files that converts the active local tab into a filesystem-isolated sandbox (experimental). The action requires a verified current folder; the flag alone never sandboxes anything.",
+	Description: "Expose the activity-bar shield and /sandbox editor command that convert the active local tab into or out of a filesystem-isolated sandbox (experimental). Applying requires a verified current folder and explicit permission confirmation; the flag alone never sandboxes anything.",
 	DataClass:   PublicConfig,
 	Default:     false,
 })
 
-// SandboxAllowedWritablePaths is the persisted global baseline of additional
-// directories made read-write in each future sandbox conversion (ADR-0037
-// §3.1, ADR-0039 §3.1). The workspace is always writable; changes affect
-// future conversions only.
+// SandboxAllowedWritablePaths is the persisted STANDARD profile of additional
+// read-write directories. The default workspace and named workspaces without
+// an explicit profile inherit it whole; named profiles replace rather than
+// merge it. Changes affect future conversions only.
 var SandboxAllowedWritablePaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedWritablePaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read & write folders",
-	Description: "Additional folders available read/write in each future sandbox conversion. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The workspace is always read/write; changes affect future conversions only.",
+	Description: "Standard-profile folders available read/write to future sandbox conversions in the default workspace and named workspaces without an explicit profile. A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and receive exactly this read/write authority. The filesystem workspace is always read/write; changes never mutate running grants.",
 	DataClass:   PrivateMetadata,
 })
 
-// SandboxAllowedReadOnlyPaths is the persisted global baseline of additional
-// directories made read-only in each future sandbox conversion (ADR-0039
-// §3.1): their contents may be read and traversed, never created, removed,
-// renamed, or modified. The workspace is always read/write; changes affect
-// future conversions only.
+// SandboxAllowedReadOnlyPaths is the persisted STANDARD profile of additional
+// read-only directories. The default workspace and named workspaces without
+// an explicit profile inherit it whole; named profiles replace rather than
+// merge it. Contents may be read and traversed, never created, removed,
+// renamed, or modified. Changes affect future conversions only.
 var SandboxAllowedReadOnlyPaths = MustRegisterPathList(PathListSpec{
 	Key:         "sandbox.allowedReadOnlyPaths",
 	Section:     "Experimental",
 	Label:       "Sandbox read-only folders",
-	Description: "Additional folders available read-only in each future sandbox conversion (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. The workspace is always read/write; changes affect future conversions only.",
+	Description: "Standard-profile folders available read-only to future sandbox conversions in the default workspace and named workspaces without an explicit profile (their contents may be read, never created, removed, renamed, or modified). A folder strictly below host HOME also appears at its usual ~/… path; HOME and ancestor grants stay absolute-only. Projected folders can contain credentials and remain read-only. Changes never mutate running grants.",
 	DataClass:   PrivateMetadata,
 })
 
@@ -940,6 +940,9 @@ type SettingsSnapshot struct {
 	Overridden []string       `json:"overridden"`
 	Revision   int            `json:"revision"`
 }
+
+// ErrRevisionMismatch means a caller's displayed settings snapshot is stale.
+var ErrRevisionMismatch = errors.New("settings revision mismatch")
 
 // New creates a Registry backed by doc for non-secret values and secrets
 // for secret-class values. It loads any previously persisted state.
@@ -1325,6 +1328,23 @@ func (r *Registry) AppendSandboxPath(p *PathList, path string) (int, error) {
 func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.snapshotLocked(), nil
+}
+
+// WithSnapshot linearizes a revision check and a dependent write against all
+// settings mutations. fn runs while the registry mutex is held and MUST NOT
+// call back into Registry. Sandbox grant issuance uses it to keep the standard
+// profile snapshot unchanged until the pane grant is durably inserted.
+func (r *Registry) WithSnapshot(expectedRevision int, fn func(SettingsSnapshot) error) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.revision != expectedRevision {
+		return ErrRevisionMismatch
+	}
+	return fn(r.snapshotLocked())
+}
+
+func (r *Registry) snapshotLocked() SettingsSnapshot {
 	values := make(map[string]any, len(allDecls))
 	var overridden []string
 	for _, d := range allDecls {
@@ -1349,7 +1369,7 @@ func (r *Registry) GetSnapshot() (SettingsSnapshot, error) {
 		Values:     values,
 		Overridden: overridden,
 		Revision:   r.revision,
-	}, nil
+	}
 }
 
 // PendingNotification is an opaque notification produced by a successful
@@ -2040,6 +2060,7 @@ func checkSandboxPathConflict(key string, values map[string]any) error {
 		return nil
 	}
 	ro, ok := roAny.([]string)
+
 	if !ok || len(ro) == 0 {
 		return nil
 	}
@@ -2058,6 +2079,65 @@ func checkSandboxPathConflict(key string, values map[string]any) error {
 		}
 	}
 	return nil
+}
+
+// CanonicalizeSandboxProfile validates and canonicalizes a sandbox profile's
+// two path lists through the exact pipeline the standard path-list settings
+// use: bounds, canonicalization, de-duplication, and the RO/RW cross-class
+// conflict. It is shared by standard-profile and workspace-profile writes
+// (design 2026-08-23 §4.1) so the two stores never disagree on what a valid
+// profile is. Errors are ValidationErrors and carry no paths (AD-11).
+func CanonicalizeSandboxProfile(writable, readOnly []string) (canonicalWritable, canonicalReadOnly []string, err error) {
+	canonicalWritable, err = canonicalPaths(SandboxAllowedWritablePaths.Key(), writable)
+	if err != nil {
+		return nil, nil, err
+	}
+	canonicalReadOnly, err = canonicalPaths(SandboxAllowedReadOnlyPaths.Key(), readOnly)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkSandboxPathConflict(SandboxAllowedWritablePaths.Key(), map[string]any{
+		SandboxAllowedWritablePaths.Key(): canonicalWritable,
+		SandboxAllowedReadOnlyPaths.Key(): canonicalReadOnly,
+	}); err != nil {
+		return nil, nil, err
+	}
+	return canonicalWritable, canonicalReadOnly, nil
+}
+
+// SandboxProfileFromSnapshot returns the two strictly typed standard-profile
+// lists from one settings snapshot. Persisted malformed []any values are
+// refused rather than coerced: a corrupted authority default must fail closed.
+func SandboxProfileFromSnapshot(snapshot SettingsSnapshot) (writable, readOnly []string, err error) {
+	read := func(profile *PathList) ([]string, error) {
+		raw, ok := snapshot.Values[profile.Key()]
+		if !ok {
+			return nil, fmt.Errorf("%s missing from settings snapshot", profile.Key())
+		}
+		paths, ok := raw.([]string)
+		if !ok {
+			return nil, fmt.Errorf("%s is not a valid path list", profile.Key())
+		}
+		if len(paths) > pathListMaxEntries {
+			return nil, fmt.Errorf("%s exceeds the path-list bound", profile.Key())
+		}
+		return append([]string(nil), paths...), nil
+	}
+	writable, err = read(SandboxAllowedWritablePaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	readOnly, err = read(SandboxAllowedReadOnlyPaths)
+	if err != nil {
+		return nil, nil, err
+	}
+	if writable == nil {
+		writable = []string{}
+	}
+	if readOnly == nil {
+		readOnly = []string{}
+	}
+	return writable, readOnly, nil
 }
 
 // sandboxPathKeys is the set of keys whose values participate in the
