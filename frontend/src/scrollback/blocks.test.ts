@@ -2285,6 +2285,55 @@ describe('the block overflow menu stays in the viewport', () => {
     expect({ left, top }).toEqual(expected)
   })
 
+  it('measures the menu OUT OF FLOW — measured in flow it reports the window\u2019s width and lands nowhere near its ⋮', () => {
+    // jsdom has no box model, so the two tests above cannot tell an in-flow
+    // menu from a fixed one: every rect is zeros and the arithmetic agrees
+    // with itself. This one supplies the difference the browser makes, and
+    // it is the difference the defect was made of (owner, 2026-08-24): a
+    // plain div appended to `body` is an in-flow block box as wide as the
+    // body, so measuring it there reports the WINDOW width as the menu's,
+    // `btnRect.right - width` goes negative, and the clamp does exactly as
+    // asked — pins the menu to the left edge of the screen.
+    const CONTENT_WIDTH = 160
+    // Through the descriptor rather than the bare method: a prototype method
+    // captured by reference is what the unbound-method lint exists for, and
+    // the stub still needs the original's dynamic `this` to delegate.
+    const originalDesc = Object.getOwnPropertyDescriptor(
+      Element.prototype,
+      'getBoundingClientRect',
+    )!
+    const delegate = originalDesc.value as (this: Element) => DOMRect
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this instanceof HTMLElement && this.classList.contains('cmd-overflow-menu')) {
+        const width = this.style.position === 'fixed' ? CONTENT_WIDTH : window.innerWidth
+        return {
+          x: 0,
+          y: 0,
+          top: 0,
+          left: 0,
+          right: width,
+          bottom: 120,
+          width,
+          height: 120,
+        } as DOMRect
+      }
+      return delegate.call(this)
+    }
+    try {
+      // The ⋮ that is NOT against the right edge, so the clamp has nothing
+      // to correct and the assertion is about the measurement alone.
+      const { menu, buttonRect } = openMenu(true)
+      const left = Number.parseFloat(menu.style.left)
+      // Beside the ⋮ that opened it, right-aligned to the button — and
+      // therefore NOT against the left edge, which is where the in-flow
+      // measurement put it.
+      expect(left).toBe(buttonRect.right - CONTENT_WIDTH)
+      expect(left).toBeGreaterThan(8)
+    } finally {
+      Object.defineProperty(Element.prototype, 'getBoundingClientRect', originalDesc)
+    }
+  })
+
   it('clamps the menu back inside when the ⋮ hugs the right edge', () => {
     const { menu, buttonRect } = openMenu(false)
     const menuRect = menu.getBoundingClientRect()

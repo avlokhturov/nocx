@@ -1045,6 +1045,15 @@ function buildOverflowMenu(
     // clamp needs the laid-out size to keep the whole shell inside the
     // viewport. A menu taller than the viewport still fits: the shell's
     // `max-height` + `overflow-y` (style.css) scrolls within the menu.
+    // TAKEN OUT OF FLOW BEFORE IT IS MEASURED, which is the whole of this
+    // ordering and is not a tidy-up. A plain div appended to `body` is an
+    // in-flow block box: it is as wide as the body, so measuring it there
+    // reports the WINDOW's width as the menu's. `btnRect.right - width` then
+    // goes negative and the clamp does exactly what it is asked to — pins
+    // the menu against the left edge of the screen, nowhere near the ⋮ that
+    // opened it (owner, 2026-08-24). Fixed positioning with no `left`/`top`
+    // yet shrinks the box to its content, which is the size the clamp needs.
+    menu.style.position = 'fixed'
     const btnRect = btn.getBoundingClientRect()
     const menuRect = menu.getBoundingClientRect()
     // Right-aligned to the button, exactly where the fixed `right` it
@@ -1054,7 +1063,6 @@ function buildOverflowMenu(
       { width: menuRect.width, height: menuRect.height },
       { width: window.innerWidth, height: window.innerHeight },
     )
-    menu.style.position = 'fixed'
     menu.style.left = `${left}px`
     menu.style.top = `${top}px`
 
