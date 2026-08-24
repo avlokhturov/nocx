@@ -1922,6 +1922,17 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['call:files.read'])
   })
 
+  it('renders two calls when BOTH lack an id — an empty key is not an identity', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    // A provider that omits the id is not malformed (w-call-id-order): the
+    // dedupe must not merge two distinct calls into one because their empty
+    // keys collide.
+    h.toolCall({ callId: '', tool: 'files.read', effect: 'observe', opensBlock: false })
+    h.toolCall({ callId: '', tool: 'files.read', effect: 'observe', opensBlock: false })
+    expect(flowOf(h)).toEqual(['call:files.read', 'call:files.read'])
+  })
+
   it('puts the thinking in its own note and never in the answer text', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

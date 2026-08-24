@@ -272,3 +272,159 @@ func TestAsk_NoReasoningNoToolsEmitsAnswerEventsOnly(t *testing.T) {
 		t.Fatalf("answer text = %q, want ok", got)
 	}
 }
+
+// ── the id-less door (w-call-id-order): prose before the call stays before ─
+
+// streamProseThenToolCalls writes ONE completion whose first chunk carries
+// content and whose final frame carries the tool calls — the exact shape the
+// e2e fake scripts for a response that both speaks and proposes
+// (e2e/fake-openai.ts: content chunks with finish_reason "", then the
+// tool_calls frame with finish_reason "tool_calls", then [DONE]). The call
+// carries NO id, which is the provider shape this bead is about.
+func streamProseThenToolCalls(prose string, calls ...toolCallSpec) func(w http.ResponseWriter, r *http.Request) {
+	var n int
+	return func(w http.ResponseWriter, r *http.Request) {
+		n++
+		if n == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusOK)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", chunkJSON(prose, ""))
+			tcs := make([]map[string]any, 0, len(calls))
+			for i, c := range calls {
+				id := c.id
+				if id == "" {
+					id = fmt.Sprintf("call_%d", i+1)
+				}
+				tcs = append(tcs, map[string]any{
+					"id":   id,
+					"type": "function",
+					"function": map[string]any{
+						"name":      c.name,
+						"arguments": c.args,
+					},
+				})
+			}
+			d := map[string]any{
+				"id":      "chatcmpl-test",
+				"object":  "chat.completion.chunk",
+				"created": 0,
+				"model":   "probe-model",
+				"choices": []map[string]any{{
+					"index":         0,
+					"delta":         map[string]any{"role": "assistant", "tool_calls": tcs},
+					"finish_reason": "tool_calls",
+				}},
+			}
+			b, _ := json.Marshal(d)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", b)
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		streamOK(w)
+	}
+}
+
+// TestAsk_ProseBeforeTheCallStaysBeforeTheCall is the seam assertion for the
+// id-less door: a response that carries BOTH prose and a tool call in one
+// completion must emit the prose BEFORE the call event. The sentence written
+// before the command explains why the command was run; the transport seals
+// the open prose block on the call event, so a call that arrives before the
+// prose would leave the prose to open a block AFTER the command — the
+// inversion this bead exists to make impossible.
+func TestAsk_ProseBeforeTheCallStaysBeforeTheCall(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "the build failed on line 3")
+	args := fmt.Sprintf(`{"path":%q}`, path)
+
+	_, srv := newFakeOpenAI(streamProseThenToolCalls("Let me check.", toolCallSpec{name: "files.read", args: args}))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	log := &eventLog{}
+	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, realLedger(t), NewApprovalStore()), log.sink()); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	events := log.all()
+	firstAnswer, callAt, lastAnswer := -1, -1, -1
+	for i, e := range events {
+		switch e.Kind {
+		case AskAnswer:
+			if firstAnswer < 0 {
+				firstAnswer = i
+			}
+			lastAnswer = i
+		case AskToolCall:
+			if callAt < 0 {
+				callAt = i
+			}
+		}
+	}
+	if firstAnswer < 0 || callAt < 0 || lastAnswer < 0 {
+		t.Fatalf("expected answer, call, answer in %v", log.kinds())
+	}
+	if firstAnswer > callAt {
+		t.Fatalf("the prose written before the call arrived AFTER the call event: %v", log.kinds())
+	}
+	if callAt > lastAnswer {
+		t.Fatalf("the call arrived after the answer written from its result: %v", log.kinds())
+	}
+	if got := events[firstAnswer].Text; got != "Let me check." {
+		t.Fatalf("the pre-call prose = %q, want %q", got, "Let me check.")
+	}
+}
+
+// TestAsk_ProseBeforeTheCallStaysBeforeTheCall_WithId is the paired end
+// (AGENTS.md testing rule 3): the same response with the call carrying the
+// model's own id must behave identically — a real provider sends ids, and
+// the id-less fix must not regress that path.
+func TestAsk_ProseBeforeTheCallStaysBeforeTheCall_WithId(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "the build failed on line 3")
+	args := fmt.Sprintf(`{"path":%q}`, path)
+
+	_, srv := newFakeOpenAI(streamProseThenToolCalls("Let me check.", toolCallSpec{name: "files.read", args: args, id: "call_diag"}))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	log := &eventLog{}
+	if err := cl.Ask(context.Background(), askParams(srv.URL, &grant, realLedger(t), NewApprovalStore()), log.sink()); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	events := log.all()
+	firstAnswer, callAt, lastAnswer := -1, -1, -1
+	for i, e := range events {
+		switch e.Kind {
+		case AskAnswer:
+			if firstAnswer < 0 {
+				firstAnswer = i
+			}
+			lastAnswer = i
+		case AskToolCall:
+			if callAt < 0 {
+				callAt = i
+			}
+		}
+	}
+	if firstAnswer < 0 || callAt < 0 || lastAnswer < 0 {
+		t.Fatalf("expected answer, call, answer in %v", log.kinds())
+	}
+	if firstAnswer > callAt {
+		t.Fatalf("the prose written before the call arrived AFTER the call event: %v", log.kinds())
+	}
+	if callAt > lastAnswer {
+		t.Fatalf("the call arrived after the answer written from its result: %v", log.kinds())
+	}
+	if got := events[callAt].Call.CallID; got != "call_diag" {
+		t.Fatalf("the call's id = %q, want the model's own %q", got, "call_diag")
+	}
+}

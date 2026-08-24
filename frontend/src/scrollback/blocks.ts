@@ -2291,8 +2291,15 @@ export class BlockManager {
       id,
       el,
       toolCall(call: AnswerToolCall): void {
-        if (seenCalls.has(call.callId)) return
-        seenCalls.add(call.callId)
+        // The dedupe exists for ONE case: an approved egress resume puts the
+        // same call through the pipeline a second time, and the backend
+        // announces the same callId again. An EMPTY callId is not an
+        // identity — a provider that omits the id is not malformed, and two
+        // distinct id-less calls must not merge because their empty keys
+        // collide (w-call-id-order). So the key is only consulted when there
+        // is one.
+        if (call.callId !== '' && seenCalls.has(call.callId)) return
+        if (call.callId !== '') seenCalls.add(call.callId)
         stopTyping()
         // The run of prose above ends here whatever the call turns out to be:
         // the backend sealed its `text` block when this call arrived, and the
