@@ -60,16 +60,16 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	// renderer.
 	screen := &recordingRequester{body: liveFrameBody("hello")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, screen)
-	out, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"the-model-made-this-up"}`)
+	out, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"the-model-made-this-up"}`)
 	if err != nil {
 		t.Fatalf("an invented sessionId gave %v, want the refusal as a tool result — the refusal the prompt exists to prevent", err)
 	}
 	if !strings.Contains(out, "REFUSED") {
 		t.Fatalf("invented-sessionId result = %q, want a refusal in our words", out)
 	}
-	out, err = wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":`+quoted(told)+`}`)
+	out, err = wrappedEndpoint(mw, "session.read", "c2", `{"sessionId":`+quoted(told)+`}`)
 	if err != nil {
-		t.Fatalf("readScreen with the id the prompt gave failed: %v", err)
+		t.Fatalf("session.read with the id the prompt gave failed: %v", err)
 	}
 	if calls := screen.calls(); len(calls) != 1 || calls[0].sessionID != sid {
 		t.Fatalf("renderer was asked %+v, want exactly one read of %s", calls, sid)

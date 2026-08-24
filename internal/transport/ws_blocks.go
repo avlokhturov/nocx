@@ -19,7 +19,7 @@ package transport
 // Neither is ever in the answer to be filtered: the query carries both
 // bounds, and the read applies the same predicate to the row it resolves, so
 // an id guessed from another pane answers exactly as an id that never
-// existed (assistant.ErrBlockNotFound).
+// existed (assistant.ErrSessionItemNotFound).
 //
 // The ledger handle is the raw repository, the same one the tool pipeline's
 // attempt writes use (ws_agent.go's attemptLedger) and for the same reason:
@@ -37,6 +37,8 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/session"
 )
+
+const defaultSessionItemLines = 200
 
 // blockScope is what a granted session narrows to in the ledger's own
 // vocabulary: the pane its blocks are anchored to, and the wall-clock floor
@@ -79,122 +81,99 @@ func (s *WSServer) ledgerForBlocks() content.LedgerRepository {
 	return s.contentDB.Ledger()
 }
 
-// ListBlocks implements assistant.BlockSource: the newest blocks of the
-// granted session's pane, newest first (the ledger's own ingest_seq order),
-// each with the total the model aims a window with.
-//
-// The line count costs a read per row — the recall page carries an entry's
-// metadata and never its bytes (LedgerRepository.Entry), so a total can only
-// come from the body. That is why the page is small by default: the tool's
-// limit is ten unless the model asks for more, and fifty at most.
-func (s *WSServer) ListBlocks(ctx context.Context, sessionID string, limit int) (assistant.BlockList, error) {
+// ListSessionItems implements assistant.SessionSource. The ledger is the
+// source of item identity and state; an empty page is a valid answer for a
+// pane that has no recorded command blocks.
+func (s *WSServer) ListSessionItems(ctx context.Context, sessionID string, limit int) (assistant.SessionItems, error) {
 	ledger := s.ledgerForBlocks()
 	if ledger == nil {
-		return assistant.BlockList{}, errors.New("no content store is wired, so nothing has been recorded to read")
+		return assistant.SessionItems{}, errors.New("no content store is wired, so nothing has been recorded to read")
 	}
 	scope, err := s.blockScopeFor(sessionID)
 	if err != nil {
-		return assistant.BlockList{}, err
+		return assistant.SessionItems{}, err
 	}
 	since := scope.since
 	page, err := ledger.QueryEntries(ctx, content.LedgerQuery{
-		Scope:  content.ScopeEverywhere,
-		PaneID: scope.paneID,
-		Since:  &since,
-		Limit:  limit,
+		Scope: content.ScopeEverywhere, Kind: content.EntryShell, PaneID: scope.paneID,
+		Since: &since, Limit: limit,
 	})
 	if err != nil {
-		return assistant.BlockList{}, err
+		return assistant.SessionItems{}, err
 	}
-	out := assistant.BlockList{
-		Blocks: make([]assistant.BlockSummary, 0, len(page.Entries)),
-		More:   !page.Exhausted,
-	}
+	out := assistant.SessionItems{Items: make([]assistant.SessionItem, 0, len(page.Entries)), More: !page.Exhausted}
 	for _, row := range page.Entries {
-		// A block the model can read is one that ENDED. An open entry has no
-		// outcome and no complete body, and since a turn became a block of
-		// its own (nocx-4em1z) the open entry in this pane is usually THE
-		// QUESTION BEING ANSWERED RIGHT NOW — listing it would hand the model
-		// its own unanswered question as context.
-		if row.Phase != content.PhaseClosed {
-			continue
+		item := assistant.SessionItem{ID: row.ID, Command: row.Intent}
+		if row.Phase == content.PhaseClosed {
+			item.State = "exited"
+			item.ExitCode, _ = content.ShellExitCodeOf(row.Payload)
+			body, bodyErr := s.blockBody(ctx, ledger, row.ID)
+			if bodyErr != nil {
+				return assistant.SessionItems{}, bodyErr
+			}
+			if body.kept {
+				item.Lines = len(splitBlockLines(body.text))
+			}
+		} else {
+			item.State = "running"
 		}
-		summary := assistant.BlockSummary{
-			ID:      row.ID,
-			Command: row.Intent,
-			Status:  string(row.Status),
-			EndedAt: row.EndedAt,
-		}
-		if code, codeErr := content.ShellExitCodeOf(row.Payload); codeErr == nil {
-			summary.ExitCode = code
-		}
-		body, bodyErr := s.blockBody(ctx, ledger, row.ID)
-		if bodyErr != nil {
-			return assistant.BlockList{}, bodyErr
-		}
-		summary.BodyKept = body.kept
-		if body.kept {
-			summary.Lines = len(splitBlockLines(body.text))
-		}
-		out.Blocks = append(out.Blocks, summary)
+		out.Items = append(out.Items, item)
 	}
 	return out, nil
 }
 
-// ReadBlock implements assistant.BlockSource: one window of one block's
-// output. The window is clamped to what the block holds and the span that
-// comes back is the one that was actually read — a window past the end is
-// the empty span at the total, never an error (design §4.4).
-func (s *WSServer) ReadBlock(ctx context.Context, sessionID, blockID string, start, count int) (assistant.BlockWindow, error) {
+// ReadSessionItem returns the ledger state for one item. Exited output is
+// read here; running output is deliberately left to the renderer's current
+// screen capture, preserving AD-6.
+func (s *WSServer) ReadSessionItem(ctx context.Context, sessionID, itemID string, start, count int) (assistant.SessionItemRead, error) {
 	ledger := s.ledgerForBlocks()
 	if ledger == nil {
-		return assistant.BlockWindow{}, errors.New("no content store is wired, so nothing has been recorded to read")
+		return assistant.SessionItemRead{}, errors.New("no content store is wired, so nothing has been recorded to read")
 	}
 	scope, err := s.blockScopeFor(sessionID)
 	if err != nil {
-		return assistant.BlockWindow{}, err
+		return assistant.SessionItemRead{}, err
 	}
-	entry, err := ledger.Entry(ctx, blockID)
+	entry, err := ledger.Entry(ctx, itemID)
 	if err != nil {
-		return assistant.BlockWindow{}, err
+		return assistant.SessionItemRead{}, err
 	}
-	// The SAME predicate the list query carries, applied to the row an id
-	// resolved to. A block of another pane, or of an earlier session of this
-	// pane, answers exactly as an id that names nothing: the model learns
-	// nothing about a block it may not read, not even that it exists.
-	if entry == nil || entry.PaneID == nil || *entry.PaneID != scope.paneID || entry.SubmittedAt < scope.since {
-		return assistant.BlockWindow{}, assistant.ErrBlockNotFound
+	if entry == nil || entry.PaneID == nil || *entry.PaneID != scope.paneID || entry.SubmittedAt < scope.since || entry.Kind != content.EntryShell {
+		return assistant.SessionItemRead{}, assistant.ErrSessionItemNotFound
 	}
-
-	win := assistant.BlockWindow{
-		Command: entry.Intent,
-		Status:  string(entry.Status),
+	item := assistant.SessionItemRead{ID: entry.ID, Command: entry.Intent}
+	if entry.Phase != content.PhaseClosed {
+		item.State = "running"
+		return item, nil
 	}
-	if code, codeErr := content.ShellExitCodeOf(entry.Payload); codeErr == nil {
-		win.ExitCode = code
-	}
-	body, err := s.blockBody(ctx, ledger, blockID)
+	item.State = "exited"
+	item.ExitCode, _ = content.ShellExitCodeOf(entry.Payload)
+	body, err := s.blockBody(ctx, ledger, itemID)
 	if err != nil {
-		return assistant.BlockWindow{}, err
+		return assistant.SessionItemRead{}, err
 	}
-	win.BodyKept = body.kept
-	win.Truncated = body.truncated
 	if !body.kept {
-		return win, nil
+		item.Note = "this item's output was not kept: history or output retention is off, or the command was marked sensitive"
+		return item, nil
 	}
 	lines := splitBlockLines(body.text)
-	win.Total = len(lines)
-	begin := start
-	if begin > win.Total {
-		begin = win.Total
+	item.Total = len(lines)
+	if start < 0 {
+		start = 0
 	}
-	end := begin + count
-	if end > win.Total {
-		end = win.Total
+	if count <= 0 {
+		count = defaultSessionItemLines
 	}
-	win.Start, win.End = begin, end
-	win.Text = strings.Join(lines[begin:end], "\n")
-	return win, nil
+	if start > item.Total {
+		start = item.Total
+	}
+	end := start + count
+	if end > item.Total {
+		end = item.Total
+	}
+	item.Start, item.End = start, end
+	item.Text = strings.Join(lines[start:end], "\n")
+	return item, nil
 }
 
 // blockBodyResult is what the store kept for one block: the text, whether it

@@ -36,42 +36,24 @@ const filesReadWindowBytes = 64 << 10
 // (a new row with a Narrow but no executor is a registration that cannot
 // run).
 var executors = map[string]func(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error){
-	"files.read":  executeFilesRead,
-	"blocks.list": executeBlocksListTool,
-	"blocks.read": executeBlocksReadTool,
+	"files.read":   executeFilesRead,
+	"session.list": executeSessionListTool,
 }
 
 // toolSeams is the per-RUN infrastructure an executor may need and the
 // capability must never hold: the capability is authority (ADR-0028 decision
-// 4 — the dispatcher narrows, it does not check), while "where is a block's
-// text read from" is wiring, exactly as the renderer requester is for the
-// InRenderer tools. It is passed to every executor because the alternative
-// is a per-tool switch beside the table, and the table is the one place a
-// tool comes into existence (design §5). Most executors ignore it.
+// 4 — the dispatcher narrows, it does not check), while the session ledger is
+// wiring, exactly as the renderer requester is for InRenderer tools.
 type toolSeams struct {
-	// blocks is the granted session's finished-block record; nil when the
-	// transport wired none, which the block tools report honestly.
-	blocks BlockSource
+	sessions SessionSource
 }
 
-// executeBlocksListTool and executeBlocksReadTool adapt the two block tools
-// to the executors table: the capability is asserted to the type its row's
-// Narrow builds, so a mismatched pairing fails with a sentence instead of a
-// panic.
-func executeBlocksListTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	reader, ok := cap.(*agenttools.BlockReader)
+func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	reader, ok := cap.(*agenttools.SessionReader)
 	if !ok {
-		return "", fmt.Errorf("blocks.list: capability is %T, not *agenttools.BlockReader", cap)
+		return "", fmt.Errorf("session.list: capability is %T, not *agenttools.SessionReader", cap)
 	}
-	return executeBlocksList(ctx, reader, seams.blocks, args)
-}
-
-func executeBlocksReadTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
-	reader, ok := cap.(*agenttools.BlockReader)
-	if !ok {
-		return "", fmt.Errorf("blocks.read: capability is %T, not *agenttools.BlockReader", cap)
-	}
-	return executeBlocksRead(ctx, reader, seams.blocks, args)
+	return executeSessionList(ctx, reader, seams.sessions, args)
 }
 
 // filesReadResult is the tool's return: total (the file's size), the window

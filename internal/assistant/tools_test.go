@@ -135,7 +135,7 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 		Scopes:  []content.GrantScope{{Kind: content.ResourceSession, ID: "lane-1"}},
 	})
 	got = toolNames(t, requestTools(t, f.body()))
-	wantSession := []string{"readScreen", "blocks.list", "blocks.read"}
+	wantSession := []string{"session.list", "session.read"}
 	if !reflect.DeepEqual(got, wantSession) {
 		t.Fatalf("session grant declared tools %v, want exactly %v", got, wantSession)
 	}

@@ -2,17 +2,18 @@ package agenttools
 
 import "github.com/shady2k/nocx/internal/content"
 
-// ScreenReader is the narrowed capability a readScreen tool executes through
-// (design §4.1: the agent reads the screen through the renderer, because the
-// renderer owns the grid — AD-6). It holds EXACTLY the grant's ResourceSession
-// scopes and nothing else: the tool can ask to read only the sessions the
-// grant names, because it never holds the identity of any other session
-// (ADR-0028 decision 4 — the dispatcher narrows, it does not check).
+// ScreenReader is the narrowed capability for renderer-backed live screen
+// capture (design §4.1: the agent reads the screen through the renderer,
+// because the renderer owns the grid — AD-6). It holds EXACTLY the grant's
+// ResourceSession scopes and nothing else: a consumer can ask to read only
+// the sessions the grant names, because it never holds the identity of any
+// other session (ADR-0028 decision 4 — the dispatcher narrows, it does not
+// check).
 //
-// The session set is the authority; how a read is performed (the renderer
+// The session set is the authority; how a capture is performed (the renderer
 // request) is wired separately at the run, so this type is pure authority and
-// stays trivially testable. Out-of-grant sessions are refused here, before
-// any request could name them.
+// stays trivially testable. Out-of-grant sessions are refused here, before any
+// request could name them.
 type ScreenReader struct {
 	sessions map[string]struct{}
 }

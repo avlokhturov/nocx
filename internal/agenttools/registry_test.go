@@ -56,14 +56,7 @@ const gitStatusSchema = `{
   "properties": {}
 }`
 
-const readScreenSchema = `{
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["sessionId"],
-  "properties": {"sessionId": {"type": "string"}}
-}`
-
-const blocksListSchema = `{
+const sessionListSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["sessionId"],
@@ -73,13 +66,13 @@ const blocksListSchema = `{
   }
 }`
 
-const blocksReadSchema = `{
+const sessionReadSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "blockId"],
+  "required": ["sessionId"],
   "properties": {
     "sessionId": {"type": "string"},
-    "blockId": {"type": "string"},
+    "id": {"type": "string"},
     "start": {"type": "integer"},
     "count": {"type": "integer"}
   }
@@ -265,12 +258,11 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json":  filesReadSchema,
-		"git.status.schema.json":  gitStatusSchema,
-		"readScreen.schema.json":  readScreenSchema,
-		"run.schema.json":         runSchema,
-		"blocks.list.schema.json": blocksListSchema,
-		"blocks.read.schema.json": blocksReadSchema,
+		"files.read.schema.json":   filesReadSchema,
+		"git.status.schema.json":   gitStatusSchema,
+		"session.list.schema.json": sessionListSchema,
+		"session.read.schema.json": sessionReadSchema,
+		"run.schema.json":          runSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -292,17 +284,14 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if got := reg.ForGrant(grant([]content.Effect{content.EffectMutateReversible}, content.ResourcePath)); len(got) != 0 {
 		t.Fatalf("ForGrant(mutate+path) = %v, want empty (observe tools forbidden)", toolNames(got))
 	}
-	// Resource kind not covered: a path grant offers no session tool (the
-	// readScreen row declares ResourceSession, which the path grant lacks).
-	if got := reg.ForGrant(observePath); containsName(got, "readScreen") {
-		t.Fatalf("ForGrant(observe+path) = %v, want readScreen absent (session tool, path grant)", toolNames(got))
+	// Resource kind not covered: a path grant offers no session tool.
+	if got := reg.ForGrant(observePath); containsName(got, "session.read") {
+		t.Fatalf("ForGrant(observe+path) = %v, want session.read absent (session tool, path grant)", toolNames(got))
 	}
-	// A session grant offers exactly the session tools — the positive end of
-	// the same rule: their resource kind is what a session grant covers, and
-	// the path tools stay absent. Three of them observe a session: the live
-	// screen, and the two halves of the finished blocks (nocx-5u3oz.6).
+	// A session grant offers exactly the two session tools. One lists
+	// addressable items and one reads an item or the current screen.
 	sessionObserve := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourceSession)))
-	wantSession := []string{"readScreen", "blocks.list", "blocks.read"}
+	wantSession := []string{"session.list", "session.read"}
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
@@ -335,12 +324,11 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json":  filesReadSchema,
-		"git.status.schema.json":  gitStatusSchema,
-		"readScreen.schema.json":  readScreenSchema,
-		"run.schema.json":         runSchema,
-		"blocks.list.schema.json": blocksListSchema,
-		"blocks.read.schema.json": blocksReadSchema,
+		"files.read.schema.json":   filesReadSchema,
+		"git.status.schema.json":   gitStatusSchema,
+		"session.list.schema.json": sessionListSchema,
+		"session.read.schema.json": sessionReadSchema,
+		"run.schema.json":          runSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

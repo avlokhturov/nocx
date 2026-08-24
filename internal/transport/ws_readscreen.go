@@ -1,14 +1,19 @@
 package transport
 
-// readScreen — the broker's first production request (design §2.2's pull
-// half of the terminal boundary): the agent reads a session's screen through
-// the renderer, because the renderer owns the grid (AD-6). The request
-// travels broker → renderer as agent.readScreenRequest; the renderer answers
-// agent.readScreenResolved with the SAME frame shape it pushes for
-// agent.captureFrame — same row/cell/attribute/identity vocabulary, produced
-// by the same renderer code — plus a closed outcome so a renderer that
-// cannot produce the frame (a session it does not know, a capture aborted by
-// disposal) answers honestly instead of hanging the run.
+// Renderer-backed live screen capture transport: session.read can ask for a
+// session's current screen through the renderer, because the renderer owns the
+// grid (AD-6). The request travels broker → renderer as
+// agent.readScreenRequest; the renderer answers agent.readScreenResolved with
+// the SAME frame shape it pushes for agent.captureFrame — same
+// row/cell/attribute/identity vocabulary, produced by the same renderer code
+// — plus a closed outcome so a renderer that cannot produce the frame (a
+// session it does not know, a capture aborted by disposal) answers honestly
+// instead of hanging the run.
+//
+// The agent.readScreenRequest and agent.readScreenResolved names intentionally
+// remain transport-layer identifiers, distinct from the model-facing
+// session.read tool name. Changing them would only drag the contracts and
+// generated frontend types along with no protocol gain.
 //
 // The broker mechanism (request_broker.go) owns id minting, correlation,
 // timeouts and terminalization; this file is one RequestKind plus the
@@ -30,21 +35,21 @@ import (
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
-// readScreenRequestTimeout bounds one readScreen request: the renderer
-// answers a capture in milliseconds, and a renderer that never answers must
-// terminalize the run through the broker's timeout rather than leaking a
-// pending request (design acceptance 14). Generous: the capture fence can
-// legitimately wait for a large write to finish parsing.
+// readScreenRequestTimeout bounds one broker renderer-capture request: the
+// renderer answers a capture in milliseconds, and a renderer that never
+// answers must terminalize the run through the broker's timeout rather than
+// leaking a pending request (design acceptance 14). Generous: the capture
+// fence can legitimately wait for a large write to finish parsing.
 const readScreenRequestTimeout = 30 * time.Second
 
 // maxResolutionErrorRunes bounds the renderer's failure sentence on a
-// failed readScreen outcome. A sentence a person (or the model) reads,
+// failed screen-capture outcome. A sentence a person (or the model) reads,
 // never an unbounded string.
 const maxResolutionErrorRunes = 512
 
-// errReadScreenNoRenderer is the readScreen kind's no-client answer: there
-// is no renderer attached to read the screen. Named, the way the vault and
-// password asks name their no-client outcomes.
+// errReadScreenNoRenderer is the renderer-capture kind's no-client answer:
+// there is no renderer attached to capture the current screen. Named, the way
+// the vault and password asks name their no-client outcomes.
 var errReadScreenNoRenderer = errors.New("no renderer connected to read the screen")
 
 // ── wire shapes ────────────────────────────────────────────────────────────

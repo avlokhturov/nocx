@@ -286,7 +286,7 @@ func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 	h := newGapHandlers(svc, &scriptedAssistantClient{
 		deltas: []string{"first"},
 		err: &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
-			RunID: "7", Attempt: 1, Tool: "readScreen", CallID: "c1", ArgHash: "h",
+			RunID: "7", Attempt: 1, Tool: "session.read", CallID: "c1", ArgHash: "h",
 			Effect: content.EffectObserve,
 		}},
 	}, approvals)

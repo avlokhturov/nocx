@@ -29,15 +29,6 @@ type FrameRegion struct {
 // it — the executor decodes only the fields its return contract needs
 // (design §4.4's window), never the full frame type.
 type RendererRequester interface {
-	// BlockSource is the run's other tool seam the TRANSPORT owns: the
-	// finished blocks of the granted session, read from the ledger the
-	// renderer already wrote them to (blocks.go says why the ledger and not
-	// a second renderer round trip). It rides here because the two are one
-	// value in the run — the transport is the single adapter for everything
-	// a tool cannot reach from this package — and because a tool seam that
-	// arrives separately arrives nil for every caller that forgot it.
-	BlockSource
-
 	// RequestScreen asks the renderer to capture sessionID's screen — the
 	// same frame shape the renderer pushes for agent.captureFrame, pulled —
 	// and returns the validated frame body (rows, cursor, capture identity).

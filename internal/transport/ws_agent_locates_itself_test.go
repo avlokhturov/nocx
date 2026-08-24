@@ -102,7 +102,7 @@ func (p *selfLocatingProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Unlock()
 
 	if n == 1 {
-		streamToolCallChunk(w, "readScreen", fmt.Sprintf(`{"sessionId":%q}`, learned))
+		streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, learned))
 		return
 	}
 	if strings.Contains(body, marker) {

@@ -1291,7 +1291,18 @@ func terminationReasonOf(err error) content.TerminationReason {
 // tool runs against its narrowed capability in-process; an InRenderer tool
 // is asked of the renderer through the run's requester seam.
 func (m *policyMiddleware) run(decl agenttools.Tool, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
-	if decl.Executes == agenttools.InRenderer {
+	switch decl.Executes {
+	case agenttools.Dynamic:
+		reader, ok := capability.(*agenttools.SessionReader)
+		if !ok {
+			return "", fmt.Errorf("tool %q: capability is %T, not dynamic session capability", decl.Name, capability)
+		}
+		var sessions SessionSource
+		if m.requester != nil {
+			sessions, _ = m.requester.(SessionSource)
+		}
+		return executeSessionRead(ctx, reader, sessions, m.requester, rawArgs)
+	case agenttools.InRenderer:
 		return m.executeInRenderer(ctx, decl, capability, rawArgs)
 	}
 	fn, ok := executors[decl.Name]
@@ -1302,15 +1313,16 @@ func (m *policyMiddleware) run(decl agenttools.Tool, ctx context.Context, capabi
 }
 
 // seams is the run's wiring handed to an InGo executor: what a tool needs
-// that is neither its arguments nor its authority. The block record rides on
-// the same value the renderer requests do, because the transport adapts one
+// that is neither its arguments nor its authority. The session record rides
+// on the same value the renderer requests do, because the transport adapts one
 // object for both (requester.go); a run with no requester wired hands over a
-// nil source, and the block tools say so rather than answering empty.
+// nil source, and session.list says so rather than answering empty.
 func (m *policyMiddleware) seams() toolSeams {
 	if m.requester == nil {
 		return toolSeams{}
 	}
-	return toolSeams{blocks: m.requester}
+	sessions, _ := m.requester.(SessionSource)
+	return toolSeams{sessions: sessions}
 }
 
 // executeInRenderer runs one InRenderer tool: the capability is the

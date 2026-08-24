@@ -170,20 +170,20 @@ func TestListBlocks_ListsOnlyTheGrantedSessionsBlocks(t *testing.T) {
 	other := recordBlockWithBody(t, h.db, blockPaneOther, "kubectl get pods",
 		"0198f2b0-0000-7000-8000-0000000000b3", "NAME READY")
 
-	list, err := h.ws.ListBlocks(context.Background(), sid, 10)
+	list, err := h.ws.ListSessionItems(context.Background(), sid, 10)
 	if err != nil {
-		t.Fatalf("ListBlocks: %v", err)
+		t.Fatalf("ListSessionItems: %v", err)
 	}
-	ids := make([]string, 0, len(list.Blocks))
-	for _, b := range list.Blocks {
-		ids = append(ids, b.ID)
+	ids := make([]string, 0, len(list.Items))
+	for _, item := range list.Items {
+		ids = append(ids, item.ID)
 	}
 	if len(ids) != 1 || ids[0] != mine {
-		t.Fatalf("listed %v (%d blocks), want exactly the granted session's %q", ids, len(ids), mine)
+		t.Fatalf("listed %v (%d items), want exactly the granted session's %q", ids, len(ids), mine)
 	}
 	for _, unwanted := range []struct{ id, what string }{
-		{other, "another tab's block"},
-		{earlier, "an earlier session's block"},
+		{other, "another tab's item"},
+		{earlier, "an earlier session's item"},
 	} {
 		for _, got := range ids {
 			if got == unwanted.id {
@@ -191,16 +191,15 @@ func TestListBlocks_ListsOnlyTheGrantedSessionsBlocks(t *testing.T) {
 			}
 		}
 	}
-	// And the row carries what the model needs to choose and to aim:
-	got := list.Blocks[0]
+	got := list.Items[0]
 	if got.Command != "df -h" {
 		t.Errorf("command = %q, want df -h", got.Command)
 	}
-	if got.Status != string(content.EntrySuccess) {
-		t.Errorf("status = %q, want success", got.Status)
+	if got.State != "exited" {
+		t.Errorf("state = %q, want exited", got.State)
 	}
-	if !got.BodyKept || got.Lines != 2 {
-		t.Errorf("bodyKept=%v lines=%d, want a kept body of 2 lines", got.BodyKept, got.Lines)
+	if got.Lines != 2 {
+		t.Errorf("lines=%d, want 2", got.Lines)
 	}
 }
 
@@ -223,33 +222,31 @@ func TestReadBlock_RefusesAnIDTheGrantDoesNotName(t *testing.T) {
 		{earlier, "an earlier session's block"},
 		{"0198f2b0-0000-7000-8000-0000000000ff", "an id that names nothing"},
 	} {
-		win, err := h.ws.ReadBlock(context.Background(), sid, guess.id, 0, 100)
+		item, err := h.ws.ReadSessionItem(context.Background(), sid, guess.id, 0, 100)
 		if err == nil {
-			t.Fatalf("reading %s succeeded: %+v", guess.what, win)
+			t.Fatalf("reading %s succeeded: %+v", guess.what, item)
 		}
-		if err != assistant.ErrBlockNotFound {
+		if err != assistant.ErrSessionItemNotFound {
 			t.Errorf("reading %s answered %v, want the same answer as an unknown id", guess.what, err)
 		}
-		if win.Text != "" || win.Command != "" {
-			t.Errorf("reading %s leaked %+v", guess.what, win)
+		if item.Text != "" || item.Command != "" {
+			t.Errorf("reading %s leaked %+v", guess.what, item)
 		}
 	}
 
-	// The paired end: the granted session's own block reads.
-	win, err := h.ws.ReadBlock(context.Background(), sid, mine, 0, 100)
+	// The paired end: the granted session's own item reads.
+	item, err := h.ws.ReadSessionItem(context.Background(), sid, mine, 0, 100)
 	if err != nil {
-		t.Fatalf("ReadBlock on the granted session's own block: %v", err)
+		t.Fatalf("ReadSessionItem on the granted session's own item: %v", err)
 	}
-	if win.Text != "hello" || win.Command != "echo hello" {
-		t.Fatalf("read %+v, want the block's own command and text", win)
+	if item.Text != "hello" || item.Command != "echo hello" {
+		t.Fatalf("read %+v, want the item's own command and text", item)
 	}
 }
 
-// TestReadBlock_WindowIsHonest is the second criterion at the source: the
-// window returned is the one the store could give, the total says where the
-// output stops, and a window past the end is the empty span at the end
-// rather than an error.
-func TestReadBlock_WindowIsHonest(t *testing.T) {
+// TestReadSessionItem_WindowIsHonest is the second criterion at the source:
+// the returned window is clamped to the stored output.
+func TestReadSessionItem_WindowIsHonest(t *testing.T) {
 	h := newBlockHarness(t)
 	sid := h.openIn(t, blockPaneThis)
 	lines := make([]string, 300)
@@ -259,21 +256,21 @@ func TestReadBlock_WindowIsHonest(t *testing.T) {
 	id := recordBlockWithBody(t, h.db, blockPaneThis, "make -j",
 		"0198f2b0-0000-7000-8000-0000000000d1", strings.Join(lines, "\n"))
 
-	win, err := h.ws.ReadBlock(context.Background(), sid, id, 290, 50)
+	item, err := h.ws.ReadSessionItem(context.Background(), sid, id, 290, 50)
 	if err != nil {
-		t.Fatalf("ReadBlock: %v", err)
+		t.Fatalf("ReadSessionItem: %v", err)
 	}
-	if win.Total != 300 {
-		t.Fatalf("total = %d, want 300", win.Total)
+	if item.Total != 300 {
+		t.Fatalf("total = %d, want 300", item.Total)
 	}
-	if win.Start != 290 || win.End != 300 {
-		t.Fatalf("returned window = [%d,%d), want [290,300) — clamped to the block, not refused", win.Start, win.End)
+	if item.Start != 290 || item.End != 300 {
+		t.Fatalf("returned window = [%d,%d), want [290,300)", item.Start, item.End)
 	}
-	if !strings.HasSuffix(win.Text, "line-299") || !strings.HasPrefix(win.Text, "line-290") {
-		t.Fatalf("text = %q, want lines 290..299", win.Text)
+	if !strings.HasSuffix(item.Text, "line-299") || !strings.HasPrefix(item.Text, "line-290") {
+		t.Fatalf("text = %q, want lines 290..299", item.Text)
 	}
 
-	past, err := h.ws.ReadBlock(context.Background(), sid, id, 5000, 10)
+	past, err := h.ws.ReadSessionItem(context.Background(), sid, id, 5000, 10)
 	if err != nil {
 		t.Fatalf("a window past the end must be answered, not refused: %v", err)
 	}
@@ -306,22 +303,22 @@ func TestBlocks_ABlockWithNoBodyIsStatedNotEmpty(t *testing.T) {
 		t.Fatalf("RecordCompleted: %v", err)
 	}
 
-	list, listErr := h.ws.ListBlocks(context.Background(), sid, 10)
+	list, listErr := h.ws.ListSessionItems(context.Background(), sid, 10)
 	if listErr != nil {
-		t.Fatalf("ListBlocks: %v", listErr)
+		t.Fatalf("ListSessionItems: %v", listErr)
 	}
-	if len(list.Blocks) != 1 || list.Blocks[0].BodyKept || list.Blocks[0].Lines != 0 {
-		t.Fatalf("listed %+v, want one block with no body kept", list.Blocks)
+	if len(list.Items) != 1 || list.Items[0].Lines != 0 || list.Items[0].State != "exited" {
+		t.Fatalf("listed %+v, want one exited item with no body lines", list.Items)
 	}
-	win, readErr := h.ws.ReadBlock(context.Background(), sid, id, 0, 10)
+	item, readErr := h.ws.ReadSessionItem(context.Background(), sid, id, 0, 10)
 	if readErr != nil {
-		t.Fatalf("ReadBlock: %v", readErr)
+		t.Fatalf("ReadSessionItem: %v", readErr)
 	}
-	if win.BodyKept || win.Total != 0 || win.Text != "" {
-		t.Fatalf("read %+v, want a stated absence", win)
+	if item.Total != 0 || item.Text != "" || item.Note == "" {
+		t.Fatalf("read %+v, want a stated absence", item)
 	}
-	if win.Command != "ssh prod" {
-		t.Fatalf("command = %q, want the block's own command", win.Command)
+	if item.Command != "ssh prod" {
+		t.Fatalf("command = %q, want the item's own command", item.Command)
 	}
 }
 
@@ -357,18 +354,25 @@ func TestListBlocks_AnOpenEntryIsNotOffered(t *testing.T) {
 		EnvironmentID: "local",
 		PaneID:        &pane,
 		Cwd:           "/repo",
-		Kind:          content.EntryAsk,
+		Kind:          content.EntryShell,
 		Intent:        "why did the build fail?",
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
 
-	list, err := h.ws.ListBlocks(ctx, sid, 10)
+	list, err := h.ws.ListSessionItems(ctx, sid, 10)
 	if err != nil {
-		t.Fatalf("ListBlocks: %v", err)
+		t.Fatalf("ListSessionItems: %v", err)
 	}
-	if len(list.Blocks) != 1 || list.Blocks[0].Command != "make ci" {
-		t.Fatalf("listed %+v, want only the finished block", list.Blocks)
+	if len(list.Items) != 2 {
+		t.Fatalf("listed %+v, want finished and running items", list.Items)
+	}
+	states := map[string]string{}
+	for _, item := range list.Items {
+		states[item.Command] = item.State
+	}
+	if states["make ci"] != "exited" || states["why did the build fail?"] != "running" {
+		t.Fatalf("item states = %v, want make ci=exited and question=running", states)
 	}
 }
 
@@ -377,7 +381,7 @@ func TestListBlocks_AnOpenEntryIsNotOffered(t *testing.T) {
 // look alike, or the model reads the second and tells the person so.
 func TestListBlocks_UnknownSessionIsNotAnEmptyList(t *testing.T) {
 	h := newBlockHarness(t)
-	if _, err := h.ws.ListBlocks(context.Background(), "0000000000000000000000000000dead", 10); err == nil {
+	if _, err := h.ws.ListSessionItems(context.Background(), "0000000000000000000000000000dead", 10); err == nil {
 		t.Fatal("listing an unknown session succeeded; want an error")
 	}
 	// And a session attached to no recorded pane says exactly that: it has
@@ -389,7 +393,7 @@ func TestListBlocks_UnknownSessionIsNotAnEmptyList(t *testing.T) {
 		t.Fatalf("open session: %v", err)
 	}
 	t.Cleanup(func() { _ = h.ws.registry.Close(sess.ID()) })
-	_, err = h.ws.ListBlocks(context.Background(), string(sess.ID()), 10)
+	_, err = h.ws.ListSessionItems(context.Background(), string(sess.ID()), 10)
 	if err == nil {
 		t.Fatal("listing a session with no pane succeeded; want an error")
 	}
@@ -492,17 +496,17 @@ func (p *blockToolProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.requests++
 	switch p.requests {
 	case 1:
-		p.lastCall = "blocks.list"
-		streamToolCallChunk(w, "blocks.list", fmt.Sprintf(`{"sessionId":%q}`, p.session))
+		p.lastCall = "session.list"
+		streamToolCallChunk(w, "session.list", fmt.Sprintf(`{"sessionId":%q}`, p.session))
 	case 2:
-		blockID, total := listedBlockFrom(string(body))
+		itemID, total := listedItemFrom(string(body))
 		p.readStart = total - 20
 		if p.readStart < 0 {
 			p.readStart = 0
 		}
-		p.lastCall = "blocks.read"
-		streamToolCallChunk(w, "blocks.read", fmt.Sprintf(
-			`{"sessionId":%q,"blockId":%q,"start":%d,"count":20}`, p.session, blockID, p.readStart))
+		p.lastCall = "session.read"
+		streamToolCallChunk(w, "session.read", fmt.Sprintf(
+			`{"sessionId":%q,"id":%q,"start":%d,"count":20}`, p.session, itemID, p.readStart))
 	default:
 		if strings.Contains(string(body), p.marker) {
 			streamAnswerChunk(w, p.marker)
@@ -512,11 +516,10 @@ func (p *blockToolProvider) serve(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// listedBlockFrom reads the block id and the line count out of the
-// blocks.list result the engine put into the conversation — the model's own
-// path to both.
-func listedBlockFrom(body string) (string, int) {
-	id := jsonStringAfter(body, `\"blockId\":\"`)
+// listedItemFrom reads the item id and line count out of the session.list
+// result the engine put into the conversation — the model's own path to both.
+func listedItemFrom(body string) (string, int) {
+	id := jsonStringAfter(body, `\"id\":\"`)
 	total := 0
 	if i := strings.Index(body, `\"lines\":`); i >= 0 {
 		rest := body[i+len(`\"lines\":`):]

@@ -48,11 +48,11 @@ func (p *twoReadsProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.requests++
 	switch p.requests {
 	case 1:
-		streamToolCallChunk(w, "blocks.read", fmt.Sprintf(
-			`{"sessionId":%q,"blockId":%q,"start":0,"count":1}`, p.session, p.first))
+		streamToolCallChunk(w, "session.read", fmt.Sprintf(
+			`{"sessionId":%q,"id":%q,"start":0,"count":1}`, p.session, p.first))
 	case 2:
-		streamToolCallChunk(w, "blocks.read", fmt.Sprintf(
-			`{"sessionId":%q,"blockId":%q,"start":0,"count":1}`, p.session, p.second))
+		streamToolCallChunk(w, "session.read", fmt.Sprintf(
+			`{"sessionId":%q,"id":%q,"start":0,"count":1}`, p.session, p.second))
 	default:
 		streamAnswerChunk(w, "both of them")
 	}
@@ -117,8 +117,8 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	// the announcement had to grow the arguments. Asserted rather than
 	// assumed: if these ever differ, this test stops being the case the
 	// epic was written about.
-	if calls[0].Tool != "blocks.read" || calls[1].Tool != "blocks.read" {
-		t.Fatalf("tools = %q and %q, want two blocks.read", calls[0].Tool, calls[1].Tool)
+	if calls[0].Tool != "session.read" || calls[1].Tool != "session.read" {
+		t.Fatalf("tools = %q and %q, want two session.read calls", calls[0].Tool, calls[1].Tool)
 	}
 	if calls[0].Resource == nil || calls[1].Resource == nil {
 		t.Fatalf("a call named no resource: %+v / %+v", calls[0].Resource, calls[1].Resource)
@@ -130,11 +130,11 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 
 	// …and the arguments tell them apart, with the value the model really
 	// sent and the tool really ran on.
-	if calls[0].Args["blockId"] != prov.first {
-		t.Fatalf("first call args = %v, want blockId %q", calls[0].Args, prov.first)
+	if calls[0].Args["id"] != prov.first {
+		t.Fatalf("first call args = %v, want id %q", calls[0].Args, prov.first)
 	}
-	if calls[1].Args["blockId"] != prov.second {
-		t.Fatalf("second call args = %v, want blockId %q", calls[1].Args, prov.second)
+	if calls[1].Args["id"] != prov.second {
+		t.Fatalf("second call args = %v, want id %q", calls[1].Args, prov.second)
 	}
 	if calls[0].Args["sessionId"] != sid {
 		t.Fatalf("first call args = %v, want sessionId %q", calls[0].Args, sid)

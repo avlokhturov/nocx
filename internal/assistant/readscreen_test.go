@@ -137,20 +137,20 @@ func TestMiddleware_ReadScreenRefusedOutsideGrantIsAResult(t *testing.T) {
 	req := &recordingRequester{body: liveFrameBody("x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	out, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-b"}`)
+	out, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"session-b"}`)
 	if err != nil {
-		t.Fatalf("out-of-grant readScreen error = %v, want the refusal as a tool result", err)
+		t.Fatalf("out-of-grant session.read error = %v, want the refusal as a tool result", err)
 	}
-	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "readScreen") {
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "session.read") {
 		t.Fatalf("refusal result = %q, want a refusal naming the tool in our words", out)
 	}
 	if calls := req.calls(); len(calls) != 0 {
 		t.Fatalf("a refused call reached the renderer: %+v", calls)
 	}
 
-	out, err = wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":"session-a"}`)
+	out, err = wrappedEndpoint(mw, "session.read", "c2", `{"sessionId":"session-a"}`)
 	if err != nil {
-		t.Fatalf("in-grant readScreen failed: %v", err)
+		t.Fatalf("in-grant session.read failed: %v", err)
 	}
 	calls := req.calls()
 	if len(calls) != 1 || calls[0].sessionID != "session-a" {
@@ -169,14 +169,14 @@ func TestMiddleware_ReadScreenRegionTravels(t *testing.T) {
 	req := &recordingRequester{body: liveFrameBody("a", "b", "c")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	if _, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-a","region":{"start":1,"end":1}}`); err == nil {
+	if _, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"session-a","start":1,"count":0}`); err == nil {
 		t.Fatal("a zero-span region was accepted, want a refusal")
 	}
 	if calls := req.calls(); len(calls) != 0 {
 		t.Fatalf("a malformed region reached the renderer: %+v", calls)
 	}
 
-	if _, err := wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":"session-a","region":{"start":1,"end":3}}`); err != nil {
+	if _, err := wrappedEndpoint(mw, "session.read", "c2", `{"sessionId":"session-a","start":1,"count":2}`); err != nil {
 		t.Fatalf("a valid region was refused: %v", err)
 	}
 	calls := req.calls()
@@ -241,7 +241,7 @@ func TestMiddleware_ReadScreenWithoutRequesterIsHonest(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil) // requester nil
 
-	_, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-a"}`)
+	_, err := wrappedEndpoint(mw, "session.read", "c1", `{"sessionId":"session-a"}`)
 	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
 	}
