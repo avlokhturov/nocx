@@ -90,9 +90,13 @@ function inlineHtml(text: string): string {
     if (token.startsWith('`')) {
       html += `<code class="ui-md-code">${escapeHtml(token.slice(1, -1))}</code>`
     } else if (token.startsWith('**')) {
-      html += `<strong class="ui-md-strong">${escapeHtml(token.slice(2, -2))}</strong>`
+      // The span's contents are markup too: `**`repos`**` means code
+      // inside bold, and only the inline pass can see that. Bounded: the
+      // bold/em pattern admits no `*` inside its contents, so a nested
+      // span can only be code, which is rendered without recursing.
+      html += `<strong class="ui-md-strong">${inlineHtml(token.slice(2, -2))}</strong>`
     } else {
-      html += `<em class="ui-md-em">${escapeHtml(token.slice(1, -1))}</em>`
+      html += `<em class="ui-md-em">${inlineHtml(token.slice(1, -1))}</em>`
     }
     pos = at + token.length
   }
