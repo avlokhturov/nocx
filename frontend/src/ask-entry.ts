@@ -8,11 +8,13 @@
 // explicit switch, but in ordinary use nobody operates it: it is the
 // confirmation that Enter goes to the shell.
 //
-// Selecting a region of a finished block's output FREEZES that region into a
-// reference chip in the input line: "if you ask, this comes with you". It
-// never arms ask — the active target does not move (the owner's Warp
-// complaint: a selection that armed ask would send the next typed command
-// to the model).
+// A selection inside a finished block's output OFFERS to become a
+// reference chip — the floating Attach button appears (nocx-a7mw7.1), and
+// NOTHING attaches until it is pressed. The chip itself is minted by ONE
+// function, attachRegion (below); the button, the block menu and the
+// keyboard chord all raise their chip through it. Attaching never arms ask
+// — the active target does not move (the owner's Warp complaint: a
+// selection that armed ask would send the next typed command to the model).
 
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
@@ -90,6 +92,44 @@ export function chipFingerprint(
   chip: Pick<ReferenceChip, 'blockEl' | 'rowStart' | 'rowEnd'>,
 ): string {
   return `${chip.blockEl.dataset.blockId ?? 'block'}:${chip.rowStart}:${chip.rowEnd}`
+}
+
+/** The chip's name: the block's command and the covered row range — the
+ *  block names itself, the rows say what part is frozen. Derived HERE, in
+ *  the one minting seam, so every chip in the product is named by the same
+ *  function (the label becomes the region's text in a later bead; this is
+ *  where that change lands once). */
+export function referenceChipLabel(blockEl: HTMLElement, rowStart: number, rowEnd: number): string {
+  const header = blockEl.querySelector<HTMLElement>('.cmd-header-text')
+  const name = header?.textContent?.trim() || 'block'
+  const rows =
+    rowEnd - rowStart === 1 ? `row ${rowStart + 1}` : `rows ${rowStart + 1}–${rowEnd}`
+  return `${name} · ${rows}`
+}
+
+/** Monotonic chip id source — ids are for dismissal and dedupe, never for
+ *  anything the backend sees. Owned here so attachRegion can mint the whole
+ *  chip: a caller-side counter would be a second minting path. */
+let chipSeq = 0
+
+/** Mint a reference chip for a region of a finished block — the ONE seam
+ *  every chip in the product goes through (nocx-a7mw7.1, design Risks):
+ *  the selection affordance today, the block menu's Attach output and the
+ *  attach chord in later beads all call this, and no other path mints a
+ *  chip. The label and the identity are both derived here; the caller
+ *  supplies only the frozen region. */
+export function attachRegion(
+  blockEl: HTMLElement,
+  rowStart: number,
+  rowEnd: number,
+): ReferenceChip {
+  return {
+    id: `ref-${(chipSeq += 1)}`,
+    blockEl,
+    rowStart,
+    rowEnd,
+    label: referenceChipLabel(blockEl, rowStart, rowEnd),
+  }
 }
 
 // ── The line-start indicator (ADR-0004 §3's UI chip) ───────────────────────

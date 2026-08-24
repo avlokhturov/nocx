@@ -28,10 +28,12 @@ import { AgentReadiness, modelChipState } from './agent-readiness'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
+  attachRegion,
   chipFromSelection,
   chipFingerprint,
   type ReferenceChip,
 } from './ask-entry'
+import { createAttachAffordance, type AnchorRect, type AttachAffordance } from './attach-affordance'
 import {
   submitCommand,
   planSubmit,
@@ -215,6 +217,17 @@ function isTextEntry(el: Element | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
+}
+
+/** The selection's LAST client rect — the end the Attach affordance anchors
+ *  near (nocx-a7mw7.1). A multi-line selection has one rect per covered
+ *  row fragment; the last is where the selection ends. */
+function lastRectOfSelection(sel: Selection): AnchorRect | null {
+  if (sel.rangeCount === 0) return null
+  const rects = sel.getRangeAt(0).getClientRects()
+  if (rects.length === 0) return null
+  const last = rects[rects.length - 1]
+  return { left: last.left, top: last.top, right: last.right, bottom: last.bottom }
 }
 
 /**
@@ -520,22 +533,42 @@ export class TerminalContent extends BasePaneContent {
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
   /** The reference chips in the input line (nocx-4wtlh): the frozen
-   *  regions a question carries. A selection raises one; a question sent
-   *  to Ask consumes them all; a cleared scrollback takes their blocks. The
-   *  chips ARE the ask's payload — never re-derived from DOM selection at
-   *  submit time (AD-8: selection is copy; the chip is the record). */
+   *  regions a question carries. Pressing Attach raises one; a question
+   *  sent to Ask consumes them all; a cleared scrollback takes their
+   *  blocks. The chips ARE the ask's payload — never re-derived from DOM
+   *  selection at submit time (AD-8: selection is copy; the chip is the
+   *  record). Every chip here was minted by the ONE seam,
+   *  ask-entry.attachRegion. */
   private referenceChips: ReferenceChip[] = []
-  /** Monotonic chip id source — ids are for dismissal and dedupe, never
-   *  for anything the backend sees. */
-  private _chipSeq = 0
+  /** The floating Attach button (nocx-a7mw7.1): a selection inside a
+   *  finished block's output OFFERS to be attached; the button is the only
+   *  thing that attaches. Created at mount, disposed with the pane. */
+  private attachAffordance: AttachAffordance | null = null
+  /** The region the affordance currently offers — captured when the
+   *  selection lands and NEVER re-read from the DOM when the button is
+   *  pressed, so a drag still in flight cannot change what one press
+   *  attaches. */
+  private offeredRegion: { blockEl: HTMLElement; rowStart: number; rowEnd: number } | null = null
   /** The caret indicator (ADR-0004 §3's UI chip): renders the active
    *  input target beside the caret and is the person's one explicit
    *  switch. Its label is pushed from the registry's change
    *  notification — nothing else may repaint it. */
   private indicator: TargetIndicator | null = null
   /** The document selectionchange listener: a selection inside a finished
-   *  block's output raises a reference chip. Removed on dispose. */
-  private readonly onSelectionChange = (): void => this.raiseChipFromSelection()
+   *  block's output OFFERS a reference chip — the floating Attach button
+   *  appears; nothing attaches until it is pressed. Removed on dispose. */
+  private readonly onSelectionChange = (): void => this.offerChipFromSelection()
+  /** The scrollback scrolled under a live selection: the affordance
+   *  re-anchors to the selection's CURRENT client rects so a scroll does
+   *  not strand it. The offered region stays the one captured at selection
+   *  time — only the position follows the scroll. */
+  private readonly onScrollbackScroll = (): void => {
+    if (!this.offeredRegion) return
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed) return
+    const last = lastRectOfSelection(sel)
+    if (last) this.attachAffordance?.show(last)
+  }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
@@ -2882,11 +2915,19 @@ export class TerminalContent extends BasePaneContent {
       )
 
       this._mounted = true
-      // The reference-chip seam: a document selection inside a finished
-      // block's output raises a chip (nocx-4wtlh). Registered at the end
-      // of mount so the editor and the scrollback exist; removed on
-      // dispose.
+      // The attach affordance (nocx-a7mw7.1): a document selection inside
+      // a finished block's output OFFERS to be attached — the floating
+      // Attach button appears, and nothing attaches until it is pressed.
+      // The affordance and the listeners are registered at the end of
+      // mount so the editor and the scrollback exist; the affordance is
+      // disposed with the pane. The scroll listener re-anchors the button
+      // to the selection's current client rects, so a scroll does not
+      // strand the offer.
+      this.attachAffordance = createAttachAffordance(() => this.attachOfferedRegion())
       document.addEventListener('selectionchange', this.onSelectionChange)
+      this.scrollback?.scrollbackArea.addEventListener('scroll', this.onScrollbackScroll, {
+        passive: true,
+      })
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
@@ -4125,50 +4166,68 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** A document selection landed (or moved): if it is a real selection
-   *  inside one FINISHED block's output, freeze it into a reference chip.
-   *  Nothing else happens — the active target does not move, the shell is
-   *  not armed, the selection itself is untouched (copy keeps working).
-   *  Reselecting the identical region (same block, same rows) is a no-op;
-   *  a selection inside the editor's own draft is never a reference.
-   *  selectionchange fires on every caret move, so the guard is the
-   *  fingerprint, not the event. */
-  private raiseChipFromSelection(): void {
+   *  inside one FINISHED block's output of THIS pane, OFFER it for
+   *  attaching — the floating Attach button appears near the selection's
+   *  end, and NO chip exists until the button is pressed (nocx-a7mw7.1).
+   *  The old behaviour — a selection freezing itself into a chip — is what
+   *  the bead ends: copying output is the commonest thing anyone does with
+   *  output, so copying must attach nothing. Nothing else happens: the
+   *  active target does not move, the shell is not armed, the selection
+   *  itself is untouched (copy keeps working). The offer is cleared when
+   *  the selection collapses, when it stops satisfying chipFromSelection
+   *  (crosses two blocks, lands in a running block, lands in the editor),
+   *  or once the button has been pressed. selectionchange fires on every
+   *  caret move, so the guard is the chipFromSelection predicate, not the
+   *  event. */
+  private offerChipFromSelection(): void {
     const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
+    if (!sel || sel.isCollapsed) return this.hideAttachOffer()
     const anchor = sel.anchorNode
-    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return
+    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return this.hideAttachOffer()
     const chip = chipFromSelection(sel)
-    if (!chip) return
-    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
-    if (existing) return
-    const label = this.referenceChipLabel(chip)
-    this.referenceChips = [
-      ...this.referenceChips,
-      {
-        id: `ref-${(this._chipSeq = (this._chipSeq ?? 0) + 1)}`,
-        label,
-        blockEl: chip.blockEl,
-        rowStart: chip.rowStart,
-        rowEnd: chip.rowEnd,
-      },
-    ]
-    this.editor?.setReferenceChips(this.referenceChips)
+    // The offer is pane-scoped: the affordance floats over THIS pane's
+    // scrollback, so a selection in another pane offers nothing here.
+    if (!chip || !this.scrollback?.scrollbackInner.contains(chip.blockEl))
+      return this.hideAttachOffer()
+    const last = lastRectOfSelection(sel)
+    if (!last) return this.hideAttachOffer()
+    // The offer is captured NOW. The press attaches exactly this region —
+    // never a re-read of a selection that may still be moving.
+    this.offeredRegion = { blockEl: chip.blockEl, rowStart: chip.rowStart, rowEnd: chip.rowEnd }
+    this.attachAffordance?.show(last)
   }
 
-  /** The chip's name: the block's command and the covered row range —
-   *  the block names itself, the rows say what part is frozen. */
-  private referenceChipLabel(chip: {
-    blockEl: HTMLElement
-    rowStart: number
-    rowEnd: number
-  }): string {
-    const header = chip.blockEl.querySelector<HTMLElement>('.cmd-header-text')
-    const name = header?.textContent?.trim() || 'block'
-    const rows =
-      chip.rowEnd - chip.rowStart === 1
-        ? `row ${chip.rowStart + 1}`
-        : `rows ${chip.rowStart + 1}–${chip.rowEnd}`
-    return `${name} · ${rows}`
+  /** Put the affordance away and forget the offer — a collapse, a
+   *  non-satisfying selection, or a press. */
+  private hideAttachOffer(): void {
+    this.offeredRegion = null
+    this.attachAffordance?.hide()
+  }
+
+  /** The button was pressed: freeze the OFFERED region into a reference
+   *  chip and put the affordance away. The offer was captured when the
+   *  selection landed, so one press attaches exactly the region the person
+   *  pointed at — a drag that is still in flight cannot change what a
+   *  press attaches. */
+  private attachOfferedRegion(): void {
+    const offer = this.offeredRegion
+    if (!offer) return
+    this.applyAttachedRegion(offer.blockEl, offer.rowStart, offer.rowEnd)
+    this.hideAttachOffer()
+  }
+
+  /** Mint a reference chip through the ONE seam (ask-entry.attachRegion)
+   *  and add it to the line. The exact-duplicate fingerprint is the no-op
+   *  guard (design §4): attaching a region already attached stacks nothing.
+   *  Every chip in the product reaches the line through this method — the
+   *  block menu's Attach output and the attach chord arrive in later beads
+   *  and call the same seam. */
+  private applyAttachedRegion(blockEl: HTMLElement, rowStart: number, rowEnd: number): void {
+    const chip = attachRegion(blockEl, rowStart, rowEnd)
+    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
+    if (existing) return
+    this.referenceChips = [...this.referenceChips, chip]
+    this.editor?.setReferenceChips(this.referenceChips)
   }
 
   /** Drop every reference chip: a question sent to Ask consumed them, or
@@ -4214,10 +4273,14 @@ export class TerminalContent extends BasePaneContent {
     this.editor?.dispose()
     this.recall?.destroy()
     this.recall = null
+    this.scrollback?.scrollbackArea.removeEventListener('scroll', this.onScrollbackScroll)
     this.scrollback?.dispose()
     this.destroyReceipt()
     this.clearReferenceChips()
     document.removeEventListener('selectionchange', this.onSelectionChange)
+    this.attachAffordance?.dispose()
+    this.attachAffordance = null
+    this.offeredRegion = null
     this.indicator = null
     this.promptVault?.destroy()
     this.promptVault = null

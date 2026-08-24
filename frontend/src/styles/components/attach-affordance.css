@@ -1,0 +1,12 @@
+/* The floating Attach button (nocx-a7mw7.1) — the wrapper the kit's Button
+   lives in. The wrapper is the SURFACE's element: placement only. Fixed
+   positioning is this file's (viewport coordinates from the selection's
+   client rects map directly), stacking is this file's, and left/top/display
+   are set inline by the affordance module as it positions the button. The
+   kit paints the Button itself (frontend/src/ui/README.md — a surface may
+   place a kit component and never repaint it), so nothing here addresses
+   .ui-button. */
+.attach-affordance {
+  position: fixed;
+  z-index: 200;
+}
