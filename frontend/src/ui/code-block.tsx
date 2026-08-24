@@ -17,16 +17,73 @@
  * `tabIndex={0}` because a scrollable region that only a mouse wheel can move is
  * unreachable by keyboard once the content overflows.
  */
+import { Show, createSignal } from 'solid-js'
+import { render } from 'solid-js/web'
+import { CopyIcon } from './icons'
+import { IconButton } from './icon-button'
+import { showToast } from './toast'
+
 export interface CodeBlockProps {
   children: string
   /** Accessible name, when the block needs one beyond its surrounding label. */
   ariaLabel?: string
+  /** Injected platform clipboard operation. Existing callers with their own copy
+   * affordance may omit this and render only the read-only block. */
+  copy?: (text: string) => Promise<void>
+}
+
+export interface CodeBlockCopyButtonProps {
+  /** Read at click time so an imperative streaming block copies current code. */
+  getText: () => string
+  copy: (text: string) => Promise<void>
+}
+
+function CodeBlockCopyButton(props: CodeBlockCopyButtonProps) {
+  const [copied, setCopied] = createSignal(false)
+
+  const copy = async (): Promise<void> => {
+    try {
+      await props.copy(props.getText())
+      setCopied(true)
+      showToast({ level: 'success', message: 'Code copied' })
+    } catch {
+      setCopied(false)
+      showToast({ level: 'danger', message: 'Could not copy code' })
+    }
+  }
+
+  return (
+    <IconButton
+      ariaLabel={copied() ? 'Copied' : 'Copy code'}
+      title={copied() ? 'Copied' : 'Copy code'}
+      size="sm"
+      onClick={() => void copy()}
+    >
+      <CopyIcon />
+    </IconButton>
+  )
+}
+
+/** Mount the CodeBlock copy control into an imperative DOM surface. */
+export function mountCodeBlockCopyButton(
+  host: HTMLElement,
+  props: CodeBlockCopyButtonProps,
+): () => void {
+  return render(() => <CodeBlockCopyButton {...props} />, host)
 }
 
 export function CodeBlock(props: CodeBlockProps) {
   return (
-    <pre class="ui-code-block" aria-label={props.ariaLabel} tabIndex={0}>
-      {props.children}
-    </pre>
+    <div
+      class="ui-code-block-wrap"
+      classList={{ 'ui-code-block-wrap--copy': Boolean(props.copy) }}
+    >
+      <pre class="ui-code-block" aria-label={props.ariaLabel} tabIndex={0}>
+        {props.children}
+      </pre>
+      <Show when={props.copy}>
+        <CodeBlockCopyButton getText={() => props.children} copy={props.copy!} />
+      </Show>
+    </div>
   )
 }

@@ -10,7 +10,13 @@
 // ADR-0019 §3: nothing in the UI may imply live resumption. Every block this
 // makes carries `data-restored`, which is what the surrounding CSS and any
 // action gate read — a restored block offers nothing that needs a process.
-import { blockKindRules, createCommandBlock, type BlockKind, type FrozenStatus } from './blocks'
+import {
+  blockKindRules,
+  copyToClipboard,
+  createCommandBlock,
+  type BlockKind,
+  type FrozenStatus,
+} from './blocks'
 import { createAnswerBody } from './answer-body'
 import type { CommandAuthor } from '../command-ledger'
 import type { CommandSnapshotStore } from '../command-snapshot'
@@ -175,7 +181,7 @@ export function restoredBlock(
     outputEl.className = blockKindRules(facts.kind).outputClass!
     outputEl.dataset.answerBody = ''
     el.appendChild(outputEl)
-    const body = createAnswerBody(outputEl, { store })
+    const body = createAnswerBody(outputEl, { store, copy: copyToClipboard })
     // The whole chunk in one call: the renderer takes chunks, and a caller
     // that has all of it is simply a caller with one chunk.
     body.append(facts.body)

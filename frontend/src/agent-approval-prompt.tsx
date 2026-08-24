@@ -129,6 +129,8 @@ export interface AgentApprovalPromptProps {
   sessionWhere?: (
     sessionId: string,
   ) => { tab: string; machine: string; cwd: string; cwdVerified: boolean } | null
+  /** Clipboard operation injected by the application composition root. */
+  copy?: (text: string) => Promise<void>
 }
 
 const TITLE: Record<AgentApprovalRequested['reason'], string> = {
@@ -406,7 +408,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <p>
                 The assistant is asking to call <strong>{ask().tool}</strong> with these arguments:
               </p>
-              <CodeBlock ariaLabel={`Arguments of ${ask().tool}`}>{ask().arguments}</CodeBlock>
+              <CodeBlock copy={props.copy} ariaLabel={`Arguments of ${ask().tool}`}>
+                {ask().arguments}
+              </CodeBlock>
             </>
           }
         >
@@ -421,7 +425,9 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             {(command) => (
               <>
                 <p>{runLead()}:</p>
-                <CodeBlock ariaLabel="The command this question is about">{command()}</CodeBlock>
+                <CodeBlock copy={props.copy} ariaLabel="The command this question is about">
+                  {command()}
+                </CodeBlock>
               </>
             )}
           </Show>

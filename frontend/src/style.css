@@ -1110,6 +1110,21 @@
 .cmd-output-code {
   white-space: pre;
   overflow-x: auto;
+  position: relative;
+  padding-top: calc(var(--space-2) + 22px);
+}
+
+.cmd-output-code-copy-host {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  z-index: 1;
+}
+
+/* Fence delimiters are structural rows, not visible answer content. Keep them
+   in the DOM so row selection and Copy output retain the original markers. */
+.cmd-output-code > .term-line[data-fence-delim] {
+  display: none;
 }
 
 /* The SETTING's default for a command block (terminal.wrapOutput, default

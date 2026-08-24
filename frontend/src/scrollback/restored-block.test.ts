@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import {
   restoredBlock,
   restoredTurn,
@@ -168,6 +168,45 @@ describe('a block built from the store', () => {
       () => null,
     )
     expect(el.querySelector('.cmd-output-code')).not.toBeNull()
+  })
+
+  it('restored fenced answers keep the kit copy control and copy code only', async () => {
+    const copied: string[] = []
+    const previousClipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard')
+    const el = restoredBlock(
+      facts({
+        kind: 'ask',
+        author: 'agent',
+        body: 'before\n```bash\nls -la\n```\nafter',
+      }),
+      S,
+      container,
+      () => {},
+      store(),
+    )
+    document.body.appendChild(el)
+    try {
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: vi.fn((text: string) => {
+            copied.push(text)
+            return Promise.resolve()
+          }),
+        },
+      })
+      const button = el.querySelector<HTMLButtonElement>('.cmd-output-code .ui-icon-button')
+      expect(button).not.toBeNull()
+      button!.click()
+      await vi.waitFor(() => expect(copied).toEqual(['ls -la']))
+    } finally {
+      el.remove()
+      if (previousClipboard) {
+        Object.defineProperty(navigator, 'clipboard', previousClipboard)
+      } else {
+        Reflect.deleteProperty(navigator, 'clipboard')
+      }
+    }
   })
 
   it('carries its entry id, so Copy output reads the stored answer', () => {

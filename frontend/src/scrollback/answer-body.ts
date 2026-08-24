@@ -25,6 +25,7 @@
 // one of it.
 import { paintShellInto } from './shell-paint'
 import { paintAnswerLine } from '../ui/answer-markdown'
+import { mountCodeBlockCopyButton } from '../ui/code-block'
 import type { CommandSnapshotStore } from '../command-snapshot'
 
 // ── A fenced block's language ───────────────────────────────────────────────
@@ -86,6 +87,8 @@ export interface AnswerBodyOpts {
    *  caller uses it to retire the typing dots, which stand in for text that
    *  is not there yet; a restored answer passes nothing, because it never
    *  had them. */
+  /** Clipboard seam for the code-only button on each fenced region. */
+  copy?: (text: string) => Promise<void>
   onContent?: () => void
 }
 
@@ -110,6 +113,14 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
   // order fence → prose → fence survives.
   let partial: HTMLSpanElement | null = null
   let inFence = false
+  /** Delimiters remain in the DOM for answer Copy output and selection, but
+   * the fence button copies only code rows — never markers, info, or prose. */
+  const codeText = (container: HTMLElement): string =>
+    Array.from(container.querySelectorAll<HTMLElement>('.term-line'))
+      .filter((row) => row.dataset.fenceDelim === undefined)
+      .map((row) => row.textContent ?? '')
+      .join('\n')
+
   /** The language the open fence declared — read once, at the opener, and
    *  used for every row until the closer. */
   let fenceLang = ''
@@ -117,9 +128,19 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
 
   const codeContainer = (): HTMLElement => {
     if (!codeEl) {
-      codeEl = document.createElement('div')
-      codeEl.className = 'cmd-output-code'
-      outputEl.appendChild(codeEl)
+      const container = document.createElement('div')
+      container.className = 'cmd-output-code'
+      outputEl.appendChild(container)
+      codeEl = container
+      if (opts.copy) {
+        const copyHost = document.createElement('div')
+        copyHost.className = 'cmd-output-code-copy-host'
+        container.appendChild(copyHost)
+        mountCodeBlockCopyButton(copyHost, {
+          getText: () => codeText(container),
+          copy: opts.copy,
+        })
+      }
     }
     return codeEl
   }
@@ -148,7 +169,8 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           partial = null
           if (FENCE_MARKER.test(line)) {
             const opening = !inFence
-            inFence = !inFence
+            row.dataset.fenceDelim = opening ? 'open' : 'close'
+            inFence = opening ? true : false
             if (opening) {
               // The opener belongs to the code region it opens: a fresh
               // container, with the marker as its first row.
