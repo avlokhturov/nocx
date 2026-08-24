@@ -14,6 +14,7 @@ import type { AgentRunToolCall } from '../generated/agent.runToolCall'
 import { createReasoningNote, type ReasoningNote } from '../ui/reasoning-note'
 import { reasoningStartsExpanded } from '../reasoning-expanded'
 import { showToast } from '../ui/toast'
+import { clampMenuPosition } from '../ui/menu-geometry'
 import { findReferences } from '../secret-reference'
 import { commandFragment } from '../command-text'
 import { KIND_LABELS, type SecretKind } from '../secret-kind'
@@ -1031,15 +1032,31 @@ function buildOverflowMenu(
       menu.append(ask, stop)
     }
     menu.append(copyCmd, copyOut, copyAll, wrapItem)
-
     // Render at body level so it floats above all scroll containers (P1-6).
     document.body.appendChild(menu)
 
-    // Position relative to the button using fixed coordinates.
+    // Position relative to the button using fixed coordinates — clamped by
+    // the SAME geometry the kit's ContextMenu clamps through
+    // (ui/menu-geometry.ts, nocx-vnirv.2). This is not a second clamp: a
+    // running block sits at the bottom of the scrollback by construction, so
+    // an unclamped menu opens past the window's bottom edge and "Ask about
+    // this command" and "Stop" — the two items that exist ONLY while it runs
+    // — are off-screen. Measured AFTER the menu is in the DOM, because the
+    // clamp needs the laid-out size to keep the whole shell inside the
+    // viewport. A menu taller than the viewport still fits: the shell's
+    // `max-height` + `overflow-y` (style.css) scrolls within the menu.
     const btnRect = btn.getBoundingClientRect()
+    const menuRect = menu.getBoundingClientRect()
+    // Right-aligned to the button, exactly where the fixed `right` it
+    // replaces put it.
+    const { left, top } = clampMenuPosition(
+      { x: btnRect.right - menuRect.width, y: btnRect.bottom + 2 },
+      { width: menuRect.width, height: menuRect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
     menu.style.position = 'fixed'
-    menu.style.top = `${btnRect.bottom + 2}px`
-    menu.style.right = `${window.innerWidth - btnRect.right}px`
+    menu.style.left = `${left}px`
+    menu.style.top = `${top}px`
 
     // Close on outside click (after this event finishes).
     closeOnClick = (ev: MouseEvent) => {
@@ -1269,6 +1286,27 @@ export function createCommandBlock(
   })
 
   return wrapper
+}
+
+/**
+ * ONE stand-in for "work is happening here and nothing has been written
+ * yet" (nocx-vnirv.1): three dots where the first output line will land.
+ * The same markup stands in a TURN's children while the model thinks or a
+ * tool runs, and inside the LIVE REGION while a command runs — one class,
+ * one builder, one owner (AD-8). A second indicator that merely looked
+ * alike would be two owners of one fact, free to drift apart.
+ *
+ * `ariaLabel` is the caller's word for the work: the ask kind says
+ * "thinking" (its statusChips vocabulary); a command has no in-progress
+ * word of its own — its header reports with the spinner — so the
+ * command's stand-in carries none.
+ */
+function createWorkingIndicator(ariaLabel?: string): HTMLElement {
+  const typing = document.createElement('span')
+  typing.className = 'cmd-answer-typing'
+  if (ariaLabel) typing.setAttribute('aria-label', ariaLabel)
+  for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
+  return typing
 }
 
 /**
@@ -1591,6 +1629,12 @@ export class BlockManager {
     }
     claim.appendChild(el)
     this._owned.add(el)
+    // A turn's working stand-in marks where the answer will continue: a
+    // block that lands inside the turn's children goes ABOVE it, and the
+    // stand-in returns to the tail — the next output's position
+    // (nocx-vnirv.1).
+    const indicator = claim.querySelector(':scope > .cmd-answer-typing')
+    if (indicator) claim.appendChild(indicator)
   }
 
   /** The visual freeze REPLACES a block's element (`freezeBlock` swaps it in
@@ -1600,6 +1644,29 @@ export class BlockManager {
   private _reown(oldEl: HTMLElement, newEl: HTMLElement): void {
     this._owned.delete(oldEl)
     this._owned.add(newEl)
+  }
+  /** The "working, nothing written yet" stand-in for the RUNNING command,
+   *  inside the live region, where the first output line will be written
+   *  (nocx-vnirv.1). ONE element, idempotently rebuilt: a new command
+   *  replaces the previous command's stand-in. */
+  private _showCommandIndicator(): void {
+    this._clearCommandIndicator()
+    this._xtermContainer.appendChild(createWorkingIndicator())
+  }
+
+  private _clearCommandIndicator(): void {
+    this._xtermContainer.querySelector(':scope > .cmd-answer-typing')?.remove()
+  }
+
+  /** THE SEAM for "the first byte of the command's output arrived"
+   *  (nocx-vnirv.1): the renderer's writeParsed path calls this on the
+   *  first parsed write after the block opens, and the stand-in stands
+   *  down. Idempotent — every later chunk calls it again and nothing
+   *  changes. The call site lives in terminal-content.ts (renderer
+   *  onWriteParsed, beside scheduleLiveResize), which another worker owns;
+   *  this is the seam the coordinator wires. */
+  noteCommandOutput(): void {
+    this._clearCommandIndicator()
   }
 
   /**
@@ -1780,6 +1847,17 @@ export class BlockManager {
       this._runningActions,
     )
     this._ownNext(el)
+    // The running command's BODY is the live region — a sibling of the
+    // blocks, not a child of this one — so the "working, nothing written
+    // yet" stand-in stands THERE, where the first output line will be
+    // written (nocx-vnirv.1). The height constraint holds by construction:
+    // the stand-in is absolutely positioned inside the live container
+    // (style.css, .xterm-live-container.live-running > .cmd-answer-typing),
+    // so it takes no flow height, and the box the controller measures and
+    // sizes is exactly the box the frozen body replaces — nothing moves at
+    // the swap. Removed by the first byte of output (noteCommandOutput) or
+    // by the block's terminal freeze.
+    this._showCommandIndicator()
 
     const rec: BlockRecord = {
       id,
@@ -1866,6 +1944,10 @@ export class BlockManager {
     status: FrozenStatus,
   ): FrozenStatus {
     this._stopTicker()
+    // The running command's stand-in stands down with the command itself:
+    // a terminal freeze is a close, and no dots may type a command that
+    // will not write any more (nocx-vnirv.1).
+    this._clearCommandIndicator()
     rec.durationMs = this._cmdStartTime !== null ? this._now() - this._cmdStartTime : null
     this._cmdStartTime = null
     rec.exitCode = exitCode
@@ -2174,13 +2256,10 @@ export class BlockManager {
     // The answer says it is being written, WHERE it will be written. The
     // header chip is in the corner a person checks; this is where they are
     // already looking, and an empty turn under a finished question is
-    // indistinguishable from a product that did nothing. Removed by the first
-    // thing the turn draws.
-    const typing = document.createElement('span')
-    typing.className = 'cmd-answer-typing'
-    typing.setAttribute('aria-label', blockKindRules('ask').statusChips!.inProgress)
-    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement('i'))
-    children.appendChild(typing)
+    // indistinguishable from a product that did nothing. The ONE stand-in
+    // (nocx-vnirv.1): gone the moment the first thing lands, and RETURNED
+    // while a tool call is in flight and no prose is being written.
+    children.appendChild(createWorkingIndicator(blockKindRules('ask').statusChips!.inProgress))
 
     // Captured here rather than read off `this` inside the returned handle:
     // the handle's methods are declared `this: void` and are called as bare
@@ -2214,8 +2293,19 @@ export class BlockManager {
     const now = this._now
     const startedAt = now()
 
-    const stopTyping = (): void => {
-      children.querySelector('.cmd-answer-typing')?.remove()
+    /** Put the stand-in back, at the END of the children — where the next
+     *  thing the turn writes will land (nocx-vnirv.1). Idempotent: a turn
+     *  already showing it never stacks a second one. Shown while work is in
+     *  flight and nothing has been written yet: from open, and again while a
+     *  tool call runs. */
+    const showTyping = (): void => {
+      if (children.querySelector(':scope > .cmd-answer-typing')) return
+      children.appendChild(
+        createWorkingIndicator(blockKindRules('ask').statusChips!.inProgress),
+      )
+    }
+    const hideTyping = (): void => {
+      children.querySelector(':scope > .cmd-answer-typing')?.remove()
     }
     const stopWaiting = (): void => {
       el.querySelector('.cmd-header-right .cmd-answer-waiting')?.remove()
@@ -2224,7 +2314,7 @@ export class BlockManager {
       // children stop standing in for text. A run that fails before any delta
       // clears both, or the dots would go on typing an answer that will never
       // arrive.
-      stopTyping()
+      hideTyping()
     }
 
     /** The run of prose being written, and the STORE's id for it. */
@@ -2282,7 +2372,7 @@ export class BlockManager {
       // function a RESTORED answer draws through, so a turn that comes back
       // after a restart is painted by the code that painted it live
       // (nocx-4em1z).
-      const body = createAnswerBody(outputEl, { store, onContent: stopTyping })
+      const body = createAnswerBody(outputEl, { store, onContent: hideTyping })
       prose = { body, blockId: blockId ?? null }
       return body
     }
@@ -2300,11 +2390,15 @@ export class BlockManager {
         // is one.
         if (call.callId !== '' && seenCalls.has(call.callId)) return
         if (call.callId !== '') seenCalls.add(call.callId)
-        stopTyping()
         // The run of prose above ends here whatever the call turns out to be:
         // the backend sealed its `text` block when this call arrived, and the
         // next delta names the next one.
         endProse()
+        // No prose is being written while the call runs, so the stand-in
+        // returns to the children — where the answer will continue — until
+        // the next delta lands (nocx-vnirv.1). The corner keeps reporting
+        // meanwhile: the waiting chip is removed only by a delta or a close.
+        showTyping()
         if (call.opensBlock) {
           // THE BLOCK IS THE ACCOUNT OF THIS CALL (ADR-0037). The command is
           // submitted through the ordinary path, and the turn claims the seat
@@ -2364,7 +2458,7 @@ export class BlockManager {
           // which is where a model that thinks before it speaks belongs.
           if (prose) prose.body.insert(reasoningNote.el)
           else {
-            stopTyping()
+            hideTyping()
             children.appendChild(reasoningNote.el)
           }
         }
@@ -2411,6 +2505,7 @@ export class BlockManager {
   clearAll(): void {
     this._stopTicker()
     this._cancelPendingFence()
+    this._clearCommandIndicator()
     // ONE list, because there is one owner: whatever this manager put in
     // the container comes out, whether it was a live block, an answer or a
     // restored one under its boundary (nocx-0zb1m).
@@ -2431,6 +2526,7 @@ export class BlockManager {
     // frozen block, never to the running block this finalizes — its timer
     // settles it independently, guarded by the running slot.
     this._stopTicker()
+    this._clearCommandIndicator()
     if (!this._runningBlock) return
     this._runningBlock.status = 'failure'
     this._runningBlock.exitCode = null
