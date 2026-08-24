@@ -246,6 +246,53 @@ func TestAgentAsk_ProseEitherSideOfACallIsTwoBlocks(t *testing.T) {
 	}
 }
 
+// TestAgentAsk_ProseEitherSideOfACallWithNoIdIsTwoBlocks: the same scenario
+// with an EMPTY call id. The call id is the model's own name for a call —
+// optional on the wire, absent from some providers — and nothing about the
+// boundary may key on it: a call that cannot name itself is still a call,
+// and the prose on either side of it is still two runs. Without this, the
+// seam is only proven for the case where the id happens to be present, and
+// a server that sends a boundary whose call carries no id merges the two
+// blocks again — exactly the mask the renderer fix removed, re-entering
+// through the id's optionality.
+func TestAgentAsk_ProseEitherSideOfACallWithNoIdIsTwoBlocks(t *testing.T) {
+	h := newAskHarness(t, &toolCallScript{events: []assistant.AskEvent{
+		answerEvent("let me "), answerEvent("look:"),
+		callEvent("", "files.read", ""),
+		answerEvent(" it says"), answerEvent(" hello"),
+	}})
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	turn := askAndWaitForState(t, h, sid, "what does it say?")
+
+	prose := proseUnder(t, h.db.Ledger(), turn)
+	if len(prose) != 2 {
+		t.Fatalf("a call with no id left %d prose blocks, want exactly two — one either side of the call: %+v",
+			len(prose), prose)
+	}
+	if prose[0].text != "let me look:" {
+		t.Errorf("the first block reads %q, want what was said before the call", prose[0].text)
+	}
+	if prose[1].text != " it says hello" {
+		t.Errorf("the second block reads %q, want what was said after the call", prose[1].text)
+	}
+	if prose[0].pos >= prose[1].pos {
+		t.Fatalf("the two blocks are seated %d and %d — the second must come after the first",
+			prose[0].pos, prose[1].pos)
+	}
+	// Two blocks means two ids, and the wire must be able to tell them
+	// apart: this is the fact the renderer keys on.
+	if prose[0].entryID == prose[1].entryID {
+		t.Fatalf("both blocks carry entry id %q — the wire cannot tell the two runs of prose apart",
+			prose[0].entryID)
+	}
+	for i, p := range prose {
+		if p.state != content.ArtifactSealed {
+			t.Errorf("prose block %d is %q after the run terminalized, want sealed", i, p.state)
+		}
+	}
+}
+
 // The paired negative for the same mechanism: with NO call in the middle, the
 // same amount of text is ONE block. Without this, "two blocks" above could be
 // two blocks for any reason at all — one per delta, say — and the test would

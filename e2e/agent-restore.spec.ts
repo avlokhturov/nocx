@@ -189,6 +189,39 @@ async function storedWith(
     .toBe(true)
 }
 
+/** Wait until the STORE holds a turn and its PROSE text child carries a
+ *  text/plain body (ADR-0037: the answer is a `text` child, and the child
+ *  owns its own artifact). The command/agent halves still use `storedWith`
+ *  — their bodies hang on the entry or an execution. */
+async function storedProseChild(
+  page: Page,
+  ep: { port: number; token: string },
+  intent: string,
+): Promise<void> {
+  await expect
+    .poll(
+      async () => {
+        const listed = (await rpc(page, ep, 'ledger.query', {
+          scope: 'everywhere',
+          limit: 200,
+        })) as { entries?: { id: string; intent: string }[] }
+        const turn = (listed.entries ?? []).find((e) => e.intent === intent)
+        if (!turn) return false
+        const detail = (await rpc(page, ep, 'ledger.get', { id: turn.id })) as {
+          caused?: { entryId: string; kind: string }[]
+        }
+        const prose = (detail.caused ?? []).find((c) => c.kind === 'text')
+        if (!prose) return false
+        const child = (await rpc(page, ep, 'ledger.get', { id: prose.entryId })) as {
+          artifacts?: { mediaType: string }[]
+        }
+        return (child.artifacts ?? []).some((a) => a.mediaType === 'text/plain')
+      },
+      { timeout: 60_000, message: `the store never held "${intent}"'s prose child body` },
+    )
+    .toBe(true)
+}
+
 async function openSettings(page: Page, navSelector: string): Promise<void> {
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
@@ -221,29 +254,13 @@ function blockFor(page: Page, text: string) {
 }
 
 async function finished(page: Page, text: string): Promise<void> {
-  await expect(blockFor(page, text).locator('.cmd-header-exit')).toHaveText('completed', {
-    timeout: 30_000,
-  })
-}
-
-/**
- * Every block in the active pane, in DOCUMENT ORDER, as
- * `kind|fragment|header` (nocx-9sqii).
- *
- * Document order IS the claim the product makes — in a terminal, vertical
- * position is a claim about time — so the assertion is taken off the order
- * itself rather than off "the block exists somewhere". The fragment index is
- * in the row because a turn that ran a command is drawn as several blocks,
- * and "which fragment" is half of what a reader has to be able to tell.
- */
-async function flowRows(page: Page): Promise<string[]> {
-  return page.evaluate(() =>
-    Array.from(document.querySelectorAll('.pane.active .cmd-block')).map((b) => {
-      const el = b as HTMLElement
-      return `${el.dataset.blockKind ?? 'command'}|${el.dataset.turnFragment ?? ''}|${
-        el.querySelector('.cmd-header-text')?.textContent ?? ''
-      }`
-    }),
+  // The turn's OWN chip — `:scope > .cmd-header`, never a child command's
+  // nested `ok` chip (both are `.cmd-header-exit`).
+  await expect(blockFor(page, text).locator(':scope > .cmd-header .cmd-header-exit')).toHaveText(
+    'completed',
+    {
+      timeout: 30_000,
+    },
   )
 }
 
@@ -307,7 +324,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     // A real tool-calling run is two model responses: the proposal, then the
     // answer written from the tool's result.
     fake.setScript({
-      chunks: [],
+      chunks: ['Let me check.'],
       toolCalls: [{ name: 'run', arguments: { sessionId, command: AGENT_COMMAND } }],
     })
     fake.setScript({ chunks: ['Plenty.'] })
@@ -320,25 +337,32 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     const liveAgentBlock = blockFor(page, AGENT_COMMAND).first()
     await expect(liveAgentBlock).toBeVisible({ timeout: 30_000 })
 
-    // ── The turn reads in the order it happened (nocx-9sqii, criterion 1) ─
+    // ── The turn reads in the order it happened (ADR-0037) ─────────────
     // The owner's report was this sequence inverted: the answer finished
-    // above the evidence it was distilled from, and the `▸ run` line that
-    // stood in the answer's place carried neither the command nor its
-    // output. So the assertion is document order across the whole flow —
-    // question, the command's OWN block, the answer written from it.
-    const liveOrder = (await flowRows(page)).filter(
-      (r) => r.includes(SECOND_QUESTION) || r.includes(AGENT_COMMAND),
-    )
-    expect(liveOrder).toEqual([
-      `ask|0|${SECOND_QUESTION}`,
-      `command||${AGENT_COMMAND}`,
-      `ask|1|${SECOND_QUESTION}`,
-    ])
-    // The answer written from the output is BELOW the block, in the turn's
-    // continuation — and the continuation says it is one.
-    const continuation = blockFor(page, SECOND_QUESTION).last()
-    await expect(continuation.locator('[data-answer-body]')).toContainText('Plenty.')
-    await expect(continuation.locator('[data-turn-continuation]')).toHaveText('continued')
+    // above the evidence it was distilled from. Now the turn is ONE block
+    // whose OWN header is the question and whose children are the causal
+    // sequence — the run's command block between the prose before it and
+    // the prose written from it — with no fragment, no `continued` badge
+    // and no repeated question.
+    const liveTurn = blockFor(page, SECOND_QUESTION)
+    await expect(liveTurn).toHaveCount(1)
+    // The question is its own header, and appears exactly once (criterion 4).
+    const liveHeaders = await liveTurn
+      .locator(':scope > .cmd-header .cmd-header-text')
+      .allTextContents()
+    expect(liveHeaders.filter((h) => h === SECOND_QUESTION)).toHaveLength(1)
+    // The children, in seat order: the prose run, the command block, the
+    // prose written from it. The command block is INSIDE the turn.
+    const liveChildren = liveTurn.locator(':scope > .cmd-children > .cmd-block')
+    await expect(liveChildren).toHaveCount(3)
+    await expect(liveChildren.nth(0)).toHaveAttribute('data-block-kind', 'text')
+    await expect(liveChildren.nth(1)).toHaveAttribute('data-block-kind', 'command')
+    await expect(liveChildren.nth(1).locator('.cmd-header-text')).toContainText(AGENT_COMMAND)
+    await expect(liveChildren.nth(2)).toHaveAttribute('data-block-kind', 'text')
+    await expect(liveChildren.nth(2).locator('[data-answer-body]')).toContainText('Plenty.')
+    // A turn is one block: no fragment, no continuation badge anywhere.
+    await expect(page.locator('.pane.active [data-turn-continuation]')).toHaveCount(0)
+    await expect(page.locator('.pane.active [data-turn-fragment]')).toHaveCount(0)
     // Criterion 2: no surface restates the command. The `run` call left no
     // line at all — the block is the account of it — and this pane's other
     // turn made no calls, so nothing anywhere claims one.
@@ -352,7 +376,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     //    killed. Without this the restart races the write.
     await storedWith(page, endpoint, SHELL_COMMAND, 'application/vt')
     await storedWith(page, endpoint, AGENT_COMMAND, 'application/vt')
-    await storedWith(page, endpoint, QUESTION, 'text/plain')
+    await storedProseChild(page, endpoint, QUESTION)
 
     // ── The application restarts ──────────────────────────────────────────
     // Nothing in the first process survives it, including the shell and the
@@ -375,32 +399,63 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
 
     // The assistant's command: still a command block, still carrying its
     // output, and it still says who ran it. This is the badge half.
-    const agent = blockFor(page, AGENT_COMMAND).first()
+    // BY ITS OWN HEADER, not by containing the text (ADR-0037). A command
+    // the assistant ran is a CHILD of its turn now, so the turn contains
+    // that text too and `blockFor(...).first()` picks the turn — whose kind
+    // is `ask`, which is what this used to fail on. A block whose own
+    // header is the command is exactly one block, and it is this one.
+    const agent = page.locator('.pane.active .cmd-block').filter({
+      has: page.locator(':scope > .cmd-header .cmd-header-text', { hasText: AGENT_COMMAND }),
+    })
     await expect(agent).toHaveAttribute('data-restored', 'true')
     await expect(agent).toHaveAttribute('data-block-kind', 'command')
     await expect(agent.locator('.cmd-output')).toContainText(`RAN-BY-THE-ASSISTANT-${nonce}`)
     await expect(agent.locator('.ui-badge[data-author="agent"]')).toBeVisible()
 
     // The dialogue: back at all — it used to be absent entirely — and back as
-    // the turn it was. The question is the block's own line, the answer is
-    // the prose body, and the kind is `ask` rather than `command`, which is
-    // what keeps the prose wrapping instead of being held to a grid.
+    // the turn it was. The question is the block's own line and the answer
+    // is a `text` CHILD (ADR-0037: a turn carries the prose it wrote as a
+    // child in seat order, and a restored prose child carries its text).
+    // The kind is `ask` rather than `command`, which is what keeps the prose
+    // wrapping instead of being held to a grid.
     const turn = blockFor(page, QUESTION).first()
     await expect(turn).toHaveAttribute('data-restored', 'true')
     await expect(turn).toHaveAttribute('data-block-kind', 'ask')
-    await expect(turn.locator('[data-answer-body]')).toContainText(ANSWER)
+    await expect(
+      turn.locator(':scope > .cmd-children > .cmd-block[data-block-kind="text"] .term-line'),
+    ).toContainText(ANSWER)
     // And the sentence reserved for a body retention has evicted is NOT what
     // a turn whose answer is right there gets (ADR-0019 §7).
     await expect(turn).not.toHaveAttribute('data-output-evicted', 'true')
 
-    // The turn that RAN something comes back arranged as it was drawn
-    // (nocx-9sqii, criterion 9): the relation and the prose anchor are
-    // stored, so the restored view of one turn agrees with the live one it
-    // came from — the same rows, in the same order.
-    const restoredOrder = (await flowRows(page)).filter(
-      (r) => r.includes(SECOND_QUESTION) || r.includes(AGENT_COMMAND),
+    // The turn that RAN something comes back arranged exactly as it was
+    // drawn (ADR-0037 criterion 9): the relation and the prose anchors are
+    // stored, so the restored view of one turn is the live one it came
+    // from — ONE turn block, its question once, its children in the same
+    // seats, and the restored prose child carrying its text.
+    const restoredTurnBlock = blockFor(page, SECOND_QUESTION)
+    await expect(restoredTurnBlock).toHaveCount(1)
+    await expect(restoredTurnBlock).toHaveAttribute('data-restored', 'true')
+    await expect(restoredTurnBlock).toHaveAttribute('data-block-kind', 'ask')
+
+    const restoredHeaders = await restoredTurnBlock
+      .locator(':scope > .cmd-header .cmd-header-text')
+      .allTextContents()
+    expect(restoredHeaders.filter((h) => h === SECOND_QUESTION)).toHaveLength(1)
+    const restoredChildren = restoredTurnBlock.locator(':scope > .cmd-children > .cmd-block')
+    await expect(restoredChildren).toHaveCount(3)
+    await expect(restoredChildren.nth(0)).toHaveAttribute('data-block-kind', 'text')
+    await expect(restoredChildren.nth(0).locator('.term-line')).toContainText('Let me check.')
+    await expect(restoredChildren.nth(1)).toHaveAttribute('data-block-kind', 'command')
+    await expect(restoredChildren.nth(1).locator('.cmd-header-text')).toContainText(AGENT_COMMAND)
+    await expect(restoredChildren.nth(1).locator('.cmd-output')).toContainText(
+      `RAN-BY-THE-ASSISTANT-${nonce}`,
     )
-    expect(restoredOrder).toEqual(liveOrder)
+    await expect(restoredChildren.nth(2)).toHaveAttribute('data-block-kind', 'text')
+    await expect(restoredChildren.nth(2).locator('.term-line')).toContainText('Plenty.')
+    // No fragment, no continuation badge — yes, a turn is one block.
+    await expect(page.locator('.pane.active [data-turn-continuation]')).toHaveCount(0)
+    await expect(page.locator('.pane.active [data-turn-fragment]')).toHaveCount(0)
     await expect(page.locator('.pane.active .ui-tool-call')).toHaveCount(0)
   })
 })

@@ -228,6 +228,17 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 			// Read-once, must close exactly once (schema/stream.go) —
 			// drained to EOF or returned early, either way it closes.
 			defer stream.Close()
+			// With a tool set registered (handlers non-empty), the
+			// answer-order middleware drained THIS response's stream on the
+			// graph goroutine and emitted every chunk through the same
+			// callback BEFORE the response reached the tools node
+			// (answer_order.go). The event's stream is a second copy of the
+			// same chunks, and draining it here would emit each one twice.
+			// len(handlers) is the exact condition: the middleware is
+			// registered in Ask exactly when handlers is built.
+			if len(handlers) > 0 {
+				continue
+			}
 			for {
 				msg, err := stream.Recv()
 				if errors.Is(err, io.EOF) {
@@ -301,12 +312,12 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// ONE ordered stream, and the mutex is what makes it one. The events
 	// have two producers on two goroutines: this function's loop over the
 	// agent's iterator, and the policy middleware, which runs inside eino's
-	// tool node. Their relative order is already decided by the graph — a
-	// tool node cannot start before the model stream that proposed the call
-	// has been produced, and the answer written FROM a result cannot be
-	// produced before the tool returns — but two goroutines calling one
-	// callback would still interleave two writes. This serializes them so
-	// the caller sees a stream, not a race.
+	// tool node. The GRAPH orders them — a response's chunks are emitted by
+	// the answer-order middleware on the graph goroutine before the tools
+	// node can propose its calls (answer_order.go), and the answer written
+	// FROM a result cannot be produced before the tool returns — but two
+	// goroutines calling one callback would still interleave two writes.
+	// This serializes them so the caller sees a stream, not a race.
 	var emitMu sync.Mutex
 	emit := func(e AskEvent) error {
 		emitMu.Lock()
@@ -325,6 +336,18 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// the tally block the stream.
 	var answerMu sync.Mutex
 	var text strings.Builder
+	// The one callback both producers emit through: the engine's stream
+	// drain, the answer-order middleware's drain (answer_order.go), and the
+	// policy middleware's tool-call announcements. The accumulator lives
+	// here so a chunk emitted from either drain is tallied the same way.
+	sink := func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			answerMu.Lock()
+			text.WriteString(e.Text)
+			answerMu.Unlock()
+		}
+		return emit(e)
+	}
 
 	var declared []tool.BaseTool
 	var handlers []adk.ChatModelAgentMiddleware
@@ -358,7 +381,14 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			if err != nil {
 				return err
 			}
-			handlers = append(handlers, mw)
+			// FIRST, so it is the outermost user wrapper: its Stream runs
+			// before the policy middleware's and before the framework's
+			// event sender forwards the response, which is what puts every
+			// chunk of a response ahead of its tool-call event (the
+			// transport's prose boundary depends on that order — see
+			// answer_order.go). The policy middleware does not wrap the
+			// model, so the two orders are equivalent; this one is stated.
+			handlers = append(handlers, newOrderedAnswerMiddleware(sink), mw)
 		}
 	}
 
@@ -367,14 +397,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, func(e AskEvent) error {
-		if e.Kind == AskAnswer {
-			answerMu.Lock()
-			text.WriteString(e.Text)
-			answerMu.Unlock()
-		}
-		return emit(e)
-	})
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can

@@ -4939,6 +4939,97 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
+  it('two runs of prose behind one turn keep their boundary: the backend’s block id must reach the manager (w-call-id-order)', async () => {
+    // The backend names the `text` child a delta appends to (ADR-0037):
+    // it seals one block when a call arrives and opens the NEXT on the
+    // first delta after it, and the id rides every delta. The one seam that
+    // can lose that fact is the openAnswer wrapper — it used to forward
+    // append with a single argument, so a delta naming the next block
+    // reached the manager as "no boundary" and two runs of prose merged
+    // into one block. That is the id-less turn's "2 of 3 children". The
+    // turn must draw the two runs as two children, in the order they
+    // arrived, with no call announcement needed to explain the split.
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      typeAndAsk(ed, content, 'how much disk is free?')
+      await vi.waitFor(() => {
+        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
+      })
+      const withScrollback = content as unknown as { scrollback: ScrollbackController }
+      const scrollback = withScrollback.scrollback
+      // The run's entry id lands on the block when the ask RESOLVES — a
+      // delta delivered before then is refused by the routing check
+      // (agent-ask.ts, "a stale undefined id"). Wait on the DOM fact the
+      // route keys on, never on a duration.
+      await vi.waitFor(() => {
+        const ask = Array.from(
+          scrollback.scrollbackInner.querySelectorAll<HTMLElement>('.cmd-block'),
+        ).find((b) => b.dataset.blockKind === 'ask')
+        expect(ask?.dataset.entryId).toBe('entry-7')
+      })
+
+      // One run of prose, the block's id — then the boundary: the backend
+      // sealed that block and the next delta names a NEW one. The split is
+      // the backend's fact; all the renderer has to do is pass it through.
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 7,
+        entryId: 'entry-7',
+        blockId: 'text-1',
+        seq: 0,
+        text: 'Let me check.',
+      })
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 7,
+        entryId: 'entry-7',
+        blockId: 'text-2',
+        seq: 1,
+        text: 'Plenty.',
+      })
+
+      const turn = Array.from(
+        scrollback.scrollbackInner.querySelectorAll<HTMLElement>('.cmd-block'),
+      ).find((b) => b.dataset.blockKind === 'ask')
+      expect(turn).toBeTruthy()
+      const prose = turn!.querySelectorAll<HTMLElement>(
+        ':scope > .cmd-children > .cmd-block[data-block-kind="text"]',
+      )
+      expect(prose).toHaveLength(2)
+      const bodies = Array.from(prose).map(
+        (p) => p.querySelector('[data-answer-body]')?.textContent,
+      )
+      expect(bodies).toEqual(['Let me check.', 'Plenty.'])
+
+      // The paired end (AGENTS.md rule 3): a chunk naming the SAME block
+      // continues that run — the id is a boundary only when it CHANGES. The
+      // wire fact must pass through the wrapper in both directions.
+      deliverNotification(client, 'agent.runDelta', {
+        runId: 7,
+        entryId: 'entry-7',
+        blockId: 'text-2',
+        seq: 2,
+        text: ' enough.',
+      })
+      const proseAfter = turn!.querySelectorAll<HTMLElement>(
+        ':scope > .cmd-children > .cmd-block[data-block-kind="text"]',
+      )
+      expect(proseAfter).toHaveLength(2)
+      const continued = Array.from(proseAfter).map(
+        (p) => p.querySelector('[data-answer-body]')?.textContent,
+      )
+      expect(continued).toEqual(['Let me check.', 'Plenty. enough.'])
+    } finally {
+      teardown()
+    }
+  })
+
   it('with no endpoint configured, a question surfaces the refusal on the surface — the toast, never a silent drop', async () => {
     const client = makeClient()
     const dispatcherCalls: Array<{ method: string; params: unknown }> = []

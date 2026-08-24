@@ -1460,8 +1460,8 @@ export class TerminalContent extends BasePaneContent {
           // gone elsewhere.
           return {
             ...handle,
-            append: (text: string) => {
-              handle.append(text)
+            append: (text: string, blockId?: string) => {
+              handle.append(text, blockId)
               this.scrollback?.scrollToBottom()
             },
             // A tool call and a chunk of thinking grow the block exactly as
