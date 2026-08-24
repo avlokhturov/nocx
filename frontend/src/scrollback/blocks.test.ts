@@ -2130,7 +2130,6 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
   })
-
 })
 
 // ── The ONE "working, nothing written yet" stand-in (nocx-vnirv.1) ───────

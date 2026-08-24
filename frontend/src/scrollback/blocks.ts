@@ -2272,11 +2272,7 @@ export class BlockManager {
    * Returns the handle the ask surface writes the turn through; nothing else
    * touches the turn's DOM.
    */
-  addAnswerBlock(
-    question: string,
-    cwd: string,
-    running?: RunningBlockActions,
-  ): AnswerBlockHandle {
+  addAnswerBlock(question: string, cwd: string, running?: RunningBlockActions): AnswerBlockHandle {
     const id = this._nextId++
     const el = createCommandBlock(
       'ask',
@@ -2531,11 +2527,7 @@ export class BlockManager {
         stopWaiting()
         proseBody(blockId).append(text)
       },
-      close(
-        status: 'success' | 'failure' | 'cancelled',
-        error?: string,
-        model?: string,
-      ): void {
+      close(status: 'success' | 'failure' | 'cancelled', error?: string, model?: string): void {
         el.dispatchEvent(new Event('nocx:block-settled'))
         stopWaiting()
         endProse()

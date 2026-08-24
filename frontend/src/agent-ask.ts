@@ -43,11 +43,7 @@ export interface AgentAskSeams {
   cwd: () => string
   /** Render the answer block for one ask; the returned handle is the ONLY
    *  way the block's body and status change. */
-  openAnswer: (
-    question: string,
-    cwd: string,
-    running?: RunningBlockActions,
-  ) => AnswerBlockHandle
+  openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
   /** A refusal the surface must render (e.g. "no endpoint configured") —
    *  the product's rule: a soft degrade is visible, never only in a log.
    *  The ask surface raises it through the kit's one notification
