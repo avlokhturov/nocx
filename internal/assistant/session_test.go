@@ -39,7 +39,6 @@ type sessionScreenRequester struct {
 	err  error
 }
 
-
 func (r sessionScreenRequester) RequestScreen(context.Context, string, *FrameRegion) (json.RawMessage, error) {
 	return r.body, r.err
 }
@@ -119,9 +118,20 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 	if err := json.Unmarshal(body, &frame); err != nil {
 		t.Fatal(err)
 	}
-	identity := frame["identity"].(map[string]any)
-	identity["buffer"].(map[string]any)["kind"] = "alternate"
-	body, _ = json.Marshal(frame)
+	identity, ok := frame["identity"].(map[string]any)
+	if !ok {
+		t.Fatal("frame identity is not an object")
+	}
+	buffer, ok := identity["buffer"].(map[string]any)
+	if !ok {
+		t.Fatal("frame buffer is not an object")
+	}
+	buffer["kind"] = "alternate"
+	encoded, err := json.Marshal(frame)
+	if err != nil {
+		t.Fatalf("marshal alternate frame: %v", err)
+	}
+	body = encoded
 
 	out, err := executeSessionRead(context.Background(), reader, nil, sessionScreenRequester{body: body}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
@@ -142,6 +152,62 @@ func TestExecuteSessionRead_PropagatesLedgerAndRendererFailures(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
 	if _, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
 		t.Fatalf("renderer error = %v, want renderer failure", err)
+	}
+}
+
+func TestExecuteSessionRead_ExitedBoundsTextAndReturnedEnd(t *testing.T) {
+	const line = "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+	lines := make([]string, 600)
+	for i := range lines {
+		lines[i] = line
+	}
+	text := strings.Join(lines, "\n")
+	expectedLines := maxBlockWindowBytes / (len(line) + 1)
+	expectedText := strings.Join(lines[:expectedLines], "\n")
+	source := &sessionSourceFake{item: SessionItemRead{
+		ID: "item-1", State: "exited", Total: len(lines), Start: 0, End: len(lines), Text: text,
+	}}
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+
+	out, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
+	if err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	var result sessionReadResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Text != expectedText {
+		t.Fatalf("text has %d bytes, want %d bytes ending on line %d", len(result.Text), len(expectedText), expectedLines)
+	}
+	if result.Returned.End != expectedLines {
+		t.Fatalf("returned end = %d, want %d for %d carried lines", result.Returned.End, expectedLines, expectedLines)
+	}
+}
+
+func TestExecuteSessionRead_LiveScreenBoundsTextAndReturnedEnd(t *testing.T) {
+	const line = "yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+	lines := make([]string, 600)
+	for i := range lines {
+		lines[i] = line
+	}
+	expectedLines := maxBlockWindowBytes / (len(line) + 1)
+	expectedText := strings.Join(lines[:expectedLines], "\n")
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+
+	out, err := executeSessionRead(context.Background(), reader, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	if err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	var result sessionReadResult
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.Text != expectedText {
+		t.Fatalf("text has %d bytes, want %d bytes ending on line %d", len(result.Text), len(expectedText), expectedLines)
+	}
+	if result.Returned.End != expectedLines {
+		t.Fatalf("returned end = %d, want %d for %d carried lines", result.Returned.End, expectedLines, expectedLines)
 	}
 }
 

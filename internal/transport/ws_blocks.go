@@ -176,7 +176,6 @@ func (s *WSServer) ReadSessionItem(ctx context.Context, sessionID, itemID string
 	return item, nil
 }
 
-
 // blockBodyResult is what the store kept for one block: the text, whether it
 // kept anything at all, and whether what it kept lost its middle to the
 // capture cap.

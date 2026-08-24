@@ -144,7 +144,6 @@ func toolsDirFS(t *testing.T) fs.FS {
 	return os.DirFS(realToolsFS)
 }
 
-
 // ── the middleware ───────────────────────────────────────────────────────
 
 // The wiring gap is honest: a run whose block seam is not wired refuses the
@@ -205,7 +204,6 @@ func (r *blocksOnlyRequester) RequestRun(context.Context, string, string) (json.
 	return nil, errors.New("blocks test: RequestRun is not scripted")
 }
 
-
 func (r *blocksOnlyRequester) ListSessionItems(ctx context.Context, sessionID string, limit int) (SessionItems, error) {
 	return r.blocks.ListSessionItems(ctx, sessionID, limit)
 }
@@ -213,6 +211,7 @@ func (r *blocksOnlyRequester) ListSessionItems(ctx context.Context, sessionID st
 func (r *blocksOnlyRequester) ReadSessionItem(ctx context.Context, sessionID, itemID string, start, count int) (SessionItemRead, error) {
 	return r.blocks.ReadSessionItem(ctx, sessionID, itemID, start, count)
 }
+
 // there. The answer is the marker that lives on line 397 and nowhere else,
 // so a run that read the head of the block cannot pass this.
 func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {

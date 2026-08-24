@@ -94,6 +94,7 @@ func indexNewline(s string) int {
 	}
 	return -1
 }
+
 // SessionSource is the shared read seam for session.list and session.read.
 // The transport implements it from the ledger for item state and finished
 // output. A running item is completed by the renderer half of session.read,
@@ -117,15 +118,15 @@ type SessionItems struct {
 }
 
 type SessionItemRead struct {
-	ID        string
-	Command   string
-	State     string
-	ExitCode  *int
-	Total     int
-	Start     int
-	End       int
-	Text      string
-	Note      string
+	ID       string
+	Command  string
+	State    string
+	ExitCode *int
+	Total    int
+	Start    int
+	End      int
+	Text     string
+	Note     string
 }
 
 type sessionListResult struct {
@@ -191,9 +192,7 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 		More:      items.More,
 	}
 	for _, item := range items.Items {
-		out.Items = append(out.Items, sessionListItem{
-			ID: item.ID, Command: item.Command, State: item.State, ExitCode: item.ExitCode, Lines: item.Lines,
-		})
+		out.Items = append(out.Items, sessionListItem(item))
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
@@ -237,6 +236,7 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	if item.State == "running" {
 		return executeSessionItemScreen(ctx, p.SessionID, p.ID, requester, p.Start, p.Count)
 	}
+	outText, returnedEnd := boundBlockText(item.Text, item.Start, item.End)
 	out := sessionReadResult{
 		SessionID: p.SessionID,
 		ID:        item.ID,
@@ -245,8 +245,8 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		ExitCode:  item.ExitCode,
 		Total:     item.Total,
 		Window:    blockSpan{Start: p.Start, End: p.Start + p.Count},
-		Returned:  blockSpan{Start: item.Start, End: item.End},
-		Text:      item.Text,
+		Returned:  blockSpan{Start: item.Start, End: returnedEnd},
+		Text:      outText,
 		Note:      item.Note,
 	}
 	b, err := json.Marshal(out)
@@ -262,8 +262,8 @@ func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, req
 		return "", err
 	}
 	var screen sessionReadResult
-	if err := json.Unmarshal([]byte(body), &screen); err != nil {
-		return "", fmt.Errorf("session.read: screen result: %w", err)
+	if unmarshalErr := json.Unmarshal([]byte(body), &screen); unmarshalErr != nil {
+		return "", fmt.Errorf("session.read: screen result: %w", unmarshalErr)
 	}
 	screen.ID = itemID
 	screen.State = "running"
@@ -287,8 +287,8 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		return "", err
 	}
 	var frame frameBodyWire
-	if err := json.Unmarshal(body, &frame); err != nil {
-		return "", fmt.Errorf("session.read: frame body: %w", err)
+	if unmarshalErr := json.Unmarshal(body, &frame); unmarshalErr != nil {
+		return "", fmt.Errorf("session.read: frame body: %w", unmarshalErr)
 	}
 	if frame.Identity == nil {
 		return "", errors.New("session.read: the renderer's frame carried no capture identity")
@@ -313,6 +313,8 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		}
 		lines = append(lines, line.String())
 	}
+	text, returnedEnd := boundBlockText(strings.Join(lines, "\n"), returned.Start, returned.End)
+	returned.End = returnedEnd
 	out := sessionReadResult{
 		SessionID: sessionID,
 		State:     "screen",
@@ -320,7 +322,7 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		Total:     frame.Identity.Rows,
 		Window:    asked,
 		Returned:  returned,
-		Text:      strings.Join(lines, "\n"),
+		Text:      text,
 	}
 	if frame.Cursor != nil {
 		out.Cursor = &readScreenCursor{Line: frame.Cursor.Line, Col: frame.Cursor.Col}

@@ -49,4 +49,3 @@ func narrowSession(grant content.Grant) (Capability, error) {
 func narrowRun(grant content.Grant) (Capability, error) {
 	return NewRunner(grant.Scopes), nil
 }
-
