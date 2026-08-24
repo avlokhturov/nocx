@@ -1337,13 +1337,17 @@ export function SettingsComponent(props: SettingsComponentProps) {
                       when={section === INSTRUCTIONS_SECTION}
                       fallback={
                         <For each={sectionDecls()}>
-                          {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
                         </For>
                       }
                     >
                       <Section title="What the person added" divided>
                         <For each={sectionDecls()}>
-                          {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
                         </For>
                       </Section>
                     </Show>

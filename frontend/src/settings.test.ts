@@ -1213,7 +1213,9 @@ describe("the person's own instructions to the assistant", () => {
     expect(heading).toBeTruthy()
     expect(row!.textContent).toContain('Your instructions to the assistant')
     expect(prompt!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(prompt!.compareDocumentPosition(heading!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      prompt!.compareDocumentPosition(heading!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
     expect(heading!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(prompt!.compareDocumentPosition(area) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
   })
