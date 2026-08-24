@@ -4,6 +4,8 @@
 // @vitest-environment jsdom
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import {
   BlockManager,
   createCommandBlock,
@@ -17,6 +19,7 @@ import {
   FENCE_DEFER_MS,
   type BlockKind,
 } from './blocks'
+import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
 import { clearToasts, toasts } from '../ui/toast'
@@ -1791,29 +1794,28 @@ function clickMenuItem(blockEl: HTMLElement, label: string): void {
     .find((b) => b.textContent === label)!
     .dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
 }
+function newManager(
+  sessionName?: (id: string) => string | null,
+  answerText?: (entryId: string) => Promise<string | null>,
+) {
+  const inner = document.createElement('div')
+  // Attached to the document, like the real scrollback: the settings
+  // applier that opens the thinking notes already on screen walks the
+  // document, and a detached tree is not on screen.
+  document.body.appendChild(inner)
+  const xtermContainer = document.createElement('div')
+  // The manager inserts blocks BEFORE the xterm container, so the
+  // container must already be a child (the mount path attaches both).
+  inner.appendChild(xtermContainer)
+  const manager = new BlockManager(inner, xtermContainer, {
+    snapshotStore: freshStore(),
+    sessionName,
+    answerText,
+  })
+  return { inner, xtermContainer, manager }
+}
 
 describe('BlockManager.addAnswerBlock', () => {
-  function newManager(
-    sessionName?: (id: string) => string | null,
-    answerText?: (entryId: string) => Promise<string | null>,
-  ) {
-    const inner = document.createElement('div')
-    // Attached to the document, like the real scrollback: the settings
-    // applier that opens the thinking notes already on screen walks the
-    // document, and a detached tree is not on screen.
-    document.body.appendChild(inner)
-    const xtermContainer = document.createElement('div')
-    // The manager inserts blocks BEFORE the xterm container, so the
-    // container must already be a child (the mount path attaches both).
-    inner.appendChild(xtermContainer)
-    const manager = new BlockManager(inner, xtermContainer, {
-      snapshotStore: freshStore(),
-      sessionName,
-      answerText,
-    })
-    return { inner, manager }
-  }
-
   // ── the turn's children, in order (ADR-0037, nocx-s92so) ────────────
 
   /** Everything a reader meets inside a turn, in DOM order, each as
@@ -1840,6 +1842,11 @@ describe('BlockManager.addAnswerBlock', () => {
     for (const child of Array.from(box?.children ?? [])) {
       const el = child as HTMLElement
       if (!el.classList.contains('cmd-block')) {
+        // The working stand-in (cmd-answer-typing) is chrome, not content:
+        // it stands in for the next output until that output lands, so it
+        // is not a piece of the flow. Its presence and absence are the
+        // dedicated tests' business (nocx-vnirv.1).
+        if (el.classList.contains('cmd-answer-typing')) continue
         piece(el)
         continue
       }
@@ -1982,15 +1989,19 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['text:hello world'])
   })
 
-  it('a call retires the typing dots but leaves the header reporting work', () => {
+  it('a call in flight returns the stand-in where the answer will be written', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe', opensBlock: false })
-    // The body has content now, so the stand-in for text goes...
-    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    // A call writes no prose, so the stand-in is back where the next words
+    // will land — the empty-body defect this fixes (nocx-vnirv.1)...
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     // ...and the corner keeps saying the run is working, because it is: the
     // model has done something and it has not answered.
     expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
+    // The moment a delta lands, the stand-in stands down.
+    h.append('the answer')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
   })
 
   it('renders a selectable block with the question as its header', () => {
@@ -2099,6 +2110,222 @@ describe('BlockManager.addAnswerBlock', () => {
     manager.addAnswerBlock('q2', '/')
     manager.clearAll()
     expect(inner.querySelectorAll('.cmd-block').length).toBe(0)
+  })
+})
+
+// ── The ONE "working, nothing written yet" stand-in (nocx-vnirv.1) ───────
+// A turn and a running command are two hosts of ONE indicator: the same
+// class, built by the same function, removed by output, by failure and by
+// cancellation. The owner's words: "вообще поведение должно быть
+// одинаковое" — the behavior should be the same.
+describe('the working stand-in (nocx-vnirv.1)', () => {
+  it('the turn and the running command wear the SAME indicator — one class, one owner', () => {
+    const { inner, xtermContainer, manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    manager.startBlock('make', '~', 0)
+    const turn = h.el.querySelector('.cmd-answer-typing')
+    const command = xtermContainer.querySelector('.cmd-answer-typing')
+    expect(turn).not.toBeNull()
+    expect(command).not.toBeNull()
+    // AD-8: NOT two indicators that merely look alike — the same class.
+    expect(command!.className).toBe(turn!.className)
+    inner.remove()
+  })
+
+  it('a running command shows the stand-in in the live region until the first byte', () => {
+    const { xtermContainer, manager } = newManager()
+    manager.startBlock('sleep 5', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    // The seam: the first parsed output byte stands it down. Idempotent —
+    // every later chunk calls the seam again and nothing changes.
+    manager.noteCommandOutput()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.noteCommandOutput()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('a terminal freeze removes the stand-in — no dots type a command that ended', () => {
+    const { xtermContainer, manager } = newManager()
+    manager.startBlock('sleep 5', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.freezeBlock(() => undefined, 2, 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('an abandoned command removes the stand-in too — cancellation is a close', () => {
+    const { xtermContainer, manager } = newManager()
+    manager.startBlock('ssh host', '~', 0)
+    manager.bindAttempt('att-1')
+    manager.abandonAttempt(
+      { id: 'att-1', state: 'unknown' } as ExecutionAttempt,
+      () => undefined,
+      6,
+    )
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('clearAll removes the stand-in with everything else', () => {
+    const { xtermContainer, manager } = newManager()
+    manager.startBlock('make', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.clearAll()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('a second command replaces the stand-in rather than stacking a second one', () => {
+    const { xtermContainer, manager } = newManager()
+    manager.startBlock('one', '~', 0)
+    manager.startBlock('two', '~', 1)
+    expect(xtermContainer.querySelectorAll('.cmd-answer-typing').length).toBe(1)
+  })
+
+  it('a turn shows the stand-in at open, loses it at a delta, regains it during a call, loses it at the next delta', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.append('let me look')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    // A call in flight writes no prose, so the stand-in returns — the
+    // empty-body defect this task fixes.
+    h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe', opensBlock: false })
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.append('line 3 is wrong')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('a run call\u2019s command block lands ABOVE the stand-in, which keeps the tail', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
+    manager.startBlock('make', '/repo', 0, 0, 'agent')
+    const children = h.el.querySelector(':scope > .cmd-children')!
+    // The stand-in marks where the answer will continue: after the block
+    // the call opened, never pushed aside by it.
+    expect(children.lastElementChild?.classList.contains('cmd-answer-typing')).toBe(true)
+    expect(children.querySelector('.cmd-block-running')).not.toBeNull()
+  })
+
+  it('a failing turn with no output leaves no dots typing an answer that will never arrive', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.close('failure', 'the model returned no text')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('reasoning is content: it stands the stand-in down', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.reasoning('weighing the two options')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
+  it('the live-region stand-in is OUT OF FLOW — the height constraint holds by construction', () => {
+    // jsdom computes no layout, so the contract is asserted on the shipped
+    // stylesheet (the same discipline as cmd-output-wrap.test.ts): the
+    // stand-in is absolutely positioned inside the live container, which
+    // is position:relative — so it adds no flow height to the box the
+    // controller measures and sizes, and that box is exactly the frozen
+    // body that replaces the region. Nothing moves at the swap.
+    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
+    const container = css.match(/\.xterm-live-container\.live-running\s*\{([^}]*)\}/)
+    expect(container).not.toBeNull()
+    expect(container![1]).toContain('position: relative')
+    const standIn = css.match(
+      /\.xterm-live-container\.live-running > \.cmd-answer-typing\s*\{([^}]*)\}/,
+    )
+    expect(standIn).not.toBeNull()
+    expect(standIn![1]).toContain('position: absolute')
+  })
+})
+
+// ── The ⋮ menu never leaves the viewport (nocx-vnirv.2) ───────────────────
+// A running block sits at the bottom of the scrollback by construction, so
+// an unclamped menu opened past the window's bottom edge and the two
+describe('the block overflow menu stays in the viewport', () => {
+  // The imperative menu appends itself to document.body and stays until
+  // dismissed; a test that opens one and ends must take it down, or the
+  // NEXT describe's openBlockMenu finds THIS menu first (they share the
+  // same body-level query) and clicks an item that belongs to a dead test.
+  afterEach(() => {
+    document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+  })
+
+  function openMenu(nearBottom: boolean): { menu: HTMLElement; buttonRect: DOMRect } {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
+    container.appendChild(el)
+    const btn = el.querySelector<HTMLElement>('.cmd-overflow-btn')!
+    const rect = nearBottom
+      ? { top: 743, bottom: 765, left: 950, right: 972, width: 22, height: 22 }
+      : { top: 700, bottom: 722, left: 1000, right: 1022, width: 22, height: 22 }
+    btn.getBoundingClientRect = () => rect as DOMRect
+    btn.click()
+    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    return { menu, buttonRect: rect as DOMRect }
+  }
+
+  it('clamps the menu inside the viewport when the ⋮ sits near the bottom edge', () => {
+    const { menu, buttonRect } = openMenu(true)
+    const menuRect = menu.getBoundingClientRect()
+    const left = Number.parseFloat(menu.style.left)
+    const top = Number.parseFloat(menu.style.top)
+    expect(left).toBeGreaterThanOrEqual(8)
+    expect(top).toBeGreaterThanOrEqual(8)
+    expect(left + menuRect.width).toBeLessThanOrEqual(window.innerWidth - 8)
+    expect(top + menuRect.height).toBeLessThanOrEqual(window.innerHeight - 8)
+    // AND it is exactly the SHARED geometry's answer (the seam): the anchor
+    // is below the button, right-aligned to it. This assertion fails if a
+    // second, private copy of the clamp ever appears.
+    const expected = clampMenuPosition(
+      { x: buttonRect.right - menuRect.width, y: buttonRect.bottom + 2 },
+      { width: menuRect.width, height: menuRect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    expect({ left, top }).toEqual(expected)
+  })
+
+  it('clamps the menu back inside when the ⋮ hugs the right edge', () => {
+    const { menu, buttonRect } = openMenu(false)
+    const menuRect = menu.getBoundingClientRect()
+    const left = Number.parseFloat(menu.style.left)
+    const top = Number.parseFloat(menu.style.top)
+    expect(left + menuRect.width).toBeLessThanOrEqual(window.innerWidth - 8)
+    expect(top + menuRect.height).toBeLessThanOrEqual(window.innerHeight - 8)
+    const expected = clampMenuPosition(
+      { x: buttonRect.right - menuRect.width, y: buttonRect.bottom + 2 },
+      { width: menuRect.width, height: menuRect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    expect({ left, top }).toEqual(expected)
+  })
+
+  it('opens at body level with fixed positioning: nothing under it moves and nothing scrolls', () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const el = createRunningBlock(1, 'make', '~', '', () => container, noopSelect, freshStore())
+    container.appendChild(el)
+    const scrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+    const menu = document.querySelector<HTMLElement>('.cmd-overflow-menu')!
+    // Fixed at body level: out of flow, so the block underneath never moves
+    // to make room, and nothing in the open path scrolls the page.
+    expect(menu.parentElement).toBe(document.body)
+    expect(menu.style.position).toBe('fixed')
+    expect(scrollTo).not.toHaveBeenCalled()
+    scrollTo.mockRestore()
+    container.remove()
+  })
+
+  it('a menu taller than the viewport scrolls WITHIN the shell — the CSS contract', () => {
+    // jsdom lays nothing out, so the reachability half of the clamp is
+    // asserted on the shipped stylesheet: the shell caps its height and
+    // scrolls its own items, instead of running past the window's edge.
+    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
+    const rule = css.match(/\.cmd-overflow-menu\s*\{([^}]*)\}/)
+    expect(rule).not.toBeNull()
+    expect(rule![1]).toContain('max-height')
+    expect(rule![1]).toContain('overflow-y: auto')
   })
 })
 

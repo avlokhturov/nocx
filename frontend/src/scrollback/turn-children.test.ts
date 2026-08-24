@@ -379,7 +379,11 @@ describe('a turn draws the blocks it caused, in order', () => {
     manager.startBlock(COMMAND, '/repo', 0, 0, 'agent')
     turn.append('41G free')
     turn.close('success')
-    expect(inner.querySelector('.cmd-answer-typing')).toBeNull()
+    // The TURN's dots are gone with the turn. The query is scoped to the
+    // turn: since nocx-vnirv.1 a still-RUNNING command (this sequence
+    // closes the turn while its run call's block is live) carries its own
+    // stand-in in the live region, which also lives under `inner`.
+    expect(turn.el.querySelector('.cmd-answer-typing')).toBeNull()
     expect(inner.querySelector('.cmd-answer-waiting')).toBeNull()
   })
 

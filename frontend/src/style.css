@@ -635,6 +635,27 @@
      the box to content + padding, so this rule stays the only place the
      number lives. */
   padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+  /* The containing block for the running command's "working, nothing
+     written yet" stand-in (nocx-vnirv.1) — see the rule below. */
+  position: relative;
+}
+
+/* The RUNNING COMMAND's stand-in (nocx-vnirv.1): the live region is the
+   running block's body, so the dots stand at the top of it — exactly where
+   the first output line will be written, below the body's top padding (the
+   same padding the frozen .cmd-output wears). OUT OF FLOW, so the height
+   constraint holds by construction: the controller measures and sizes this
+   box from the grid it contains (content + the padding above), and an
+   absolutely positioned child adds no height of its own — when the first
+   byte lands and the stand-in is removed, the box does not shrink, and the
+   frozen body that replaces the region is the same box. `prefers-reduced-
+   motion` opts out of the dots' animation the same way it does in the turn
+   (the rule below), and the dots themselves stay — the report survives. */
+.xterm-live-container.live-running > .cmd-answer-typing {
+  position: absolute;
+  top: var(--cmd-output-pad-top);
+  left: 0;
+  pointer-events: none;
 }
 
 /* The flow box and this clip receive the same measured height. The separate
@@ -840,11 +861,13 @@
   white-space: nowrap;
 }
 
-/* The answer body's stand-in while the model has not sent anything yet:
-   three dots where the first words will appear. It is the same report as
-   the header chip, in the place the person is already looking — an empty
-   body under a finished question reads as a product that did nothing.
-   Replaced by the text at the first delta. */
+/* The ONE "work is happening here, nothing has been written yet" stand-in
+   (nocx-vnirv.1): three dots where the first words will appear. Two hosts,
+   one class — a turn's children while the model thinks or a tool runs, and
+   the live region while a command runs (see the live-running rule above).
+   It is the same report as the header chip, in the place the person is
+   already looking — an empty body under a finished question reads as a
+   product that did nothing. Replaced by the text at the first delta. */
 .cmd-answer-typing {
   display: inline-flex;
   align-items: center;
@@ -1180,6 +1203,14 @@
   padding: 4px 0;
   min-width: 160px;
   box-shadow: 0 4px 16px color-mix(in srgb, black, transparent 50%);
+  /* A menu taller than the viewport must still be fully reachable
+     (nocx-vnirv.2): the geometry clamps the shell's top-left corner, and
+     this cap + scroll is the other half of the same contract — the items
+     scroll WITHIN the menu instead of running past the window's bottom
+     edge. EDGE_MARGIN_PX is 8 (ui/menu-geometry.ts), so the cap leaves the
+     same clearance the clamp enforces. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }
 
 .cmd-overflow-menu-item {

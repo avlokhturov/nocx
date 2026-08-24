@@ -2638,7 +2638,18 @@ export class TerminalContent extends BasePaneContent {
       // frozen, and the block leapt 153px up the pane at the end of a command
       // that had already finished (2026-08-19 frame capture). Nothing else
       // could correct it, because for a fast command there is no next chunk.
-      renderer.onWriteParsed(() => this.scheduleLiveResize())
+      renderer.onWriteParsed(() => {
+        this.scheduleLiveResize()
+        // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
+        // carries the same "working, nothing written yet" indicator a turn
+        // does, in the live region where its output will appear, and the
+        // first parsed write is the moment that claim stops being true.
+        // Here rather than in `onData` below for the same reason the measure
+        // is here: `write()` parses asynchronously, so the bytes having been
+        // handed over is not the output having arrived. Idempotent — every
+        // later chunk calls it again and nothing changes.
+        this.scrollback?.blockManager.noteCommandOutput()
+      })
 
       // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
       // is enabled (setReadOnly(false)). The editor captures keys while it is

@@ -1,8 +1,8 @@
 /**
  * The product's words for the effect lattice (ADR-0020 decision 6).
  *
- * ONE owner. The approval prompt asks the question ("This call can read and
- * inspect") and the Agent policy page carries the standing answer
+ * ONE owner. The approval prompt states it as a row ("read and inspect")
+ * and the Agent policy page carries the standing answer
  * ("Read and inspect — Allowed"); a person must meet the same words in both
  * places, and two surfaces inventing their own wording for one state is the
  * defect AGENTS.md names under "Look for the existing answer before you write

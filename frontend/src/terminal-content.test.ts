@@ -3374,6 +3374,55 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     }
   })
 
+  it('the first PARSED write stands the running command\u2019s stand-in down (nocx-vnirv.1)', async () => {
+    // THE WIRING TEST for the seam the block manager exposes and this
+    // file's onWriteParsed handler is the call site of. A running command
+    // carries the same "working, nothing written yet" stand-in a turn does,
+    // in the live region where its output will appear; it must stand down
+    // at the first byte of output — and "arrives" means the renderer has
+    // PARSED the write, not that bytes were handed over (write() parses
+    // asynchronously, so onData firing is not output existing).
+    //
+    // This is the check that failed before the wiring existed:
+    // noteCommandOutput had no caller outside blocks.test.ts, so the first
+    // parsed write left the stand-in in place — a live block, reached
+    // through the same interface as every other block, with its write half
+    // unreachable, the exact shape AGENTS.md names as invisible to
+    // deadcode's RTA. The drive is the real mount: the authenticated
+    // running fact opens the block, and the frame double fires
+    // onWriteParsed exactly as xterm's parse pass does (xterm.test.ts
+    // exercises the same event off the real renderer).
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const handler = factHandler(client)
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const renderer = rendererOf(content)
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-1', state: 'open', origin: 'shell', command: 'make' },
+      })
+      const live = withScrollback.scrollback.xtermLiveContainer
+      // The command is running and nothing has been parsed: the stand-in
+      // stands where the first output line will be written.
+      expect(live.querySelector('.cmd-answer-typing')).not.toBeNull()
+      // The first parsed write stands it down.
+      renderer._fireWriteParsed()
+      expect(live.querySelector('.cmd-answer-typing')).toBeNull()
+      // Idempotent: every later chunk fires the same event and nothing
+      // changes — the seam is called again, not rebuilt.
+      renderer._fireWriteParsed()
+      expect(live.querySelector('.cmd-answer-typing')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
   it('sizes the live region when the grid has PARSED the bytes, not when they were handed over', async () => {
     // xterm parses asynchronously. The measure used to be scheduled from
     // session.onData, one line after renderer.write(), so it ran on the
