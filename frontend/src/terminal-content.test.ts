@@ -103,6 +103,13 @@ const rendererOf = (content: TerminalContent): RendererMock => {
   return withRenderer.renderer
 }
 
+/** The live scrollback controller behind TerminalContent's private field —
+ *  used by the affordance tests to drive the real copy and scroll seams. */
+const scrollbackOf = (content: TerminalContent): ScrollbackController => {
+  const withScrollback = content as unknown as { scrollback: ScrollbackController }
+  return withScrollback.scrollback
+}
+
 /** The live session mock behind TerminalContent's private field — the same
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
@@ -4529,7 +4536,10 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   }
 
   /** Select rows [start, end) of a frozen block's output and fire the
-   *  selectionchange event the product listens for. */
+   *  selectionchange event the product listens for. jsdom does no layout,
+   *  so a real range reports no client rects; the affordance anchors to
+   *  the selection's LAST client rect, so the test supplies one rect per
+   *  covered row, as a real browser would measure. */
   function selectRows(block: HTMLElement, start: number, end: number): void {
     const lines = Array.from(block.querySelectorAll<HTMLElement>('.term-line'))
     expect(lines.length).toBeGreaterThanOrEqual(end)
@@ -4538,10 +4548,28 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     const range = document.createRange()
     range.setStart(first.firstChild ?? first, 0)
     range.setEnd(last.lastChild ?? last, (last.textContent ?? '').length)
+    range.getClientRects = () =>
+      Array.from(
+        { length: end - start },
+        (_, i) => new DOMRect(100, 200 + (start + i) * 20, 200, 20),
+      ) as unknown as DOMRectList
     const sel = window.getSelection()
     sel?.removeAllRanges()
     sel?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
+  }
+
+  /** Whether the affordance is on screen right now. */
+  function attachOfferVisible(): boolean {
+    const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')
+    return wrap !== null && wrap.style.display !== 'none'
+  }
+
+  /** Press the Attach button — the person's one way to attach. */
+  function pressAttach(): void {
+    const btn = document.body.querySelector<HTMLButtonElement>('.attach-affordance .ui-button')
+    expect(btn).not.toBeNull()
+    btn!.click()
   }
 
   /** The recorded params of one dispatcher call, narrowed to an object. */
@@ -4779,7 +4807,110 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('selecting output puts a reference chip in the input line and changes nothing else — plain Enter after the selection still reaches the SHELL (nocx-4wtlh)', async () => {
+  it('a selection offers to attach and attaches nothing by itself — the affordance floats, plain Enter still reaches the SHELL, and pressing Attach raises exactly one chip (nocx-a7mw7.1)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, clipboard, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+
+      selectRows(block, 0, 2)
+      // The selection made an OFFER, not a chip: nothing is in the input
+      // line — copying output attaches nothing (the complaint the bead
+      // exists to end) — and the Attach button floats instead.
+      expect(chipsIn(ed)).toHaveLength(0)
+      const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')
+      expect(wrap).not.toBeNull()
+      expect(wrap!.style.display).not.toBe('none')
+      const btn = wrap?.querySelector<HTMLButtonElement>('.ui-button')
+      expect(btn?.textContent).toBe('Attach')
+
+      // The person copies the selection — the commonest thing anyone does
+      // with output. The real copy seam (a mouseup inside the scrollback)
+      // still copies, and the copy attaches NOTHING.
+      scrollbackOf(content).scrollbackArea.dispatchEvent(
+        new MouseEvent('mouseup', { bubbles: true }),
+      )
+      // BOTH halves, or this asserts nothing: the copy REACHED the clipboard,
+      // and it attached nothing. Without the first, a change that broke
+      // copy-on-select outright would pass this test — there would be no copy
+      // left to attach anything.
+      expect(clipboard.writeText).toHaveBeenCalled()
+      expect(chipsIn(ed)).toHaveLength(0)
+
+      // The offer changed NOTHING else: the active target is untouched and
+      // the indicator still says Run.
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+
+      // Submit with plain Enter: the SHELL receives the command — the offer
+      // never armed ask, the registry never moved, and the affordance is
+      // still on screen while the selection lives.
+      const sentBefore = sessionOf(content).send.mock.calls.length
+      ed.insertText('echo back')
+      submitKey(ed)
+      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+      expect(activeLabel(content)).toBe('Shell')
+      expect(document.body.querySelector('.attach-affordance')?.getAttribute('style')).toContain(
+        'display: block',
+      )
+
+      // Pressing Attach freezes the offered region into exactly one chip.
+      pressAttach()
+      const chips = chipsIn(ed)
+      expect(chips).toHaveLength(1)
+      expect(chips[0].textContent).toContain('ls')
+      expect(chips[0].textContent).toContain('rows 1–2')
+      // The press put the affordance away (the offer is spent).
+      expect(attachOfferVisible()).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a drag across three rows, simulated as its intermediate selections, offers once and attaches once (nocx-a7mw7.1)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
+
+      // The three intermediate selections a real drag fires: 1–1, 1–2,
+      // 1–3. Each moves the OFFER; none of them mints a chip.
+      selectRows(block, 0, 1)
+      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachOfferVisible()).toBe(true)
+      selectRows(block, 0, 2)
+      expect(chipsIn(ed)).toHaveLength(0)
+      selectRows(block, 0, 3)
+      expect(chipsIn(ed)).toHaveLength(0)
+
+      // One press on the final selection raises exactly ONE chip, covering
+      // the whole drag — the three intermediate selections never stacked.
+      pressAttach()
+      expect(chipsIn(ed)).toHaveLength(1)
+      expect(chipsIn(ed)[0].textContent).toContain('rows 1–3')
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('attaching a region already attached is a no-op, not a second chip (nocx-a7mw7.1)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4793,31 +4924,155 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
 
       selectRows(block, 0, 2)
-      const chips = chipsIn(ed)
-      expect(chips).toHaveLength(1)
-      expect(chips[0].textContent).toContain('ls')
-      expect(chips[0].textContent).toContain('rows 1–2')
-
-      // The selection created the chip and NOTHING else: the active target
-      // is untouched and the indicator still says Run.
-      expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      pressAttach()
+      expect(chipsIn(ed)).toHaveLength(1)
+      // The press spent the offer; re-selecting the IDENTICAL region
+      // re-offers, and pressing again must not stack a second chip.
+      expect(attachOfferVisible()).toBe(false)
+      selectRows(block, 0, 2)
+      expect(attachOfferVisible()).toBe(true)
+      pressAttach()
+      expect(chipsIn(ed)).toHaveLength(1)
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-
-      // Submit with plain Enter: the SHELL receives the command — the chip
-      // never armed ask, the registry never moved.
-      const sentBefore = sessionOf(content).send.mock.calls.length
-      ed.insertText('echo back')
-      submitKey(ed)
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-      expect(activeLabel(content)).toBe('Shell')
     } finally {
       teardown()
     }
   })
 
-  it('a question carries the chips that are in the line and no others — two selections, one unrelated block (nocx-4wtlh)', async () => {
+  it('attaching does not move the input target and does not touch the selection — asserted with the affordance on screen (nocx-4wtlh, nocx-a7mw7.1)', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 2)
+
+      const sel = window.getSelection()!
+      const anchorBefore = sel.anchorNode
+      const focusBefore = sel.focusNode
+      const textBefore = sel.toString()
+
+      // A real press: mousedown first — the browser's default on a button
+      // would collapse the selection and steal focus — then the click.
+      const btn = document.body.querySelector<HTMLButtonElement>('.attach-affordance .ui-button')!
+      const md = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+      btn.dispatchEvent(md)
+      expect(md.defaultPrevented).toBe(true)
+      btn.click()
+      expect(chipsIn(ed)).toHaveLength(1)
+
+      // The selection survived the press — same anchor, same focus, same
+      // text. Attaching touched nothing.
+      expect(sel.anchorNode).toBe(anchorBefore)
+      expect(sel.focusNode).toBe(focusBefore)
+      expect(sel.toString()).toBe(textBefore)
+      // The target never moved: Enter still goes to the shell, and nothing
+      // crossed the control plane.
+      expect(activeLabel(content)).toBe('Shell')
+      expect(indicatorOf(ed)?.textContent).toBe('Run')
+      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the affordance disappears when the selection collapses, and never appears for a selection that crosses blocks or lands in a running block (nocx-a7mw7.1)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 2)
+      expect(attachOfferVisible()).toBe(true)
+
+      // A click that collapses the selection (or any caret move).
+      const sel = window.getSelection()!
+      sel.removeAllRanges()
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(attachOfferVisible()).toBe(false)
+      expect(chipsIn(ed)).toHaveLength(0)
+
+      // A selection crossing two blocks has no single frame: no offer.
+      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
+      const linesA = block.querySelectorAll<HTMLElement>('.term-line')
+      const linesB = blockB.querySelectorAll<HTMLElement>('.term-line')
+      const range = document.createRange()
+      range.setStart(linesA[0].firstChild ?? linesA[0], 0)
+      range.setEnd(linesB[0].lastChild ?? linesB[0], (linesB[0].textContent ?? '').length)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      sel.removeAllRanges()
+      sel.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(attachOfferVisible()).toBe(false)
+
+      const running = document.createElement('div')
+      running.className = 'cmd-block cmd-block-running'
+      const runningOutput = document.createElement('div')
+      runningOutput.className = 'cmd-output'
+      const runningLine = document.createElement('span')
+      runningLine.className = 'term-line'
+      runningLine.textContent = 'working'
+      runningOutput.appendChild(runningLine)
+      running.appendChild(runningOutput)
+      scrollbackOf(content).scrollbackInner.appendChild(running)
+      const runningLines = running.querySelectorAll<HTMLElement>('.term-line')
+      const runningRange = document.createRange()
+      runningRange.setStart(runningLines[0].firstChild ?? runningLines[0], 0)
+      runningRange.setEnd(runningLines[0].lastChild ?? runningLines[0], 0)
+      runningRange.getClientRects = () => [new DOMRect(100, 300, 200, 20)] as unknown as DOMRectList
+      sel.removeAllRanges()
+      sel.addRange(runningRange)
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(attachOfferVisible()).toBe(false)
+      expect(chipsIn(ed)).toHaveLength(0)
+    } finally {
+      teardown()
+    }
+  })
+
+  it("the affordance follows the scrollback while the selection is alive — a scroll re-anchors it to the selection's current rects (nocx-a7mw7.1)", async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 2)
+      const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')!
+      // The initial anchor: last rect at left 100 → right 300 (the button
+      // is 0×0 in jsdom, so the clamp returns the anchor's own values).
+      expect(wrap.style.left).toBe('300px')
+
+      // The selection scrolled up the viewport — its client rects moved.
+      const sel = window.getSelection()!
+      sel.getRangeAt(0).getClientRects = () =>
+        [new DOMRect(400, 60, 200, 20)] as unknown as DOMRectList
+      scrollbackOf(content).scrollbackArea.dispatchEvent(new Event('scroll'))
+      expect(wrap.style.left).toBe('600px')
+      expect(wrap.style.top).toBe(`${60 + 20 + 4}px`)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a question carries the chips explicitly attached in the line and no others — two selections, one unrelated block (nocx-a7mw7.1)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4833,7 +5088,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const unrelated = frozenBlockOf(content, 'sleep 1', ['zzz'])
 
       selectRows(blockA, 0, 2)
+      pressAttach()
       selectRows(blockB, 0, 1)
+      pressAttach()
       expect(chipsIn(ed)).toHaveLength(2)
 
       const sentBefore = sessionOf(content).send.mock.calls.length
@@ -4871,7 +5128,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('a chip can be dismissed from the line, and the next question carries what remains', async () => {
+  it('an explicitly attached chip can be dismissed from the line, and the next question carries what remains (nocx-a7mw7.1)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4886,7 +5143,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
 
       selectRows(blockA, 0, 2)
+      pressAttach()
       selectRows(blockB, 0, 1)
+      pressAttach()
       const [chipA] = chipsIn(ed)
       chipA.querySelector<HTMLButtonElement>('.nocx-editor-reference-chip__drop')?.click()
       expect(chipsIn(ed)).toHaveLength(1)
@@ -4901,8 +5160,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       teardown()
     }
   })
-
-  it('the editor stays available after a question — a second question works while the first streams, and each answer lands on its own entry (nocx-wmy4)', async () => {
+  it('the editor stays available after explicitly attached context — a second question works while the first streams, and each answer lands on its own entry (nocx-wmy4, nocx-a7mw7.1)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4916,9 +5174,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-
       // Question one, through the REAL gesture: ⌘Enter to Ask, then Enter.
       selectRows(blockA, 0, 2)
+      pressAttach()
       typeAndAsk(ed, content, 'what does docs mean?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
@@ -4928,6 +5186,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // While the first answer streams, point at block B and ask again.
       selectRows(blockB, 0, 1)
+      pressAttach()
       typeAndAsk(ed, content, 'what did it fix?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
