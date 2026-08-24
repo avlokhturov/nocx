@@ -39,8 +39,8 @@
  * had just taken off the tool-call line still inside it, and the MACHINE,
  * the fact that decides whether a destructive command lands on this laptop
  * or on a production host, never named at all. So a `run` proposal now reads
- * as a sentence: the command verbatim in its own block, the machine and the
- * tab in the lead.
+ * as a sentence — the command verbatim in its own block — with the machine
+ * and the tab as rows beneath it (nocx-0mvpy.2).
  *
  * THE BLOB IS THE FALLBACK, AND IT IS NOT A LESSER ONE. That block is the
  * model's own proposal quoted verbatim, and paraphrasing it is only honest
@@ -62,11 +62,20 @@
  * row list cannot describe (arguments that do not parse, or that are not an
  * object), and njn8s's `run` sentence is untouched: rows sit beside it.
  *
- * WHERE THE CALL LANDS HAS ONE OWNER ON THIS SURFACE. `run` names the tab
- * and the machine in its lead, so the argument that names the session is
- * NOT also a row; every other tool has no lead to put it in, so that
- * argument's row carries it and the "This call reaches the tab …" sentence
- * is gone. One statement either way — two would be two surfaces owning one
+ * EVERY FACT IS A ROW (nocx-0mvpy.2). The machine, the tab, the directory,
+ * the parsed arguments and the effect are all rows of the ONE fact list, in
+ * that order, so a person reads where a call lands and what it can do at a
+ * glance — the lead is one sentence, and the two paragraphs below the facts
+ * say only what cannot be a row: what approving covers, and how wide an
+ * answer reaches. The where and the effect are rows even when the arguments
+ * do not parse: the blob is the fallback for the ARGUMENTS, and where a call
+ * lands does not depend on them.
+ *
+ * WHERE THE CALL LANDS HAS ONE OWNER ON THIS SURFACE. The machine and the
+ * tab are rows, so the argument that names the session is NOT also a row
+ * whenever a pane can be named — the rows state it, once. Only when no pane
+ * holds the session does that argument's row appear, and it says exactly
+ * that. One statement either way — two would be two surfaces owning one
  * fact, and the loser goes on advertising what it can no longer deliver.
  *
  * AND A GUESS IS NOT A FACT (AD-5). The window now says which directory the
@@ -178,17 +187,19 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
    */
   const runLead = () => {
     if (ask().reason !== 'egress') return 'The assistant wants to run this command'
-    // The verb only appears when there is somewhere to put it: with no pane
-    // to name, "ran" would trail off into the colon.
-    return where() ? 'The command that produced it ran' : 'The command that produced it'
+    // "ran", unconditionally: the where used to hang off this sentence and
+    // gave "ran" nowhere to land without a pane to name; the machine and the
+    // tab are rows now, so the sentence stands alone either way.
+    return 'The command that produced it ran'
   }
 
   /**
    * The model's proposal as an object, or null when it is not one — it did
-   * not parse, or it parsed to an array or a scalar. Null is the ONE case a
-   * row list cannot describe, and it is where the verbatim blob survives:
-   * quoting what we cannot restate is honest, and inventing rows for it
-   * would not be.
+   * not parse, or it parsed to an array or a scalar. Null means the
+   * ARGUMENTS cannot be described as rows, and that is where the verbatim
+   * blob survives: quoting what we cannot restate is honest, and inventing
+   * rows for it would not be. The pane's rows and the effect do not depend
+   * on this — they render beside the blob either way.
    */
   const parsedArguments = (): Record<string, unknown> | null => {
     let parsed: unknown
@@ -217,27 +228,26 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
-   * The arguments the lead sentence has ALREADY stated, which are therefore
-   * not repeated as rows. Derived from what is actually rendered rather than
-   * from the tool name: `run`'s block states `command`, and its lead states
-   * the session only when a pane can be named — with no pane to name, the
-   * lead says nothing about where and the session argument still owes the
-   * person a row.
+   * The arguments the window has ALREADY stated, which are therefore not
+   * repeated as rows. Derived from what is actually rendered rather than
+   * from the tool name: `run`'s block states `command`, and the machine and
+   * tab rows state the session whenever a pane can be named — with no pane
+   * to name, the session argument still owes the person a row.
    */
-  const statedInTheLead = (): ReadonlySet<string> => {
+  const statedInTheWindow = (): ReadonlySet<string> => {
     const keys = new Set<string>()
-    if (proposedCommand() === null) return keys
-    keys.add('command')
+    if (proposedCommand() !== null) keys.add('command')
     if (where() !== null) keys.add('sessionId')
     return keys
   }
 
   /** One argument's value, in the product's words where the product has
-   *  them. A `sessionId` is the one value that is an internal handle rather
-   *  than something a person wrote or can read, so it renders as the pane —
-   *  and when no pane holds it, as that fact. Everything else is the
-   *  model's own value, a string as itself and anything else as the JSON it
-   *  arrived as, which is exact and never a paraphrase. */
+   *  them. A `sessionId` that reaches the rows is one the machine and tab
+   *  rows did not state — almost always a pane no one can name, but the row
+   *  says what it finds either way, derived from the value and never
+   *  assumed from where()'s resource. Everything else is the model's own
+   *  value, a string as itself and anything else as the JSON it arrived as,
+   *  which is exact and never a paraphrase. */
   const argumentValue = (key: string, value: unknown): string => {
     if (key === 'sessionId' && typeof value === 'string') {
       const pane = paneOf(value)
@@ -249,43 +259,70 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
-   * The facts of this call: every parsed argument the lead has not already
-   * stated, in the model's own order and under the model's own names, and
-   * then the directory the call lands in.
+   * The facts of this call, each its own row (nocx-0mvpy.2): where it lands
+   * — the pane's machine, tab and directory — then every parsed argument
+   * the window does not already state, in the model's own order and under
+   * the model's own names, then what the call can do.
    *
    * Exhaustive by construction — the loop selects nothing, so nothing can be
    * dropped. An argument this surface has never heard of is a row with the
    * key the model used, which is the honest name for it.
    */
   const facts = (): Fact[] => {
-    const args = parsedArguments()
-    if (args === null) return []
-    const stated = statedInTheLead()
     const rows: Fact[] = []
-    for (const [key, value] of Object.entries(args)) {
-      if (stated.has(key)) continue
-      rows.push({ name: key, value: argumentValue(key, value) })
-    }
     const pane = where()
-    if (pane !== null && pane.cwd !== '') {
+    if (pane !== null) {
       rows.push({
-        // `cwd`, not "working directory": this column is ONE vocabulary or
-        // it is none. Every other row is an argument under the model's own
-        // key — `sessionId`, `path` — in mono, and a spaced English phrase
-        // beside them reads as a different kind of thing and pulls the eye
-        // off the values, which are what a person is deciding on. `cwd` is
-        // also the word nocx already uses for this fact everywhere else:
-        // the block header's chip, the ledger's own column, SubmitEntry.
-        // (nocx-n7xha follow-up.)
-        name: 'cwd',
-        value: pane.cwd,
-        // Two wordings, because nocx knows the difference and this window
-        // is where pretending otherwise costs most (AD-5). Both say "as of
-        // now": the pane's directory is what it is when the question is
-        // asked, and nothing here binds it to the moment of the answer.
-        note: pane.cwdVerified
-          ? "the tab's directory as of now, reported by the shell"
-          : "the tab's directory as of now, and the shell has not confirmed it",
+        // One mono key per fact, like every row in this column (nocx-n7xha):
+        // a spaced English phrase beside the model's own argument keys would
+        // read as a different kind of thing. `machine` is the pane's word
+        // for where the call lands (`user@host`, or the product's "this
+        // machine" for a local shell), `tab` the pane's display title, and
+        // `effect` the wire's own field name.
+        name: 'machine',
+        value: machineWords(pane.machine),
+      })
+      rows.push({
+        name: 'tab',
+        value: pane.tab,
+      })
+      if (pane.cwd !== '') {
+        rows.push({
+          // `cwd`, not "working directory": this column is ONE vocabulary or
+          // it is none. Every other row is an argument under the model's own
+          // key — `sessionId`, `path` — in mono, and a spaced English phrase
+          // beside them reads as a different kind of thing and pulls the eye
+          // off the values, which are what a person is deciding on. `cwd` is
+          // also the word nocx already uses for this fact everywhere else:
+          // the block header's chip, the ledger's own column, SubmitEntry.
+          // (nocx-n7xha follow-up.)
+          name: 'cwd',
+          value: pane.cwd,
+          // Two wordings, because nocx knows the difference and this window
+          // is where pretending otherwise costs most (AD-5). Both say "as of
+          // now": the pane's directory is what it is when the question is
+          // asked, and nothing here binds it to the moment of the answer.
+          note: pane.cwdVerified
+            ? "the tab's directory as of now, reported by the shell"
+            : "the tab's directory as of now, and the shell has not confirmed it",
+        })
+      }
+    }
+    const args = parsedArguments()
+    if (args !== null) {
+      const stated = statedInTheWindow()
+      for (const [key, value] of Object.entries(args)) {
+        if (stated.has(key)) continue
+        rows.push({ name: key, value: argumentValue(key, value) })
+      }
+    }
+    if (ask().reason === 'policy') {
+      rows.push({
+        // The effect is a row only for a policy question: an egress ask is
+        // about what a result may do, not about the call that already
+        // happened. The value is EFFECT_LABEL's — the ONE owner of the words.
+        name: 'effect',
+        value: effectLabel(),
       })
     }
     return rows
@@ -383,31 +420,13 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           >
             {(command) => (
               <>
-                <p>
-                  {runLead()}
-                  <Show when={where()}>
-                    {(w) => (
-                      <>
-                        {' on '}
-                        <strong>{machineWords(w().machine)}</strong>
-                        {', in the tab '}
-                        <strong>{w().tab}</strong>
-                      </>
-                    )}
-                  </Show>
-                  :
-                </p>
+                <p>{runLead()}:</p>
                 <CodeBlock ariaLabel="The command this question is about">{command()}</CodeBlock>
               </>
             )}
           </Show>
-          <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
         </Show>
-        <Show when={ask().reason === 'policy'}>
-          <p>
-            This call can <strong>{effectLabel()}</strong>.
-          </p>
-        </Show>
+        <FactList facts={facts()} ariaLabel={`What ${ask().tool} would do`} />
         <Show when={(ask().findings?.length ?? 0) > 0}>
           <Stack gap="loose">
             <p>What was found, and where — never the material itself:</p>

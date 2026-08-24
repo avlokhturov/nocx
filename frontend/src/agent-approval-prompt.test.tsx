@@ -6,6 +6,12 @@
  * (an egress finding), see the tool, the arguments and — for egress — what
  * was found and where, never the material itself; and decide.
  *
+ * Since nocx-0mvpy.2 the where and the what are ROWS: machine, tab, cwd,
+ * the arguments and the effect each get their own row of one fact list, in
+ * that order, and the lead is one sentence. The tests assert the rows BY
+ * NAME — the paragraph assertions they replaced could not see a fact stop
+ * being on the window.
+ *
  * Since nocx-gycwo the decision has a WIDTH as well as a direction: a policy
  * question offers allow and deny at once, in this session and always, so the
  * place a person is asked is the place they can stop being asked. An egress
@@ -70,6 +76,22 @@ function recordDecisions() {
   }
 }
 
+/** Every row as `name` + `value`, in the order the window reads. The note
+ *  lives inside the value cell (it qualifies that value and must not be
+ *  able to drift to another row), so it is subtracted here. */
+function rows(container: HTMLElement): Array<[string, string]> {
+  return Array.from(container.querySelectorAll('.ui-fact-list__row')).map((r) => {
+    const value = r.querySelector('.ui-fact-list__value')?.textContent ?? ''
+    const note = r.querySelector('.ui-fact-list__note')?.textContent ?? ''
+    return [r.querySelector('.ui-fact-list__name')?.textContent ?? '', value.replace(note, '')]
+  })
+}
+
+/** Every row's name, in order — the assertion this task is about. */
+function names(container: HTMLElement): string[] {
+  return rows(container).map(([name]) => name)
+}
+
 const SID = '9bb9a7602c27e8ba0741972c7049b54b'
 
 /** What a pane answers about itself. `cwd`/`cwdVerified` travel together
@@ -102,38 +124,55 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
   })
 
   /**
-   * CHANGED DELIBERATELY (nocx-n7xha). This used to assert the verbatim
-   * blob — `{"sessionId":"9bb9a760…"}` — on the grounds that a paraphrase is
-   * honest only while it is exhaustive, which is right and is not what
-   * changed. What changed is the conclusion that exhaustive means per-tool:
-   * a renderer listing EVERY parsed argument as a named row is exhaustive
-   * by construction, so the blob is no longer the price of honesty here.
-   * And for readScreen the blob's only content IS the id two beads took
-   * off every other surface, so it added nothing to the sentence beneath
-   * it while putting the id back on the one surface that asks a person to
-   * decide.
+   * CHANGED DELIBERATELY (nocx-0mvpy.2). The pane used to be the session
+   * argument's row — `sessionId` / "home/dev on this machine". Now the
+   * machine and the tab are their OWN rows, and the session argument is
+   * covered by them: where a call lands has one owner on this surface, so
+   * the handle appears on no row and in no blob.
    */
-  it('renders the session argument as the pane, never as the id and never as a blob', () => {
+  it('renders the session as the pane — machine and tab rows, never the id and never a blob', () => {
     const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
     expect(container.querySelector('.ui-code-block')).toBeNull()
-    const names = Array.from(container.querySelectorAll('.ui-fact-list__name')).map(
-      (n) => n.textContent,
-    )
-    expect(names).toContain('sessionId')
-    expect(container.textContent ?? '').toContain('home/dev on this machine')
+    expect(rows(container)).toEqual([
+      ['machine', 'this machine'],
+      ['tab', 'home/dev'],
+      ['cwd', '/home/dev'],
+      ['effect', 'read and inspect'],
+    ])
     expect(container.textContent ?? '').not.toContain(SID)
   })
 
   it('still accounts for the session when no pane can name it — without the id', () => {
     const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => null })
-    const names = Array.from(container.querySelectorAll('.ui-fact-list__name')).map(
-      (n) => n.textContent,
-    )
     // Nothing is dropped: the argument is still a row. But an id nothing on
     // screen can name is still an id, so it stays off the surface.
-    expect(names).toEqual(['sessionId'])
+    expect(rows(container)).toEqual([
+      ['sessionId', 'a session no tab in this window holds'],
+      ['effect', 'read and inspect'],
+    ])
     expect(container.textContent ?? '').not.toContain(SID)
-    expect(container.textContent ?? '').toContain('no tab in this window holds')
+  })
+
+  it('derives the session row from the value, never from the resource', () => {
+    // A sessionId whose resource is a PATH — a proposal the backend's
+    // resource derivation does not cover — is still a fact about the
+    // value: if a pane on screen holds that session, the row says so. The
+    // window must not print "no tab holds it" on the strength of an
+    // invariant enforced in another module (internal/agenttools/registry).
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'run',
+        arguments: `{"sessionId":"${SID}"}`,
+        resource: { kind: 'path', id: '/tmp' },
+      },
+      sessionWhere: () => HERE,
+    })
+    expect(rows(container)).toEqual([
+      ['sessionId', 'home/dev on this machine'],
+      ['effect', 'read and inspect'],
+    ])
+    expect(container.textContent ?? '').not.toContain(SID)
   })
 
   it('says nothing about a tab or a directory for a path — a path is the person’s own word', () => {
@@ -141,11 +180,12 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
     const text = container.textContent ?? ''
     expect(text).not.toContain('home/dev')
     expect(text).not.toContain('cwd')
-    // The path argument itself is still a row, named as the model named it.
-    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
-      (r) => r.textContent,
-    )
-    expect(rows).toEqual(['path/repo/a.txt'])
+    // The path argument itself is still a row, named as the model named it;
+    // the effect closes the list.
+    expect(rows(container)).toEqual([
+      ['path', '/repo/a.txt'],
+      ['effect', 'read and inspect'],
+    ])
   })
 })
 
@@ -158,12 +198,11 @@ describe('AgentApprovalPrompt — a session is named, never numbered (nocx-vnzek
  * the fact that decides whether a destructive command lands on this laptop or
  * on a production host, never named at all.
  *
- * The rendering is friendly only when it can be exhaustive: `run` with
- * exactly the two arguments its schema declares. Anything else falls back to
- * the verbatim blob, because a sentence that silently drops an argument is
- * worse than a blob that shows it.
+ * Since nocx-0mvpy.2 the sentence is ONE sentence and the machine and the
+ * tab are rows beneath it — a person reads where the call lands at a glance,
+ * not by parsing the lead.
  */
-describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () => {
+describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s, nocx-0mvpy.2)', () => {
   afterEach(cleanup)
 
   const RUN_ASK: AgentApprovalRequested = {
@@ -176,14 +215,40 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
 
   const LOCAL: Where = HERE
 
-  it('reads as a sentence: the command, the machine and the tab', () => {
+  it('states machine, tab, cwd, the arguments and the effect each as its own row, in that order', () => {
+    // The acceptance: every fact a person decides on is a row, read at a
+    // glance. machine, tab, cwd, then the arguments the window does not
+    // already state, then the effect — one fact list.
+    const { container } = renderPrompt({
+      ask: {
+        ...RUN_ASK,
+        arguments: `{"command":"df -h","sessionId":"${SID}","timeoutMs":5000}`,
+      },
+      sessionWhere: () => LOCAL,
+    })
+    expect(names(container)).toEqual(['machine', 'tab', 'cwd', 'timeoutMs', 'effect'])
+    expect(rows(container)[0]).toEqual(['machine', 'this machine'])
+    expect(rows(container)[1]).toEqual(['tab', 'home/dev'])
+    expect(rows(container)[2]).toEqual(['cwd', '/home/dev'])
+    expect(rows(container)[3]).toEqual(['timeoutMs', '5000'])
+    expect(rows(container)[4]).toEqual(['effect', 'make changes that cannot be undone'])
+  })
+
+  it('leads with ONE sentence — the machine and the tab are rows, not prose', () => {
     const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
     const text = container.textContent ?? ''
-    expect(text).toContain('run this command')
-    expect(text).toContain('this machine')
-    expect(text).toContain('home/dev')
+    expect(text).toContain('The assistant wants to run this command:')
+    // The two facts that used to hang off the sentence are rows now.
+    expect(text).not.toContain('on this machine')
+    expect(text).not.toContain('in the tab')
     // The command itself, verbatim and alone — not wrapped in JSON.
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+    expect(rows(container)).toEqual([
+      ['machine', 'this machine'],
+      ['tab', 'home/dev'],
+      ['cwd', '/home/dev'],
+      ['effect', 'make changes that cannot be undone'],
+    ])
   })
 
   it('never prints the session id back, on any surface of the question', () => {
@@ -201,8 +266,8 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
         cwdVerified: true,
       }),
     })
+    expect(rows(container)[0]).toEqual(['machine', 'deploy@srv-01.example.com'])
     const text = container.textContent ?? ''
-    expect(text).toContain('deploy@srv-01.example.com')
     // "this machine" would be a lie about where the command lands.
     expect(text).not.toContain('this machine')
   })
@@ -232,10 +297,10 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
       sessionWhere: () => LOCAL,
     })
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
-    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
+    const rows_ = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
       (r) => r.textContent,
     )
-    expect(rows).toContain('timeoutMs5000')
+    expect(rows_).toContain('timeoutMs5000')
     expect(container.textContent ?? '').not.toContain(SID)
     expect(container.textContent ?? '').not.toContain('with these arguments')
   })
@@ -246,9 +311,12 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
       sessionWhere: () => LOCAL,
     })
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('not json')
+    // Where a call lands does not depend on its arguments parsing
+    // (nocx-0mvpy.2): the pane's rows and the effect render beside the blob.
+    expect(names(container)).toEqual(['machine', 'tab', 'cwd', 'effect'])
   })
 
-  it('names the machine for every other tool too — as the session row (nocx-n7xha)', () => {
+  it('names the machine for every other tool too — as its own row (nocx-0mvpy.2)', () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
@@ -263,15 +331,10 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
         cwdVerified: true,
       }),
     })
-    // Where the call lands is stated ONCE. `run` states it in its lead
-    // sentence; every other tool states it on the row for the argument
-    // that names the session — never both, which would be two surfaces
-    // owning one fact.
-    expect(container.textContent ?? '').not.toContain('This call reaches')
-    const rows = Array.from(container.querySelectorAll('.ui-fact-list__row')).map(
-      (r) => r.textContent,
-    )
-    expect(rows[0]).toBe('sessionIdsrv-01 on deploy@srv-01.example.com')
+    // Where the call lands is stated ONCE: the machine and tab rows cover
+    // the session argument, so no sessionId row repeats it.
+    expect(names(container)).toEqual(['machine', 'tab', 'cwd', 'effect'])
+    expect(rows(container)[0]).toEqual(['machine', 'deploy@srv-01.example.com'])
   })
 
   it('does not say the assistant WANTS to run a command that has already run', () => {
@@ -287,11 +350,17 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
     expect(text).not.toContain('wants to run')
     expect(text).toContain('The command that produced it ran')
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('df -h')
+    // The effect row is a POLICY fact: an egress question is about what a
+    // result may do, not about the call that already happened.
+    expect(names(container)).not.toContain('effect')
   })
 
   it('says what the call can do, in the effect vocabulary and never from the tool name', () => {
     const { container } = renderPrompt({ ask: RUN_ASK, sessionWhere: () => LOCAL })
-    expect(container.textContent ?? '').toContain('make changes that cannot be undone')
+    expect(rows(container).find(([name]) => name === 'effect')).toEqual([
+      'effect',
+      'make changes that cannot be undone',
+    ])
   })
 })
 
@@ -303,7 +372,7 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
  * anywhere about which directory the call lands in; and two of five
  * paragraphs spent explaining policy.
  *
- * Three properties are asserted here and they are the whole bead:
+ * Four properties are asserted here and they are the whole bead:
  *
  *  - EXHAUSTIVE BY CONSTRUCTION. Every parsed argument is a named row, for
  *    every tool, including one this surface has never heard of. That is
@@ -315,6 +384,11 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s)', () =>
  *  - A GUESS IS NOT A FACT. The working directory is named, and a cwd no
  *    OSC 7 report confirmed says so (AD-5). An approval window that printed
  *    a guess as fact would lie at the moment lying is most expensive.
+ *  - EVERY FACT IS A ROW (nocx-0mvpy.2). The machine, the tab, the
+ *    directory, the arguments and the effect are each a row of the one
+ *    list, in that order, so the where and the what are read at a glance —
+ *    the lead is one sentence, and the paragraphs below say only what
+ *    cannot be a row.
  */
 describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
   afterEach(cleanup)
@@ -326,17 +400,6 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     resource: { kind: 'session', id: SID },
   }
 
-  /** Every row as `name` + `value`, in the order the window reads. The
-   *  note lives inside the value cell (it qualifies that value and must not
-   *  be able to drift to another row), so it is subtracted here. */
-  function rows(container: HTMLElement): Array<[string, string]> {
-    return Array.from(container.querySelectorAll('.ui-fact-list__row')).map((r) => {
-      const value = r.querySelector('.ui-fact-list__value')?.textContent ?? ''
-      const note = r.querySelector('.ui-fact-list__note')?.textContent ?? ''
-      return [r.querySelector('.ui-fact-list__name')?.textContent ?? '', value.replace(note, '')]
-    })
-  }
-
   it('shows every parsed argument as a named row, including ones it has no words for', () => {
     const { container } = renderPrompt({
       ask: {
@@ -345,11 +408,12 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       },
       sessionWhere: () => HERE,
     })
-    const named = rows(container).map(([name]) => name)
-    // Nothing is dropped, and the order is the model's own.
-    expect(named).toEqual(['sessionId', 'region', 'why', 'cwd'])
-    expect(rows(container)[1][1]).toBe('{"start":0,"end":24}')
-    expect(rows(container)[2][1]).toBe('because')
+    // machine, tab, cwd and effect are rows too (nocx-0mvpy.2); the parsed
+    // arguments sit between the directory and the effect, in the model's
+    // own order, and the session argument is covered by the pane's rows.
+    expect(names(container)).toEqual(['machine', 'tab', 'cwd', 'region', 'why', 'effect'])
+    expect(rows(container)[3]).toEqual(['region', '{"start":0,"end":24}'])
+    expect(rows(container)[4]).toEqual(['why', 'because'])
   })
 
   it('does the same for a tool nobody has written a sentence for', () => {
@@ -365,6 +429,7 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       ['target', 'prod'],
       ['force', 'true'],
       ['retries', '3'],
+      ['effect', 'read and inspect'],
     ])
     expect(container.textContent ?? '').toContain('someone.elses.tool')
   })
@@ -375,7 +440,10 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       sessionWhere: () => HERE,
     })
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('[1,2,3]')
-    expect(container.querySelector('.ui-fact-list')).toBeNull()
+    // The blob is the fallback for the ARGUMENTS; the where and the effect
+    // are rows in both branches, because where a call lands does not depend
+    // on the arguments parsing.
+    expect(names(container)).toEqual(['machine', 'tab', 'cwd', 'effect'])
     expect(container.textContent ?? '').toContain('with these arguments')
   })
 
@@ -408,10 +476,10 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       ask: SESSION_ASK,
       sessionWhere: () => ({ ...HERE, cwd: '', cwdVerified: false }),
     })
-    expect(rows(container).map(([name]) => name)).toEqual(['sessionId'])
+    expect(names(container)).toEqual(['machine', 'tab', 'effect'])
   })
 
-  it("names run's directory too, beside the sentence rather than instead of it", () => {
+  it("names run's directory too, in the same list as the machine and the tab", () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
@@ -423,28 +491,29 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
       sessionWhere: () => HERE,
     })
     const text = container.textContent ?? ''
-    // njn8s's sentence is untouched: command in a code block, machine and
-    // tab in the lead.
-    expect(text).toContain('run this command')
-    expect(text).toContain('this machine')
-    expect(text).toContain('home/dev')
+    // The command keeps its own block, and the lead names it in one
+    // sentence; the where is rows beneath.
+    expect(text).toContain('The assistant wants to run this command:')
     expect(container.querySelector('.ui-code-block')?.textContent).toBe('rm -rf build')
-    // And the directory is added beside it. The two arguments the sentence
-    // already states are not repeated as rows — where a call lands has one
-    // owner on this surface, not two.
-    expect(rows(container)).toEqual([['cwd', '/home/dev']])
+    // The two arguments the window already states — command in the block,
+    // sessionId as the pane's rows — are not repeated: where a call lands
+    // has one owner on this surface, not two.
+    expect(rows(container)).toEqual([
+      ['machine', 'this machine'],
+      ['tab', 'home/dev'],
+      ['cwd', '/home/dev'],
+      ['effect', 'make changes that cannot be undone'],
+    ])
   })
 
   it('puts the decision facts before the policy prose', () => {
     const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
     const text = container.textContent ?? ''
-    const facts = text.indexOf('cwd')
-    const effect = text.indexOf('This call can')
+    const facts = text.indexOf('effect')
     const covers = text.indexOf('Approving covers this call')
     const lasts = text.indexOf('An answer in this session lasts')
     expect(facts).toBeGreaterThan(-1)
-    expect(effect).toBeGreaterThan(facts)
-    expect(covers).toBeGreaterThan(effect)
+    expect(covers).toBeGreaterThan(facts)
     expect(lasts).toBeGreaterThan(covers)
   })
 })
