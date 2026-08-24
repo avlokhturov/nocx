@@ -1,5 +1,7 @@
 package assistant
 
+//go:generate go run ./cmd/systempromptgen
+
 // The system prompt (design §1, bead nocx-avogl.1).
 //
 // One owner, one text. Everything the model is told about where it is comes
@@ -145,4 +147,21 @@ func SystemPrompt(f SystemPromptFacts) string {
 	}
 
 	return b.String()
+}
+
+// SettingsSystemPrompt returns the standing prompt shown in Settings. It uses
+// the same renderer as an ask, but replaces pane-owned and per-question facts
+// with explicit placeholders and leaves out the person's private text.
+func SettingsSystemPrompt() string {
+	const localPaneLine = "This pane is a local shell on the person's own machine, running <operating system>.\n"
+	const attachedContentLine = "Terminal content is attached to this question below. "
+	prompt := SystemPrompt(SystemPromptFacts{
+		SessionID:       "<session id>",
+		Cwd:             "<working directory>",
+		Env:             content.Environment{Kind: content.EnvLocal},
+		OS:              "<operating system>",
+		AttachedContent: true,
+	})
+	prompt = strings.Replace(prompt, localPaneLine, "This pane is a <local shell or ssh session> on <host or local machine>.\n", 1)
+	return strings.Replace(prompt, attachedContentLine, "Terminal content: <attached or absent>. ", 1)
 }
