@@ -22,7 +22,6 @@ package transport
 
 import (
 	"encoding/json"
-	"strconv"
 	"testing"
 	"time"
 
@@ -59,29 +58,6 @@ func TestAgentApprove_SessionAnswerReachesTheRunThatAskedIt(t *testing.T) {
 	}
 	if d := got[1].Grant.Policy.DecisionFor(content.EffectObserve); d != content.DecisionPermit {
 		t.Fatalf("the resumed attempt's grant decides observe = %q, want permit: the person answered \"allow in this session\" and the run they answered about went on asking (nocx-v94ne)", d)
-	}
-}
-
-// TestAgentApprove_DeclineDropsTheEnginesContinuation: the person said no,
-// the run is terminal, and nothing may resume it — so the checkpoint the
-// suspension wrote is dropped. Ask never returns from a decline (the run
-// ends between two drives), so this is the transport's to do; a checkpoint
-// nobody may resume is a copy of the run's messages held for the life of
-// the process (ADR-0028: deleted on terminalization).
-func TestAgentApprove_DeclineDropsTheEnginesContinuation(t *testing.T) {
-	client := &scriptedApprovalClient{script: []approvalScriptStep{
-		{suspend: policySuspension("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a")},
-	}}
-	h := suspendedRunWith(t, askPolicyStore(t), client)
-
-	h.deny(t, "once")
-
-	waitFor(t, "the declined run's continuation to be dropped", 5*time.Second, func() bool { return len(client.discards()) > 0 })
-	if got := client.discards(); len(got) != 1 || got[0] != strconv.FormatInt(h.runID, 10) {
-		t.Fatalf("discarded %v, want exactly the declined run %q", got, strconv.FormatInt(h.runID, 10))
-	}
-	if client.askCount() != 1 {
-		t.Fatalf("the engine was driven %d times, want 1 — a declined run is not resumed", client.askCount())
 	}
 }
 

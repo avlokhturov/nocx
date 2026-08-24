@@ -295,14 +295,18 @@ func TestAsk_ClassifierSuspectEscalatesPermittedCall(t *testing.T) {
 // outcome, so the policy's decision stands untouched.
 func TestClassifier_ClearChangesNothingOnPolicyEscalation(t *testing.T) {
 	// Arm 1: the policy REFUSES (a scope the grant does not cover — a
-	// cleared classifier cannot rescue the call).
+	// cleared classifier cannot rescue the call). The refusal is the call's
+	// result, in our words, and the classifier was never consulted.
 	grant, _ := testDirGrant(t, autonomousMatrix()) // scoped to the temp dir
 	outside := t.TempDir() + "/outside.txt"
 	ledger := &fakeLedger{}
 	mw := middlewareForWithClassifier(t, grant, ledger, nil, failIfCalledClassifier{t})
-	_, err := wrappedEndpoint(mw, "files.read", "call_1", fmt.Sprintf(`{"path":%q}`, outside))
-	if !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("refused-call error = %v, want ErrPolicyRefused — a clear classifier changed nothing", err)
+	out, err := wrappedEndpoint(mw, "files.read", "call_1", fmt.Sprintf(`{"path":%q}`, outside))
+	if err != nil {
+		t.Fatalf("refused-call error = %v, want the refusal as a tool result — a clear classifier changed nothing", err)
+	}
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "outside") {
+		t.Fatalf("refused-call result = %q, want the refusal naming why in our words", out)
 	}
 
 	// Arm 2: the policy ASKS (ask-every-time). The classifier would say

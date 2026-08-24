@@ -18,9 +18,11 @@ package assistant
 //   - The attempt exists from before the effect until the outcome or a
 //     terminal reason is recorded. Not "the attempt is written before the
 //     call" — that names a moment; the interval is the thing.
-//   - A refusal terminalizes. ErrPolicyRefused is a nocx error, never a
-//     ToolOutput: a tool result with no error becomes text the model reads
-//     and works around, which is exactly the failure this rule prevents.
+//   - A refusal is an answer (nocx-uvac6.1), not a fault. The policy's no
+//     is returned as a TOOL RESULT in our words — a non-error string the
+//     model reads in the refused call's own slot — and the run continues
+//     until it reaches a terminal state of its own accord. The system
+//     prompt promises this, and the promise is kept at this seam.
 
 import (
 	"bytes"
@@ -47,58 +49,32 @@ import (
 	"github.com/shady2k/nocx/internal/masking"
 )
 
-// ErrPolicyRefused is the terminal error of a refused tool call (ADR-0028
-// decision 2): the run fails with it — ToolsNode aborts on a non-interrupt
-// error rather than producing a tool message, and no second model request is
-// made. The run adapter terminalizes the attempt as refused.
-var ErrPolicyRefused = errors.New("agent policy: tool call refused")
-
-// PolicyRefusalReason is WHY a call was refused — the two branches decide
-// takes, and no more: a closed set, because the product's sentence for a
-// refusal is written per reason and an unnamed third one would silently fall
-// back to the vaguest of them.
+// PolicyRefusalReason is WHY a call was refused — the branches decide takes,
+// and no more: a closed set, because the product's sentence for a refusal is
+// written per reason and an unnamed third one would silently fall back to
+// the vaguest of them.
 type PolicyRefusalReason string
 
 const (
 	// RefusedByDecision: the grant's policy matrix decides refuse for this
 	// tool's effect class. Under an unbypassed declaration path the tool is
 	// never offered to the model at all (ForGrant filters), so this is the
-	// defense that holds if the declaration path is bypassed.
+	// defense that holds if the declaration path is bypassed. A matrix row
+	// is standing by nature: the person set it, and a retry of the same
+	// call in the same turn is refused again.
 	RefusedByDecision PolicyRefusalReason = "refused-by-decision"
 	// RefusedOutOfScope: the call named a resource outside the SELECTED
 	// effect's row scopes. This is the reachable one, and it is the owner's
 	// screenshot: a model that invents a session id fails the exact identity
 	// match (inScope, ResourceSession).
 	RefusedOutOfScope PolicyRefusalReason = "refused-out-of-scope"
+	// RefusedByPerson: the EXACT proposal was declined by the person
+	// (nocx-uvac6.1). Decided by the declined-proposal check, not by
+	// decide: the person's no to one call is a different sentence from the
+	// policy's no, and the standing half of it ("in this session", "from
+	// now on") is carried by the approval store's DeclineKind.
+	RefusedByPerson PolicyRefusalReason = "refused-by-person"
 )
-
-// PolicyRefusedError is a refusal carrying the two facts the product's
-// sentence needs: WHICH tool was proposed and WHY it did not run
-// (nocx-avogl.3). ErrPolicyRefused alone could say neither, so the block
-// showed the framework's stringification of it instead.
-//
-// It unwraps to ErrPolicyRefused, so every existing errors.Is caller is
-// unchanged; the transport asks errors.As when it needs the two facts.
-//
-// MEASURED on 2026-08-21, because the answer decides whether a typed handle
-// is usable at all: eino's compose.internalError — the "[NodeRunError] … node
-// path: [node_1, ToolNode]" text in the owner's screenshot — implements
-// Unwrap, and ToolsNode wraps a failing call with %w
-// (compose/tool_node.go:1203). So the typed chain SURVIVES the framework
-// boundary intact: errors.Is and errors.As both recover this value at the
-// transport, and NO string match against the framework's text is needed
-// anywhere. internal/transport's TestAskFailure_TheTypedChainSurvivesEino is
-// the guard on that property.
-type PolicyRefusedError struct {
-	Tool   string
-	Reason PolicyRefusalReason
-}
-
-func (e *PolicyRefusedError) Error() string {
-	return fmt.Sprintf("%s: tool %q: %s", ErrPolicyRefused.Error(), e.Tool, e.Reason)
-}
-
-func (e *PolicyRefusedError) Unwrap() error { return ErrPolicyRefused }
 
 // ToolFailedError is the FOURTH cause a run can end on, and the one the
 // nocx-avogl.3 brief did not name: the policy permitted the call, the tool
@@ -136,7 +112,7 @@ func (e *ToolFailedError) Message() string {
 // ErrMalformedModelOutput marks a tool call that corresponds to no declared
 // tool or whose arguments do not match the schema the model was shown. Not a
 // refusal — there is nothing to call; the model produced output the engine
-// cannot act on. Terminal, like a refusal.
+// cannot act on. Terminal, where a refusal is now a tool result.
 var ErrMalformedModelOutput = errors.New("agent policy: malformed model output")
 
 // ApprovalRequestedError is what Ask returns when the run suspended for
@@ -390,16 +366,39 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		}
 
 		// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
+		//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
+		//    this very call through the pipeline, and the refusal is the
+		//    call's result — the call must not run and must not be asked
+		//    about again (the approval was answered; a re-ask would be the
+		//    ask-forever loop the resume exists to end). Checked BEFORE
+		//    decide, and the exact proposal FIRST: a standing no is answered
+		//    with the person's own sentence, not the matrix's.
+		if m.approvals != nil {
+			if kind, declined := m.approvals.DeclinedKind(m.proposal(decl.Name, tCtx.CallID, rawArgs)); declined {
+				return refusalResult(decl.Name, RefusedByPerson, kind), nil
+			}
+			// A STANDING no also answers any later call of the same effect
+			// class in this run: "deny in this session" / "deny always"
+			// said "this kind of call", so a retry of the same kind —
+			// which mints a new call id and therefore misses the exact
+			if kind, standing := m.approvals.DeclinedEffect(m.runID, decl.Effect); standing {
+				return refusalResult(decl.Name, RefusedByPerson, kind), nil
+			}
+		}
 		outcome, refusal := m.decide(decl, args)
 		switch outcome {
 		case policyRefuse:
-			// The refusal carries the tool and the reason: the transport
-			// writes the person's sentence from those two facts, and it can
-			// only do that if they cross the framework boundary WITH the
-			// error (see PolicyRefusedError).
-			refused := &PolicyRefusedError{Tool: decl.Name, Reason: refusal}
-			tripLatch(ctx, refused)
-			return "", refused
+			// (nocx-uvac6.1) The refusal IS the call's result: a tool
+			// result with no error is text the model reads and answers —
+			// the system prompt promises exactly this ("A refusal is an
+			// answer"). ADR-0028 decision 2 previously treated refusal as
+			// a terminal error; this is the deliberate refinement at the
+			// SAME seam: the refusal category is still ours and still
+			// precedes the attempt — it just returns the refusal as the
+			// outcome instead of ending the run. No latch trip: the run
+			// continues, and every other call in this response is decided
+			// on its own merits.
+			return refusalResult(decl.Name, refusal, ""), nil
 		case policyAsk:
 			// Approval binds to the exact proposal: an approved call skips
 			// the ask; a changed argument hashes differently and does NOT
@@ -938,13 +937,44 @@ func canonicalArgHash(raw string) string {
 
 // deferred returns what a latched call returns: an interrupt error, so the
 // batch still suspends cleanly when the trigger was an escalation (a plain
-// error here would fail the run instead of suspending it). When the trigger
-// was a refusal, ToolsNode aborts at the first non-interrupt error before
-// this one is examined. Either way: next is not called, the tool does not
-// run, and the human is told the truth about the call that asked.
+// error here would fail the run instead of suspending it). Only
+// ESCALATIONS trip the latch now — a refusal is one call's answer, not the
+// batch's (nocx-uvac6.1) — so the deferred shape is the interrupt and
+// nothing else. Either way: next is not called, the tool does not run, and
+// the human is told the truth about the call that asked.
 func (m *policyMiddleware) deferred(ctx context.Context, tCtx *adk.ToolContext, reason error) error {
 	info := fmt.Sprintf("call %q (%s) did not run: a prior call in this response %v", tCtx.Name, tCtx.CallID, reason)
 	return compose.Interrupt(ctx, info)
+}
+
+// refusalResult is the TOOL RESULT a refused call returns to the model
+// (nocx-uvac6.1): the refusal is an answer, not a fault. The system prompt
+// promises exactly this — "A refusal is an answer: say what you could not do
+// and what you would need" — and a non-error tool result is how the promise
+// is kept: the refused call's own slot in the conversation carries the
+// refusal, the run continues, and the model answers in words, or proposes
+// something else. The text is OURS, written per reason (nocx-avogl.3: never
+// the framework's stringification), and it says nothing the policy keeps
+// from the person — no effect lattice, no scope list, no error internals.
+//
+// kind is the declined proposal's standing half (the person's own no); empty
+// for a policy refusal, which is standing only when the matrix row says so.
+func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind) string {
+	switch reason {
+	case RefusedOutOfScope:
+		return "REFUSED: nocx did not run your call to " + tool + ": it named something outside what this question is allowed to reach. Say what you wanted in words, or propose a call within what you were given — never a different spelling of the same call."
+	case RefusedByPerson:
+		switch kind {
+		case DeclineCallSession:
+			return "REFUSED: the person declined your call to " + tool + ", and refused this kind of call in this session. Do not propose it again in this session."
+		case DeclineCallAlways:
+			return "REFUSED: the person declined your call to " + tool + ", and refused this kind of call from now on. Do not propose it again."
+		default:
+			return "REFUSED: the person declined your call to " + tool + " — it did not run. Say what you needed in words instead."
+		}
+	default: // RefusedByDecision — the matrix row, standing by nature
+		return "REFUSED: nocx did not run your call to " + tool + ": this kind of action is refused by the policy this question runs under, and that refusal stands. Do not propose it again, or try a different spelling of the same call."
+	}
 }
 
 // approvalRequestFrom finds the pipeline's own ask among an interrupt

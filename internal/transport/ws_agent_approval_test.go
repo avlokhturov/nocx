@@ -153,11 +153,11 @@ func isTimeout(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "timeout") || strings.Contains(err.Error(), "deadline"))
 }
 
-// approveDeclineOverWire drives agent.approve(approved:false) and returns
-// BOTH the runState notification and the response: the decline terminalizes
-// BEFORE it answers, so the runState notification precedes the response on
-// the wire — a plain jsonrpcCall would consume and discard it while looking
-// for the matching id.
+// approveDeclineOverWire drives agent.approve(approved:false) for the ONE
+// decline that still terminalizes — the egress gate's no, whose runState
+// notification precedes the response on the wire — and returns BOTH the
+// runState notification and the response. A policy decline no longer
+// terminalizes (nocx-uvac6.1) and is driven with the plain approveOverWire.
 func approveDeclineOverWire(t *testing.T, conn *websocket.Conn, params map[string]any, id int) (agentRunState, approvalWireResult, *jsonrpcErrorObj) {
 	t.Helper()
 	req, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": "agent.approve", "params": params})
@@ -334,13 +334,15 @@ func TestAgentApprove_YesResumesTheRun(t *testing.T) {
 	}
 }
 
-// TestAgentApprove_NoTerminalizesDeclined: answering no terminalizes the run
-// with the reason that says a person declined — agent-declined — and the
-// run is never resumed.
-func TestAgentApprove_NoTerminalizesDeclined(t *testing.T) {
+// TestAgentApprove_NoResumesWithTheRefusal (nocx-uvac6.1): answering no does
+// not end the run — the refusal becomes that call's result, the SAME run is
+// re-driven, and the model answers in words. The run reaches a terminal
+// state of its own accord, as completed, never as agent-declined.
+func TestAgentApprove_NoResumesWithTheRefusal(t *testing.T) {
 	const args = `{"path":"/repo/a.txt"}`
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
 		{suspend: policySuspension("files.read", "call_1", args, "hash-a")},
+		{deltas: []string{"done"}},
 	}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()
@@ -353,33 +355,74 @@ func TestAgentApprove_NoTerminalizesDeclined(t *testing.T) {
 	}
 	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
 
-	// The decline terminalizes BEFORE it answers: the runState notification
-	// precedes the response on the wire, and the reader captures both.
-	st, got, errObj := approveDeclineOverWire(t, h.conn, map[string]any{
+	// The decline no longer terminalizes: the response names the run as
+	// streaming (the refusal-resume is in flight), and NO runState
+	// notification precedes it.
+	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
 		"callId": "call_1", "argHash": "hash-a", "approved": false, "scope": "once",
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve(no): %+v", errObj)
 	}
-	if got.State != "failed" {
-		t.Fatalf("approve(no) state = %q, want failed", got.State)
+	if got.State != "streaming" {
+		t.Fatalf("approve(no) state = %q, want streaming — the run resumes with the refusal as that call's result", got.State)
 	}
-	if n := client.askCount(); n != 1 {
-		t.Fatalf("engine received %d asks, want 1 — a declined run is never resumed", n)
-	}
-	if st.State != "failed" {
-		t.Fatalf("runState = %q, want failed", st.State)
+	// The resume streams — an observable state change (never a duration):
+	// the task runs off the read loop on its own admission, so the engine
+	// may not have been called the instant the approve response arrived.
+	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+	if n := client.askCount(); n != 2 {
+		t.Fatalf("engine received %d asks, want 2 (escalate + refusal-resume) — a declined run IS resumed", n)
 	}
 
-	// The ledger says a person declined: the run row's termination reason.
+	raw := readNotification(t, h.conn, "agent.runState", 5*time.Second)
+	var st struct {
+		State string `json:"state"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil || st.State != "completed" {
+		t.Fatalf("runState = %s (err %v), want completed — a turn that answered after a refusal did not fail", raw, err)
+	}
+
+	// The ledger agrees: the run completed; nobody declined it terminally.
 	led := h.db.Ledger()
 	q, err := led.Entry(context.Background(), res.EntryID)
 	if err != nil || q == nil || len(q.Executions) == 0 {
 		t.Fatalf("question entry: %v (err %v)", q, err)
 	}
-	if q.Executions[0].TerminationReason == nil || *q.Executions[0].TerminationReason != content.TermAgentDeclined {
-		t.Fatalf("run termination = %v, want agent-declined", q.Executions[0].TerminationReason)
+	if q.Executions[0].TerminationReason == nil || *q.Executions[0].TerminationReason != content.TermCompleted {
+		t.Fatalf("run termination = %v, want completed — the decline is the call's result, not the run's end", q.Executions[0].TerminationReason)
+	}
+}
+
+// TestAgentApprove_NoKeepsTheContinuation: the person's no does not drop the
+// engine's continuation — the run is re-driven, so the checkpoint survives
+// until the run itself completes (and the completion path drops it, exactly
+// as a yes-resumed run does).
+func TestAgentApprove_NoKeepsTheContinuation(t *testing.T) {
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: policySuspension("files.read", "call_1", `{"path":"/repo/a.txt"}`, "hash-a")},
+		{deltas: []string{"done"}},
+	}}
+	h := suspendedRunWith(t, askPolicyStore(t), client)
+
+	res := h.deny(t, "once")
+	if res.State != string(content.RunStreaming) {
+		t.Fatalf("deny state = %q, want streaming", res.State)
+	}
+	// The resume streams — an observable state change (never a duration),
+	// and the proof the continuation survived the decline: the engine was
+	// driven a second time.
+	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
+	if n := client.askCount(); n != 2 {
+		t.Fatalf("the engine was driven %d times, want 2 — a declined run IS resumed", n)
+	}
+
+	// The run completes, and only then is its continuation dropped — the
+	// normal terminal path, never the decline.
+	waitFor(t, "the completed run's continuation to be dropped", 5*time.Second, func() bool { return len(client.discards()) > 0 })
+	if got := client.discards(); len(got) != 1 || got[0] != strconv.FormatInt(h.runID, 10) {
+		t.Fatalf("discarded %v, want exactly the run %q at completion", got, strconv.FormatInt(h.runID, 10))
 	}
 }
 
@@ -535,5 +578,58 @@ func TestAgentApproval_EgressFindingOverTheWire(t *testing.T) {
 	}
 	if st, err := h.db.Ledger().RunState(context.Background(), res.RunID); err != nil || st == nil || *st != content.RunAwaitingApproval {
 		t.Fatalf("run state = %v (err %v), want awaiting_approval", st, err)
+	}
+}
+
+// TestAgentApprove_EgressDeclineStillTerminalizes is the ONE decline that
+// still ends the run (nocx-uvac6.1): the egress gate's question is whether
+// the withheld result may LEAVE for the provider, and a no means it never
+// will — there is no result to continue with, and the refusal-as-result
+// contract is for calls that did not run. The run closes agent-declined,
+// and the engine is never re-driven.
+func TestAgentApprove_EgressDeclineStillTerminalizes(t *testing.T) {
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: func(runID string) error {
+			return &assistant.EgressRequestedError{Request: &assistant.EgressRequest{
+				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
+				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
+				Effect:   content.EffectObserve,
+				Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
+				Findings: []assistant.EgressFinding{{
+					Source: assistant.EgressFindingHeuristic, Kind: "openai-api-key",
+					Start: 11, End: 40,
+				}},
+			}}
+		}},
+	}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-1", "sessionId": sid, "question": "please read it", "cwd": "/repo",
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+
+	// The egress decline terminalizes BEFORE it answers: the runState
+	// notification precedes the response on the wire, and the reader
+	// captures both.
+	st, got, errObj := approveDeclineOverWire(t, h.conn, map[string]any{
+		"runId": strconv.FormatInt(res.RunID, 10), "attempt": 1, "tool": "files.read",
+		"callId": "call_1", "argHash": "hash-a", "approved": false, "scope": "once",
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("agent.approve(no) on the egress gate: %+v", errObj)
+	}
+	if got.State != string(content.RunFailed) {
+		t.Fatalf("egress deny state = %q, want failed", got.State)
+	}
+	if st.State != string(content.RunFailed) {
+		t.Fatalf("egress deny runState = %q, want failed", st.State)
+	}
+	if n := client.askCount(); n != 1 {
+		t.Fatalf("engine received %d asks, want 1 — a declined egress send never resumes the run", n)
 	}
 }

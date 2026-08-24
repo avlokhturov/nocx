@@ -13,7 +13,6 @@ package assistant
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
@@ -38,8 +37,9 @@ func sessionIDAsAModelReadsIt(t *testing.T, prompt string) string {
 // TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire is the bead's
 // first criterion. The grant is minted as the transport mints it — scoped to
 // exactly one session — and the pipeline is the real one: an invented id is
-// refused terminally (the scope check runs BEFORE the ask branch), and the
-// id the prompt gave the model is not.
+// refused (the scope check runs BEFORE the ask branch), and the id the
+// prompt gave the model is not. The refusal is the call's result, in our
+// words (nocx-uvac6.1).
 func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	const sid = "0198f3aa-6d1e-7c31-9f0a-1c2d3e4f5a6b"
 	prompt := SystemPrompt(SystemPromptFacts{
@@ -60,10 +60,14 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	// renderer.
 	screen := &recordingRequester{body: liveFrameBody("hello")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, screen)
-	if _, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"the-model-made-this-up"}`); !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("an invented sessionId gave %v, want ErrPolicyRefused — the refusal the prompt exists to prevent", err)
+	out, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"the-model-made-this-up"}`)
+	if err != nil {
+		t.Fatalf("an invented sessionId gave %v, want the refusal as a tool result — the refusal the prompt exists to prevent", err)
 	}
-	out, err := wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":`+quoted(told)+`}`)
+	if !strings.Contains(out, "REFUSED") {
+		t.Fatalf("invented-sessionId result = %q, want a refusal in our words", out)
+	}
+	out, err = wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":`+quoted(told)+`}`)
 	if err != nil {
 		t.Fatalf("readScreen with the id the prompt gave failed: %v", err)
 	}
@@ -77,11 +81,15 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	// run: the same rule on the tool that changes something.
 	runner := &recordingRunner{body: runResolvedBody("e1", nil, "completed", 1, 0, 1, "ok")}
 	mwRun := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, runner)
-	if _, err := wrappedEndpoint(mwRun, "run", "c3", `{"sessionId":"the-model-made-this-up","command":"ls"}`); !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("an invented sessionId on run gave %v, want ErrPolicyRefused", err)
+	outRun, runErr := wrappedEndpoint(mwRun, "run", "c3", `{"sessionId":"the-model-made-this-up","command":"ls"}`)
+	if runErr != nil {
+		t.Fatalf("an invented sessionId on run gave %v, want the refusal as a tool result", runErr)
 	}
-	if _, err := wrappedEndpoint(mwRun, "run", "c4", `{"sessionId":`+quoted(told)+`,"command":"ls"}`); errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("run with the id the prompt gave was refused by the policy: %v", err)
+	if !strings.Contains(outRun, "REFUSED") {
+		t.Fatalf("invented-sessionId run result = %q, want a refusal in our words", outRun)
+	}
+	if _, runErr := wrappedEndpoint(mwRun, "run", "c4", `{"sessionId":`+quoted(told)+`,"command":"ls"}`); runErr != nil {
+		t.Fatalf("run with the id the prompt gave was refused by the policy: %v", runErr)
 	}
 	calls := runner.runCalls()
 	if len(calls) != 1 || calls[0].sessionID != sid || calls[0].command != "ls" {

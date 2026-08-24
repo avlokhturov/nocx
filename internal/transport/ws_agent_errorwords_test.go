@@ -19,10 +19,11 @@ package transport
 // would prove the mapping and not the classification.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"log/slog"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -46,21 +47,6 @@ func assertNoFrameworkWords(t *testing.T, sentence string) {
 			t.Errorf("the sentence a person reads contains the framework identifier %q: %q", w, sentence)
 		}
 	}
-}
-
-// captureDefaultLog redirects the process default logger — which is what
-// log.NewSlogAdapter(nil) resolves, and therefore what the harness's server
-// logs through — into a buffer for the run of one test. The boundary that
-// catches the framework's error is asserted through the logger it actually
-// holds, not through a spy handed to it. Called BEFORE the harness is built:
-// NewSlogAdapter(nil) resolves slog.Default() once, at construction.
-func captureDefaultLog(t *testing.T) *syncBuffer {
-	t.Helper()
-	buf := &syncBuffer{}
-	prev := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(prev) })
-	return buf
 }
 
 // recordingClient is the REAL engine with the error it returned kept, so a
@@ -129,13 +115,6 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 	return st.State, st.Error, rec.lastError()
 }
 
-// outOfScopeReadScreen is the owner's own scenario: the model calls readScreen
-// naming a session this run's grant does not cover, and the policy's exact
-// identity match refuses it terminally.
-func outOfScopeReadScreen(w http.ResponseWriter, _ *http.Request) {
-	streamToolCallChunk(w, "readScreen", `{"sessionId":"a-session-this-grant-does-not-cover"}`)
-}
-
 // malformedReadScreen names a declared tool — so the call reaches OUR
 // middleware rather than the framework's own index lookup — with an argument
 // object the schema the model was shown does not allow.
@@ -148,68 +127,40 @@ func malformedReadScreen(w http.ResponseWriter, _ *http.Request) {
 // nothing before it.
 const unreachableEndpoint = "http://127.0.0.1:1/v1"
 
-// ── the question the brief asks, answered as a test ──────────────────────
+// ── the refusal is an answer, not a failure (nocx-uvac6.1) ──────────────
 
-// TestAskFailure_TheTypedChainSurvivesEino answers "does errors.Is still hold
-// after eino has wrapped it?" over the real error rather than in prose.
-//
-// It DOES. compose.internalError implements Unwrap, and ToolsNode wraps a
-// failing call with %w ("failed to stream tool call %s: %w",
-// compose/tool_node.go:1203), so the chain is intact and NO string match is
-// needed anywhere in classifyAskFailure. This test is the guard on that
-// property: if a framework upgrade breaks it, this fails before the sentence
-// tests do and says what to do instead.
-func TestAskFailure_TheTypedChainSurvivesEino(t *testing.T) {
-	_, _, engineErr := failingRun(t, "", outOfScopeReadScreen)
-	if engineErr == nil {
-		t.Fatal("the real engine returned no error for an out-of-scope call")
+// outOfScopeReadScreenThenAnswer is the owner's own scenario — the model
+// calls readScreen naming a session this run's grant does not cover — and
+// then answers once it has seen the refusal as a tool result: a provider
+// that stops proposing is every real one.
+func outOfScopeReadScreenThenAnswer(w http.ResponseWriter, r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if strings.Contains(string(body), `"role":"tool"`) {
+		streamOKChunks(w)
+		return
 	}
-	if !strings.Contains(engineErr.Error(), "NodeRunError") {
-		t.Fatalf("the framework no longer wraps our error at all (%v) — this test no longer proves anything", engineErr)
-	}
-	if !errors.Is(engineErr, assistant.ErrPolicyRefused) {
-		t.Fatalf("errors.Is(err, ErrPolicyRefused) is FALSE after the framework wrapped it: %v\n"+
-			"recovering the refusal now needs a handle inside internal/assistant, where the\n"+
-			"middleware returns it — NOT a string match in the transport", engineErr)
-	}
-	var refusal *assistant.PolicyRefusedError
-	if !errors.As(engineErr, &refusal) {
-		t.Fatalf("errors.As did not recover the typed refusal from %v — the transport cannot name the tool", engineErr)
-	}
-	if refusal.Tool != "readScreen" {
-		t.Errorf("the refusal names tool %q, want readScreen", refusal.Tool)
-	}
-	if refusal.Reason != assistant.RefusedOutOfScope {
-		t.Errorf("the refusal reason = %q, want out-of-scope", refusal.Reason)
-	}
+	streamToolCallChunk(w, "readScreen", `{"sessionId":"a-session-this-grant-does-not-cover"}`)
 }
 
-// ── cause 1: the policy refused the call ─────────────────────────────────
-
-// TestAskFailure_APolicyRefusalNamesTheToolAndTheReason is the bead's first
-// criterion, over the owner's own scenario: the block must say WHICH tool was
-// proposed and WHY it did not run, in our words.
-func TestAskFailure_APolicyRefusalNamesTheToolAndTheReason(t *testing.T) {
-	logs := captureDefaultLog(t)
-	state, sentence, _ := failingRun(t, "", outOfScopeReadScreen)
-
-	if state != "failed" {
-		t.Fatalf("runState = %q, want failed", state)
+// TestAsk_RefusalCompletesTheRun is the transport half of nocx-uvac6.1: a
+// policy refusal is the call's result, not a terminal error, so the run
+// reaches a terminal state of its own accord — completed, with no error
+// sentence on the wire and none of the framework's words anywhere. The
+// refusal's own text is asserted where it lives, in the assistant package,
+// on the request the engine actually sent; here the wire is the contract.
+func TestAsk_RefusalCompletesTheRun(t *testing.T) {
+	state, sentence, engineErr := failingRun(t, "", outOfScopeReadScreenThenAnswer)
+	if state != "completed" {
+		t.Fatalf("runState = %q, want completed — a refusal is an answer, not a failure", state)
 	}
-	if !strings.Contains(sentence, "readScreen") {
-		t.Errorf("the refusal sentence does not name the tool that was proposed: %q", sentence)
+	if sentence != "" {
+		t.Fatalf("the completed run carries an error sentence %q, want none", sentence)
 	}
-	if !strings.Contains(strings.ToLower(sentence), "outside") {
-		t.Errorf("the refusal sentence does not say why the call did not run: %q", sentence)
+	if engineErr != nil {
+		t.Fatalf("the engine returned an error %v for a run that completed", engineErr)
 	}
-	assertNoFrameworkWords(t, sentence)
-
-	// The framework's text is not thrown away: it is logged once, at the
-	// boundary that caught it.
-	got := logs.String()
-	if n := strings.Count(got, "NodeRunError"); n != 1 {
-		t.Errorf("the framework's own text was logged %d times, want exactly once — it is the only place the trace survives:\n%s", n, got)
-	}
+	assertNoFrameworkWords(t, state+" "+sentence)
 }
 
 // ── cause 2: the model's tool call was malformed ─────────────────────────
@@ -266,18 +217,20 @@ func TestAskFailure_AnUnreachableEndpointKeepsItsOwnSentence(t *testing.T) {
 	}
 }
 
-// ── the three causes stay three ──────────────────────────────────────────
+// ── the causes stay distinct ─────────────────────────────────────────────
 
-// TestAskFailure_ThreeCausesThreeSentences is the bead's third criterion
-// stated directly: one message for three causes is how a cause stops being
-// findable. The sentences come from three REAL runs and must all differ.
-func TestAskFailure_ThreeCausesThreeSentences(t *testing.T) {
+// TestAskFailure_CausesKeepTheirOwnSentences is the bead's third criterion
+// stated directly: one message for two causes is how a cause stops being
+// findable. The sentences come from two REAL runs and must all differ. A
+// policy refusal is absent by design: since nocx-uvac6.1 it is the call's
+// result, not a run-ending error, so it has no sentence here (the refusal's
+// own text is asserted in the assistant package).
+func TestAskFailure_CausesKeepTheirOwnSentences(t *testing.T) {
 	cases := []struct {
 		cause   string
 		baseURL string
 		handler http.HandlerFunc
 	}{
-		{cause: "policy refusal", handler: outOfScopeReadScreen},
 		{cause: "malformed model output", handler: malformedReadScreen},
 		{cause: "unreachable endpoint", baseURL: unreachableEndpoint},
 	}
