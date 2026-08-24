@@ -101,7 +101,7 @@ export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
  *  the moment the header derived a terminal chip from the status, which is
  *  what the group's one owner below does: a block spelled `success` would
  *  state an outcome it does not have. */
-type HeaderStatus = 'running' | 'waiting' | 'settled' | FrozenStatus
+type HeaderStatus = 'running' | 'waiting' | 'settled' | 'cancelled' | FrozenStatus
 
 /** The statuses a BUILT block can be handed — everything a header knows
  *  except `running`, which belongs to createRunningBlock's element and never
@@ -164,6 +164,7 @@ export interface BlockKindRules {
     readonly inProgress: string
     readonly done: string
     readonly failed: string
+    readonly cancelled: string
   } | null
   /** WHAT THE HEADER'S RIGHT-HAND GROUP HOLDS when the block has settled,
    *  and in what order (nocx-hoeq3).
@@ -227,6 +228,7 @@ const ASK_STATUS_CHIPS = {
   inProgress: 'thinking',
   done: 'completed',
   failed: 'failed',
+  cancelled: 'stopped',
 } as const
 
 const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
@@ -261,6 +263,7 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       terminal: ({ status }) => {
         if (status === 'success') return { ok: true, text: ASK_STATUS_CHIPS.done }
         if (status === 'failure') return { ok: false, text: ASK_STATUS_CHIPS.failed }
+        if (status === 'cancelled') return { ok: false, text: ASK_STATUS_CHIPS.cancelled }
         return null
       },
     },
@@ -345,11 +348,14 @@ export interface AnswerBlockHandle {
    *  note is created at the FIRST chunk, so a model that returns no
    *  reasoning renders nothing at all. */
   reasoning(this: void, text: string): void
-  /** Close the block: success, or failure with the renderable reason.
-   *  `model` names the model that answered (the ask result's pinned
-   *  run fact, nocx-e6kn2): painted as the block's provenance on
-   *  success, so a person can tell which model answered. */
-  close(this: void, status: 'success' | 'failure', error?: string, model?: string): void
+  /** Close the block: success, failure with a renderable reason, or the
+   *  distinct cancelled outcome shown as "stopped". */
+  close(
+    this: void,
+    status: 'success' | 'failure' | 'cancelled',
+    error?: string,
+    model?: string,
+  ): void
 }
 
 /** The effect classes the ledger names (content.Effect), read off the wire
@@ -823,10 +829,13 @@ export type AnswerTextSource = (entryId: string) => Promise<string | null>
  *  a gesture nobody uses, and two implementations of one action are two
  *  behaviours waiting to diverge. */
 export interface RunningBlockActions {
-  /** Summon the editor to ask about this command — what ⌘/Ctrl+Enter does. */
-  ask(): void
+  /** Summon the editor to ask about this command — what ⌘/Ctrl+Enter does.
+   *  A turn has no second question action, so this is optional there. */
+  ask?(): void
   /** Stop it, through the backend's escalation ladder. */
   stop(): void
+  /** Whether the time-limited actions still belong on the block. */
+  isActive?(): boolean
   /** Attach all output rows through the host's single chip seam. */
   attachOutput?(blockEl: HTMLElement, rowStart: number, rowEnd: number): void
 }
@@ -860,6 +869,11 @@ function buildOverflowMenu(
       closeOnClick = null
     }
   }
+  const onBlockSettled = (): void => {
+    closeMenu()
+    blockEl.removeEventListener('nocx:block-settled', onBlockSettled)
+  }
+  blockEl.addEventListener('nocx:block-settled', onBlockSettled)
 
   btn.addEventListener('click', (e) => {
     e.stopPropagation()
@@ -1031,23 +1045,22 @@ function buildOverflowMenu(
     // THE TWO THINGS A PERSON CAN DO ABOUT A COMMAND THAT IS STILL RUNNING
     // (nocx-92gfl, nocx-23rph). Present only while it runs, and only when
     // the host supplied the handlers: a finished block has nothing to ask
-    // about that the transcript does not already show, and nothing to stop.
-    //
-    // FIRST in the menu, above the copy group, because they act on the
-    // command while the copy items act on its text — and because they are
-    // the only items here that are time-limited.
-    if (running) {
-      const ask = document.createElement('button')
-      ask.className = 'cmd-overflow-menu-item'
-      // The identity is the attribute, not the word: the word can be
-      // translated and the CSS and the tests read this.
-      ask.dataset.action = 'ask'
-      ask.textContent = 'Ask about this command'
-      ask.addEventListener('click', (ev) => {
-        ev.stopPropagation()
-        closeMenu()
-        running.ask()
-      })
+    if (running && (running.isActive?.() ?? true)) {
+      const timeLimited: HTMLElement[] = []
+      if (running.ask) {
+        const ask = document.createElement('button')
+        ask.className = 'cmd-overflow-menu-item'
+        // The identity is the attribute, not the word: the word can be
+        // translated and the CSS and the tests read this.
+        ask.dataset.action = 'ask'
+        ask.textContent = 'Ask about this command'
+        ask.addEventListener('click', (ev) => {
+          ev.stopPropagation()
+          closeMenu()
+          running.ask?.()
+        })
+        timeLimited.push(ask)
+      }
       const stop = document.createElement('button')
       stop.className = 'cmd-overflow-menu-item'
       stop.dataset.action = 'stop'
@@ -1057,7 +1070,8 @@ function buildOverflowMenu(
         closeMenu()
         running.stop()
       })
-      menu.append(ask, stop)
+      timeLimited.push(stop)
+      menu.append(...timeLimited)
     }
     menu.append(copyCmd, copyOut, copyAll, wrapItem)
     // Render at body level so it floats above all scroll containers (P1-6).
@@ -2258,7 +2272,11 @@ export class BlockManager {
    * Returns the handle the ask surface writes the turn through; nothing else
    * touches the turn's DOM.
    */
-  addAnswerBlock(question: string, cwd: string): AnswerBlockHandle {
+  addAnswerBlock(
+    question: string,
+    cwd: string,
+    running?: RunningBlockActions,
+  ): AnswerBlockHandle {
     const id = this._nextId++
     const el = createCommandBlock(
       'ask',
@@ -2284,7 +2302,7 @@ export class BlockManager {
       // that matters here: an answer block's copy reads the ledger.
       'shell',
       this._answerText,
-      this._runningActions,
+      running,
     )
     // WHERE THE TURN'S CHILDREN GO. Its own element, under the header, so the
     // children are addressable as a list and the header stays exactly one
@@ -2513,7 +2531,12 @@ export class BlockManager {
         stopWaiting()
         proseBody(blockId).append(text)
       },
-      close(status: 'success' | 'failure', error?: string, model?: string): void {
+      close(
+        status: 'success' | 'failure' | 'cancelled',
+        error?: string,
+        model?: string,
+      ): void {
+        el.dispatchEvent(new Event('nocx:block-settled'))
         stopWaiting()
         endProse()
         // A `run` that was announced and never reached a command must not

@@ -3,7 +3,7 @@
 import { describe, it, expect, vi } from 'vitest'
 import { AgentInputTarget } from './agent-ask'
 import type { ReferenceChip } from './ask-entry'
-import type { AnswerBlockHandle } from './scrollback/blocks'
+import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
 
 /** A fake dispatcher: records agent.* calls and delivers subscriptions on
  *  demand. The wire contract the target produces is asserted from the
@@ -93,6 +93,9 @@ function makeTarget(chips: ReferenceChip[] = []) {
   const onRefusal = vi.fn()
   const target = new AgentInputTarget({
     dispatcher: dispatcher as never,
+    cancel: vi.fn(() =>
+      Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
+    ),
     sessionId: () => 'session-a',
     cwd: () => '/repo',
     chips: () => chips,
@@ -363,6 +366,46 @@ describe('AgentInputTarget', () => {
     expect(handle.append).not.toHaveBeenCalled()
   })
 
+  it('passes the live turn Stop action through to agent.cancel with the minted run id', async () => {
+    const dispatcher = new FakeDispatcher()
+    const handle: AnswerBlockHandle = {
+      id: 1,
+      el: document.createElement('div'),
+      append: vi.fn(),
+      toolCall: vi.fn(),
+      reasoning: vi.fn(),
+      close: vi.fn(),
+    }
+    let actions: RunningBlockActions | undefined
+    const cancel = vi.fn(() =>
+      Promise.resolve({ runId: 7, state: 'cancelled' as const, cancelled: true as const }),
+    )
+    const target = new AgentInputTarget({
+      dispatcher: dispatcher as never,
+      sessionId: () => 'session-a',
+      cwd: () => '/repo',
+      chips: () => [],
+      openAnswer: vi.fn(
+        (_question: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
+          actions = provided
+          return handle
+        },
+      ),
+      cancel,
+      onRefusal: vi.fn(),
+    })
+
+    await target.submit('stop this turn')
+    actions?.stop()
+    await Promise.resolve()
+
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(cancel).toHaveBeenCalledWith(7)
+    expect(dispatcher.calls.some((call) => call.method === 'agent.cancel')).toBe(false)
+    dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled' })
+    expect(handle.close).toHaveBeenCalledWith('cancelled')
+  })
+
   it('closes the block completed on the terminal state; failed carries the renderable reason', async () => {
     const { dispatcher, handle, target } = makeTarget()
     await target.submit('q')
@@ -406,6 +449,9 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
     const openAnswer = vi.fn(() => handle)
     const target = new AgentInputTarget({
       dispatcher: dispatcher as never,
+      cancel: vi.fn(() =>
+        Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
+      ),
       sessionId: () => 's',
       cwd: () => '/',
       chips: () => [],
@@ -445,6 +491,9 @@ describe('AgentInputTarget waiting seam (nocx-ex636)', () => {
     const onRefusal = vi.fn()
     const target = new AgentInputTarget({
       dispatcher: failDispatcher as never,
+      cancel: vi.fn(() =>
+        Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
+      ),
       sessionId: () => 's',
       cwd: () => '/',
       chips: () => [],
@@ -485,6 +534,9 @@ describe('AgentInputTarget refusal', () => {
     const onRefusal = vi.fn()
     const target = new AgentInputTarget({
       dispatcher: failDispatcher as never,
+      cancel: vi.fn(() =>
+        Promise.resolve({ runId: 0, state: 'cancelled' as const, cancelled: true as const }),
+      ),
       sessionId: () => 's',
       cwd: () => '/',
       chips: () => [chipOf(block, 0, 2)],

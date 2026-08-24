@@ -66,7 +66,7 @@ import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
-import type { AnswerToolCall, BlockRecord } from './scrollback/blocks'
+import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -1419,7 +1419,8 @@ export class TerminalContent extends BasePaneContent {
       // to be here was `() => new AgentClient(…).status()` handed to the
       // ask target — a function called at refusal time, which no surface
       // can render and nothing can repaint.
-      const readiness = new AgentReadiness(new AgentClient(this.client.dispatcher))
+      const agentClient = new AgentClient(this.client.dispatcher)
+      const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
 
@@ -1473,6 +1474,7 @@ export class TerminalContent extends BasePaneContent {
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
+        cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
         // The ask's payload is the reference chips in the input line —
@@ -1486,9 +1488,8 @@ export class TerminalContent extends BasePaneContent {
         // (and looked fine whenever it did not, which is why it read as
         // intermittent). The controller's scrollToBottom is a no-op while
         // the person has scrolled away to read, so this follows without
-        // ever yanking the view out from under them.
-        openAnswer: (question, cwd) => {
-          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd)
+        openAnswer: (question, cwd, running?: RunningBlockActions) => {
+          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
           this.scrollback?.scrollToBottom()
           // The streamed answer grows the block, and growth is the same
           // situation as arrival: stay at the bottom unless the reader has
@@ -1518,7 +1519,11 @@ export class TerminalContent extends BasePaneContent {
             // <model>" provenance nocx-e6kn2 added could never be painted —
             // the value reached here and stopped. TypeScript cannot see it;
             // a function of lower arity is assignable.
-            close: (status: 'success' | 'failure', error?: string, model?: string) => {
+            close: (
+              status: 'success' | 'failure' | 'cancelled',
+              error?: string,
+              model?: string,
+            ) => {
               handle.close(status, error, model)
               this.scrollback?.scrollToBottom()
             },

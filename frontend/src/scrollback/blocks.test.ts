@@ -2112,6 +2112,25 @@ describe('BlockManager.addAnswerBlock', () => {
     manager.clearAll()
     expect(inner.querySelectorAll('.cmd-block').length).toBe(0)
   })
+  it('a live turn uses the shared overflow menu for Stop and settles it away', () => {
+    const { manager } = newManager()
+    const stop = vi.fn()
+    const actions = { stop, isActive: () => true }
+    const h = manager.addAnswerBlock('q', '/', actions)
+
+    const menu = openBlockMenu(h.el)
+    expect(menu.querySelector<HTMLElement>('[data-action="stop"]')?.textContent).toBe('Stop')
+    menu.querySelector<HTMLElement>('[data-action="stop"]')!.click()
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    const secondMenu = openBlockMenu(h.el)
+    h.close('cancelled')
+    expect(secondMenu.isConnected).toBe(false)
+    expect(h.el.querySelector('.cmd-header-exit')?.textContent).toBe('stopped')
+    expect(h.el.querySelector('.cmd-answer-waiting')).toBeNull()
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
 })
 
 // ── The ONE "working, nothing written yet" stand-in (nocx-vnirv.1) ───────
@@ -2431,6 +2450,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
       inProgress: 'thinking',
       done: 'completed',
       failed: 'failed',
+      cancelled: 'stopped',
     })
     expect(() => blockKindRules('diary' as BlockKind)).toThrow(/unknown block kind/)
   })

@@ -15,6 +15,7 @@ import { Dispatcher } from './dispatcher'
 import { frozenFrameSourceFromBlock, mintFrozenFrame } from './frame/frozen'
 import type { AgentAsk } from './generated/agent.ask'
 import type { AgentCaptureFrame } from './generated/agent.captureFrame'
+import type { AgentCancel } from './generated/agent.cancel'
 import type { AgentRunDelta } from './generated/agent.runDelta'
 import type { AgentRunReasoning } from './generated/agent.runReasoning'
 import type { AgentRunToolCall } from './generated/agent.runToolCall'
@@ -22,12 +23,14 @@ import type { AgentRunState } from './generated/agent.runState'
 import type { AgentStatusResult } from './generated/agent.status'
 import type { InputTarget } from './input-target'
 import type { ReferenceChip } from './ask-entry'
-import type { AnswerBlockHandle } from './scrollback/blocks'
+import type { AnswerBlockHandle, RunningBlockActions } from './scrollback/blocks'
 import { SERIALIZER_VERSION } from './scrollback/serializer'
 
 export interface AgentAskSeams {
   /** The tab's JSON-RPC dispatcher (agent.* methods + notifications). */
   dispatcher: Dispatcher
+  /** Cancel a live run through the AgentClient seam, never through shell stop. */
+  cancel: (runId: number) => Promise<AgentCancel>
   /** The tab's session id — backend-authoritative, never the renderer's own. */
   sessionId: () => string
   /** The reference chips currently in the input line (nocx-4wtlh): the
@@ -40,7 +43,11 @@ export interface AgentAskSeams {
   cwd: () => string
   /** Render the answer block for one ask; the returned handle is the ONLY
    *  way the block's body and status change. */
-  openAnswer: (question: string, cwd: string) => AnswerBlockHandle
+  openAnswer: (
+    question: string,
+    cwd: string,
+    running?: RunningBlockActions,
+  ) => AnswerBlockHandle
   /** A refusal the surface must render (e.g. "no endpoint configured") —
    *  the product's rule: a soft degrade is visible, never only in a log.
    *  The ask surface raises it through the kit's one notification
@@ -108,10 +115,8 @@ export class AgentInputTarget implements InputTarget {
    *  the shell submit orchestration (keyboard handoff, ledger record,
    *  running block, attempt) for it (nocx-x8s2.2). */
   readonly routesToShell = false
-  /** runId → the answer block the deltas append to. The renderer routes by
-   *  runId AND entryId (both are on every delta) — "the current answer" is
-   *  not an identity, and two overlapping asks land on their own blocks. */
-  private readonly runs = new Map<number, AnswerBlockHandle>()
+  /** runId → the answer block plus its terminal-state setter. */
+  private readonly runs = new Map<number, { handle: AnswerBlockHandle; settle: () => void }>()
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -213,7 +218,18 @@ export class AgentInputTarget implements InputTarget {
     // block — the refusal itself is the visible surface. The captures
     // above stay ahead of the block: a question whose payload cannot be
     // ingested is refused before any block exists.
-    const handle = this.seams.openAnswer(doc, cwd)
+    let runId: number | null = null
+    let settled = false
+    let cancellationRequested = false
+    const running: RunningBlockActions = {
+      stop: (): void => {
+        if (runId === null || settled || cancellationRequested) return
+        cancellationRequested = true
+        void this.seams.cancel(runId).catch(() => undefined)
+      },
+      isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
+    }
+    const handle = this.seams.openAnswer(doc, cwd, running)
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)
       .catch((err: unknown) => {
@@ -230,6 +246,7 @@ export class AgentInputTarget implements InputTarget {
         void this.offerEndpointRepair()
         throw err
       })
+    runId = ask.runId
 
     // The turn's entry id is known once the ask resolves; the run's first
     // delta cannot arrive before it (the run starts inside agent.ask and
@@ -243,7 +260,7 @@ export class AgentInputTarget implements InputTarget {
     // must be able to tell which model answered (nocx-e6kn2). The value is
     // the PINNED run fact, never a re-derivation.
     handle.el.dataset.answeredBy = ask.model
-    this.runs.set(ask.runId, handle)
+    this.runs.set(ask.runId, { handle, settle: () => (settled = true) })
   }
 
   /** Subscribe once: deltas append to the run's block; the terminal state
@@ -254,8 +271,9 @@ export class AgentInputTarget implements InputTarget {
     this.subscribed = true
     this.seams.dispatcher.subscribe('agent.runDelta', (params: unknown) => {
       const d = params as AgentRunDelta
-      const handle = this.runs.get(d.runId)
-      if (!handle) return
+      const run = this.runs.get(d.runId)
+      if (!run) return
+      const handle = run.handle
       // Both ids are on every delta on purpose (design §7): the run id
       // finds the ask, the entry id confirms the deltas land on the right
       // block — a mismatch is a stale or misrouted notification and must
@@ -281,8 +299,9 @@ export class AgentInputTarget implements InputTarget {
     // the call becomes, from a fact the backend sent.
     this.seams.dispatcher.subscribe('agent.runToolCall', (params: unknown) => {
       const c = params as AgentRunToolCall
-      const handle = this.runs.get(c.runId)
-      if (!handle) return
+      const run = this.runs.get(c.runId)
+      if (!run) return
+      const handle = run.handle
       if (handle.el.dataset.entryId !== c.entryId) return
       handle.toolCall({
         callId: c.callId,
@@ -307,15 +326,17 @@ export class AgentInputTarget implements InputTarget {
     // text (nocx-s92so).
     this.seams.dispatcher.subscribe('agent.runReasoning', (params: unknown) => {
       const r = params as AgentRunReasoning
-      const handle = this.runs.get(r.runId)
-      if (!handle) return
+      const run = this.runs.get(r.runId)
+      if (!run) return
+      const handle = run.handle
       if (handle.el.dataset.entryId !== r.entryId) return
       handle.reasoning(r.text)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
       const s = params as AgentRunState
-      const handle = this.runs.get(s.runId)
-      if (!handle) return
+      const run = this.runs.get(s.runId)
+      if (!run) return
+      const handle = run.handle
       if (handle.el.dataset.entryId === undefined) {
         // A run that failed before its first delta never carried the entry
         // id on a delta — but the block was opened from the ask result, and
@@ -336,9 +357,14 @@ export class AgentInputTarget implements InputTarget {
             : `— ${s.droppedDeltas} chunks of the answer were dropped while streaming; the full answer was saved —`,
         )
       }
-      if (s.state === 'completed' || s.state === 'cancelled') {
+      if (s.state === 'completed') {
+        run.settle()
         handle.close('success', undefined, handle.el.dataset.answeredBy)
+      } else if (s.state === 'cancelled') {
+        run.settle()
+        handle.close('cancelled')
       } else if (s.state === 'failed' || s.state === 'interrupted') {
+        run.settle()
         handle.close('failure', s.error ?? s.state)
       } else if (s.state === 'awaiting_approval') {
         // A question is outstanding: the block stays OPEN (nothing is
