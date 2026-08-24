@@ -145,6 +145,18 @@ type agentAskParams struct {
 	References []agentRefWire `json:"references"`
 	Cwd        string         `json:"cwd"`
 }
+type agentCancelParams struct {
+	RunID int64 `json:"runId"`
+}
+
+// agentCancelResponse is the real result of agent.cancel. cancelled is true
+// only when this request closed a live run; an already-terminal or unknown
+// run is answered as an error rather than being reported as stopped.
+type agentCancelResponse struct {
+	RunID     int64  `json:"runId"`
+	State     string `json:"state"`
+	Cancelled bool   `json:"cancelled"`
+}
 
 type agentRefWire struct {
 	FrameID string          `json:"frameId"`
@@ -180,6 +192,53 @@ type agentAskResponse struct {
 	// block names which model answered (bead nocx-e6kn2 acceptance: "a
 	// person must be able to tell which model answered").
 	Model string `json:"model"`
+}
+
+type agentRunControl struct {
+	mu           sync.Mutex
+	eventsMu     sync.Mutex
+	cancelFn     context.CancelFunc
+	cancelled    bool
+	terminalized bool
+}
+
+func (c *agentRunControl) beginCancel() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminalized {
+		return false
+	}
+	if !c.cancelled {
+		c.cancelled = true
+		if c.cancelFn != nil {
+			c.cancelFn()
+		}
+	}
+	return true
+}
+
+func (c *agentRunControl) beginEvent() func() {
+	c.eventsMu.Lock()
+	c.mu.Lock()
+	allowed := !c.cancelled && !c.terminalized
+	c.mu.Unlock()
+	if !allowed {
+		c.eventsMu.Unlock()
+		return nil
+	}
+	return c.eventsMu.Unlock
+}
+
+func (c *agentRunControl) beginTerminal() (func(), bool, bool) {
+	c.eventsMu.Lock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.terminalized {
+		c.eventsMu.Unlock()
+		return nil, false, c.cancelled
+	}
+	c.terminalized = true
+	return c.eventsMu.Unlock, true, c.cancelled
 }
 
 // agentRunDelta is the agent.runDelta notification (design §7): one chunk
@@ -672,14 +731,6 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		res, submitErr := svc.SubmitAsk(ctx, in)
 		if submitErr == nil {
 			askRes = res
-			_ = h.r.TryResult(req.ID, mustMarshal(agentAskResponse{
-				RunID:     res.RunID,
-				EntryID:   res.EntryID,
-				State:     string(content.RunPrepared),
-				IngestSeq: res.IngestSeq,
-				Replayed:  res.Replayed,
-				Model:     facts.Model,
-			}))
 		}
 		return submitErr
 	})
@@ -694,10 +745,13 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
+	runCtx, runCancel := context.WithCancel(ctx)
+	runControl := &agentRunControl{cancelFn: runCancel}
 	rc := askRunContext{
 		secret:     secret,
 		headers:    headers,
 		runID:      askRes.RunID,
+		control:    runControl,
 		entryID:    askRes.EntryID,
 		paneID:     in.PaneID,
 		question:   in.Question,
@@ -724,7 +778,15 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
 	h.pendingRunsMu.Unlock()
-	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
+	_ = h.r.TryResult(req.ID, mustMarshal(agentAskResponse{
+		RunID:     askRes.RunID,
+		EntryID:   askRes.EntryID,
+		State:     string(content.RunPrepared),
+		IngestSeq: askRes.IngestSeq,
+		Replayed:  askRes.Replayed,
+		Model:     facts.Model,
+	}))
+	if rej := h.askSub.TrySubmit(runCtx, control.Task{Run: func(taskCtx context.Context) {
 		h.runAskStream(taskCtx, rc, h.r)
 	}}); rej != nil {
 		// The stream was refused: nothing is in flight. Drop the stored
@@ -803,6 +865,7 @@ type askRunContext struct {
 	secret  credential.Secret
 	headers []assistant.Header
 	runID   int64
+	control *agentRunControl
 	entryID string
 	// paneID is the pane this turn is anchored to — the THREAD the earlier
 	// turns of this conversation are read from (PriorTurn). It is the same
@@ -1021,6 +1084,17 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// never sends an arrangement of its own.
 		TurnEntryID: rc.entryID,
 	}, func(ev assistant.AskEvent) error {
+		if rc.control != nil {
+			// Declared inside the branch, like the other two: outside it
+			// there is no event to release, and a no-op standing in for a
+			// release is one that silently does nothing the day somebody
+			// restructures the branch.
+			releaseEvent := rc.control.beginEvent()
+			if releaseEvent == nil {
+				return context.Canceled
+			}
+			defer releaseEvent()
+		}
 		// ONE ordered stream, three notifications (nocx-shxv0, nocx-bshm2,
 		// nocx-s92so). The order between them is the product fact this
 		// bead is about: the call is rendered where it happened, inside the
@@ -1231,6 +1305,19 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // block, which is "nothing is open" — the resume's first delta then opens the
 // first one, exactly as a fresh run would.
 func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped, nextSeq int, prose content.ProseBlock, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+	if rc.control != nil {
+		// Declared HERE and nowhere else, for the reason terminalize's
+		// release is: outside this branch there is no event to release, and
+		// a no-op standing in for one is a release that silently does
+		// nothing the day the branch is restructured.
+		releaseEvent := rc.control.beginEvent()
+		if releaseEvent == nil {
+			h.terminalize(ctx, rc, dropped, content.RunCancelled, content.TermUserKilled,
+				"the person stopped this answer", r)
+			return
+		}
+		defer releaseEvent()
+	}
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunAwaitingApproval)
 	}); err != nil {
@@ -1292,6 +1379,39 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	// is a green suite over an "always" that writes no row.
 	h.approvals.NoteEffect(proposal)
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
+}
+
+// handleCancel stops one prepared, streaming or awaiting-approval run. The
+// run context is cancelled first, then the terminal ledger write is completed
+// before the result is answered, so no stream event can overtake the person's
+// stop decision.
+func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
+		return
+	}
+	var p agentCancelParams
+	if err := json.Unmarshal(req.Params, &p); err != nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+		return
+	}
+	h.pendingRunsMu.Lock()
+	rc, ok := h.pendingRuns[p.RunID]
+	h.pendingRunsMu.Unlock()
+	if !ok || rc.control == nil || !rc.control.beginCancel() {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32602,
+			Message: "Invalid params: run is not active (it may already be terminal or never existed)",
+		})
+		return
+	}
+	h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled,
+		"the person stopped this answer", h.r)
+	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
+		RunID:     p.RunID,
+		State:     string(content.RunCancelled),
+		Cancelled: true,
+	}))
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact
@@ -1541,6 +1661,7 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 	if strings.TrimSpace(p.CallID) == "" || utf8.RuneCountInString(p.CallID) > maxIDRunes {
 		return "callId is required and bounded"
 	}
+
 	if strings.TrimSpace(p.ArgHash) == "" || utf8.RuneCountInString(p.ArgHash) > 128 {
 		return "argHash is required and bounded"
 	}
@@ -1551,6 +1672,17 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 		// here would be a standing decision nobody expressed, and the
 		// schema requires the field for the same reason.
 		return "scope is required and must be one of once, session, always"
+	}
+	return ""
+}
+
+func validateAgentCancelRaw(raw json.RawMessage) string {
+	var p agentCancelParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.RunID <= 0 {
+		return "runId must be the backend-minted run id"
 	}
 	return ""
 }
@@ -1605,6 +1737,23 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 // live-view bound, never a terminal-state change — the durable answer is
 // whole, so the run still closes with the state it earned.
 func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+	cancelled := false
+	if rc.control != nil {
+		// Declared HERE and nowhere else: outside this branch there is no
+		// terminal to release, and a no-op standing in for one is a release
+		// that silently does nothing if the branch is ever restructured.
+		releaseTerminal, ok, c := rc.control.beginTerminal()
+		if !ok {
+			return
+		}
+		cancelled = c
+		defer releaseTerminal()
+	}
+	if cancelled {
+		state = content.RunCancelled
+		reason = content.TermUserKilled
+		sentence = "the person stopped this answer"
+	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
 	// engine's continuation with it (nocx-igu4y). Ask drops its own
@@ -2127,6 +2276,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
+		}),
+		reg(contentSub, "agent.cancel", params(validateAgentCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := build(w, state, r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleCancel(ctx, req) }
 		}),
 		reg(contentSub, "agent.approve", params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
