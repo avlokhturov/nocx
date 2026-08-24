@@ -19,6 +19,7 @@ import {
   FENCE_DEFER_MS,
   type BlockKind,
 } from './blocks'
+import { chipFromSelection } from '../ask-entry'
 import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
@@ -2507,12 +2508,12 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     h.close('success')
     const code = h.el.querySelector('.cmd-output-code')
     expect(code).not.toBeNull()
-    // Both delimiters belong to the code region.
-    expect(Array.from(code!.querySelectorAll('.term-line')).map((r) => r.textContent)).toEqual([
-      '```',
-      'printf "hi"',
-      '```',
-    ])
+    // Both delimiters remain in the row model, but CSS hides them from the
+    // rendered answer so the fence is one uninterrupted code unit.
+    const codeRows = Array.from(code!.querySelectorAll<HTMLElement>('.term-line'))
+    expect(codeRows.map((r) => r.textContent)).toEqual(['```', 'printf "hi"', '```'])
+    expect(codeRows[0].dataset.fenceDelim).toBe('open')
+    expect(codeRows[codeRows.length - 1]?.dataset.fenceDelim).toBe('close')
     // Prose rows are the body's own children, never inside the code block.
     const prose = Array.from(h.el.querySelectorAll('.cmd-output > .term-line')).map(
       (r) => r.textContent,
@@ -2520,6 +2521,71 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     expect(prose).toEqual(['before', 'after'])
     // Copying the block returns the whole answer, fence markers included.
     expect(blockOutputText(h.el)).toBe('before\n```\nprintf "hi"\n```\nafter')
+    const css = readFileSync(resolve(import.meta.dirname ?? '.', '..', 'style.css'), 'utf8')
+    expect(css).toMatch(
+      /\.cmd-output-code\s*>\s*\.term-line\[data-fence-delim\]\s*\{[^}]*display:\s*none/s,
+    )
+  })
+
+  it('answer fences expose the kit copy control for code only', async () => {
+    const copied = captureClipboard()
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('before\n```bash\nprintf "hi"\necho done\n```\nafter')
+    h.close('success')
+
+    const code = h.el.querySelector<HTMLElement>('.cmd-output-code')!
+    const button = code.querySelector<HTMLButtonElement>('.ui-icon-button')
+    expect(button).not.toBeNull()
+    button!.click()
+
+    await vi.waitFor(() => expect(copied).toEqual(['printf "hi"\necho done']))
+  })
+
+  it('reference-chip selection spans prose and hidden fence rows as one answer output', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('before\n```\nprintf "hi"\n```\nafter')
+    h.close('success')
+
+    const prose = h.el.querySelector<HTMLElement>('.cmd-output > .term-line')!
+    const codeRows = Array.from(h.el.querySelectorAll<HTMLElement>('.cmd-output-code .term-line'))
+    const selection = window.getSelection()!
+    const range = document.createRange()
+    range.setStart(prose.firstChild!, 0)
+    const closing = codeRows[codeRows.length - 1]
+    range.setEnd(closing.firstChild!, closing.textContent.length)
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    const chip = chipFromSelection(selection)
+    expect(chip?.blockEl).toBe(prose.closest('.cmd-block'))
+    expect(chip?.rowStart).toBe(0)
+    expect(chip?.rowEnd).toBe(4)
+  })
+
+  it('keeps an unclosed fence stable within one answer run, then starts prose at the next answer boundary', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    // Policy: an unclosed fence owns every delta in its answer run; a new
+    // run id is the backend's answer boundary and starts a fresh body.
+    h.append('```\ncode', 'run-1')
+    const firstBody = h.el.querySelector('[data-answer-body]')!
+    const code = firstBody.querySelector('.cmd-output-code')!
+    h.append('\nmore', 'run-1')
+    expect(firstBody.querySelector('.cmd-output-code')).toBe(code)
+    expect(Array.from(code.querySelectorAll('.term-line')).map((r) => r.textContent)).toEqual([
+      '```',
+      'code',
+      'more',
+    ])
+
+    h.append('rest', 'run-2')
+    const bodies = h.el.querySelectorAll('[data-answer-body]')
+    expect(bodies.length).toBe(2)
+    expect(bodies[1].querySelector('.term-line')?.textContent).toBe('rest')
+    expect(bodies[1].textContent).toContain('rest')
+    expect(bodies[1].querySelector('.cmd-output-code')).toBeNull()
   })
 
   it('highlights a shell fence with the SAME lexer the editor uses (nocx-swoje)', async () => {
@@ -2530,7 +2596,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     h.close('success')
     const code = h.el.querySelector('.cmd-output-code')!
     const rows = Array.from(code.querySelectorAll('.term-line'))
-    // The delimiters stay plain — they mark the region, they are not in it.
+    // The delimiters stay plain — they mark the region, but CSS hides them.
     expect(rows[0].querySelector('span')).toBeNull()
     // The command line is tokenised, and the classes are the editor's own.
     expect(rows[1].querySelector('[class^="tok-"]')).not.toBeNull()
@@ -2597,6 +2663,8 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     h.close('success')
     const codeBlocks = h.el.querySelectorAll('.cmd-output-code')
     expect(codeBlocks.length).toBe(2)
+    expect(codeBlocks[0].querySelector('.cmd-output-code-copy-host')).not.toBeNull()
+    expect(codeBlocks[1].querySelector('.cmd-output-code-copy-host')).not.toBeNull()
     expect(
       Array.from(codeBlocks[0].querySelectorAll('.term-line')).map((r) => r.textContent),
     ).toEqual(['```', 'code1', '```'])
@@ -2618,17 +2686,17 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
 
   it('Copy output on an ANSWER returns the STORED text, not the painted DOM (nocx-v13pd)', async () => {
     const copied = captureClipboard()
-    // Deliberately different from what the flow paints: the answer's markers
-    // are consumed on screen, so a copy scraped from the DOM would quietly
-    // differ from the record. This is the record.
-    const stored = '## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n'
+    // Delimiters remain as hidden rows so the DOM row model and Copy output
+    // keep the original answer text in one place.
+    const stored = '## Findings\n- run `ls` in **the repo**\n```\ncode\n```'
     const { manager } = newManager(undefined, () => Promise.resolve(stored))
     const h = manager.addAnswerBlock('question?', '/')
     h.el.dataset.entryId = 'entry-7'
-    h.append('## Findings\n- run `ls` in **the repo**\n```\ncode\n```\n')
+    h.append('## Findings\n- run `ls` in **the repo**\n```\ncode\n```')
     h.close('success')
-    // What is on screen has already lost the markers — which is the point.
-    expect(blockOutputText(h.el)).not.toBe(stored)
+    // Markdown prose is painted for reading, but the fence rows are still
+    // present in the copied DOM text.
+    expect(blockOutputText(h.el)).toBe('Findings\n•run ls in the repo\n```\ncode\n```')
 
     clickMenuItem(h.el, 'Copy output')
     await vi.waitFor(() => expect(copied.length).toBe(1))

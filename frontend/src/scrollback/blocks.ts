@@ -25,23 +25,36 @@ import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
-function clipboardFallback(text: string): void {
+async function copyToClipboardImpl(text: string): Promise<void> {
   if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-    navigator.clipboard.writeText(text).catch(() => {
-      const ta = document.createElement('textarea')
-      ta.value = text
-      ta.style.position = 'fixed'
-      ta.style.left = '-9999px'
-      document.body.appendChild(ta)
-      ta.select()
-      try {
-        document.execCommand('copy')
-      } catch {
-        /* silent */
-      }
-      document.body.removeChild(ta)
-    })
+    try {
+      await navigator.clipboard.writeText(text)
+      return
+    } catch {
+      // Fall through to the browser's legacy copy path.
+    }
   }
+
+  const ta = document.createElement('textarea')
+  ta.value = text
+  ta.style.position = 'fixed'
+  ta.style.left = '-9999px'
+  document.body.appendChild(ta)
+  ta.select()
+  try {
+    if (!document.execCommand('copy')) throw new Error('clipboard refused')
+  } finally {
+    document.body.removeChild(ta)
+  }
+}
+
+function clipboardFallback(text: string): void {
+  void copyToClipboardImpl(text).catch(() => {})
+}
+
+/** Shared clipboard seam for the kit controls mounted in imperative blocks. */
+export function copyToClipboard(text: string): Promise<void> {
+  return copyToClipboardImpl(text)
 }
 
 // ── Render fence rendezvous (ADR-0024 §7 carve-out, bead nocx-u7uh.8) ──
@@ -2378,7 +2391,11 @@ export class BlockManager {
       // function a RESTORED answer draws through, so a turn that comes back
       // after a restart is painted by the code that painted it live
       // (nocx-4em1z).
-      const body = createAnswerBody(outputEl, { store, onContent: hideTyping })
+      const body = createAnswerBody(outputEl, {
+        store,
+        onContent: hideTyping,
+        copy: copyToClipboard,
+      })
       prose = { body, blockId: blockId ?? null }
       return body
     }

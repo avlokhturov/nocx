@@ -1285,6 +1285,7 @@ async function main() {
               open
               ask={ask}
               busy={approvalBusy()}
+              copy={(text) => clipboard.writeText(text)}
               onDecide={(approved, scope) => void decideApproval(approved, scope)}
               // A session in the question is named by the pane that holds
               // it, through the tab strip's own derivation (nocx-vnzek) —
