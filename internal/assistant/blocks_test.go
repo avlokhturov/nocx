@@ -373,21 +373,26 @@ func TestMiddleware_BlocksWithoutSourceIsHonest(t *testing.T) {
 }
 
 // The middleware's dispatch reaches the executors, and the narrowing holds
-// through it: a call naming another session is refused and the ledger is
-// never asked.
-func TestMiddleware_BlocksRefusedOutsideGrantTerminates(t *testing.T) {
+// through it: a call naming another session is refused — the refusal is the
+// call's result, in our words (nocx-uvac6.1) — and the ledger is never
+// asked.
+func TestMiddleware_BlocksRefusedOutsideGrantIsAResult(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	src := &fakeBlocks{list: BlockList{Blocks: []BlockSummary{{ID: "blk-1", Command: "ls"}}}}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, &blocksOnlyRequester{blocks: src})
 
-	if _, err := wrappedEndpoint(mw, "blocks.list", "call-1", `{"sessionId":"session-b"}`); err == nil {
-		t.Fatal("blocks.list on another session succeeded; want a refusal")
+	out, err := wrappedEndpoint(mw, "blocks.list", "call-1", `{"sessionId":"session-b"}`)
+	if err != nil {
+		t.Fatalf("blocks.list on another session gave an error %v — want the refusal as a tool result", err)
+	}
+	if !strings.Contains(out, "REFUSED") {
+		t.Fatalf("blocks.list on another session result = %q, want a refusal in our words", out)
 	}
 	if calls := src.listCalls(); len(calls) != 0 {
 		t.Fatalf("the ledger was asked %v; want never asked", calls)
 	}
 
-	out, err := wrappedEndpoint(mw, "blocks.list", "call-2", `{"sessionId":"session-a"}`)
+	out, err = wrappedEndpoint(mw, "blocks.list", "call-2", `{"sessionId":"session-a"}`)
 	if err != nil {
 		t.Fatalf("blocks.list on the granted session: %v", err)
 	}

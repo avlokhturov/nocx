@@ -662,10 +662,11 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 // TestRun_RefusedExchangeReadsBackFromTheLedger is criterion 2's end: the
 // model proposes the run tool on a session the grant does NOT cover; the
 // policy refuses BEFORE anything is submitted — the broker is never asked,
-// no tool attempt is ever recorded — and the run terminalizes failed with
-// the refusal sentence. The decision is in the thread, not only in a log:
-// the question closes failure, the run carries the refusal sentence, the
-// answer entry closes with it, and the ledger holds no action row.
+// no tool attempt is ever recorded — and the run continues: the refusal is
+// that call's result, the model answers, and the turn completes
+// (nocx-uvac6.1). The decision is in the thread, not only in a log: the
+// question closes success, the answer is prose, and the ledger holds no
+// action row — the refusal preceded every submission.
 func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
 	t.Cleanup(srv.Close)
@@ -724,14 +725,19 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 			break
 		}
 	}
-	if st.RunID != res.RunID || st.State != "failed" {
-		t.Fatalf("runState = runId %d state %q, want %d failed", st.RunID, st.State, res.RunID)
+	if st.RunID != res.RunID || st.State != "completed" {
+		t.Fatalf("runState = runId %d state %q, want %d completed — a refused call is an answer, not a fault", st.RunID, st.State, res.RunID)
 	}
-	if !strings.Contains(st.Error, "refused") {
-		t.Fatalf("runState error = %q, want the refusal sentence", st.Error)
+	if st.Error != "" {
+		t.Fatalf("runState error = %q, want none on a completed run", st.Error)
 	}
-	if fake.requests.Load() != 1 {
-		t.Fatalf("provider received %d requests, want exactly 1 (a refused call never re-asks the model)", fake.requests.Load())
+	// The refusal rode the second request as a tool result — the run went
+	// on and the model answered.
+	if fake.requests.Load() != 2 {
+		t.Fatalf("provider received %d requests, want 2 (the refused call, then the answer) — the run must continue", fake.requests.Load())
+	}
+	if len(fake.bodies) < 2 || !strings.Contains(fake.bodies[1], "REFUSED") {
+		t.Fatalf("the second request did not carry the refusal as a tool result: %v", fake.bodies)
 	}
 
 	// ── the thread readback: the refusal is in the ledger ───────────────
@@ -742,8 +748,8 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
-	if q.Phase != content.PhaseClosed || q.Status != content.EntryFailure {
-		t.Errorf("question phase/status = %q/%q, want closed/failure — the refusal is terminal", q.Phase, q.Status)
+	if q.Phase != content.PhaseClosed || q.Status != content.EntrySuccess {
+		t.Errorf("question phase/status = %q/%q, want closed/success — the turn answered after the refusal", q.Phase, q.Status)
 	}
 	if len(q.Executions) != 1 {
 		t.Fatalf("question executions = %d, want one run", len(q.Executions))
@@ -752,17 +758,14 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	if run.ID != res.RunID {
 		t.Errorf("run id = %d, want %d", run.ID, res.RunID)
 	}
-	if run.State == nil || *run.State != content.RunFailed {
-		t.Errorf("run state = %v, want failed", run.State)
+	if run.State == nil || *run.State != content.RunCompleted {
+		t.Errorf("run state = %v, want completed", run.State)
 	}
-	if run.TerminationReason == nil || *run.TerminationReason != content.TermFailed {
-		t.Errorf("run termination = %v, want failed", run.TerminationReason)
+	if run.TerminationReason == nil || *run.TerminationReason != content.TermCompleted {
+		t.Errorf("run termination = %v, want completed", run.TerminationReason)
 	}
 	if run.EndedAt == nil {
-		t.Error("failed run has no ended_at — a terminal run has an end")
-	}
-	if !strings.Contains(run.Payload, "refused") {
-		t.Errorf("run payload = %q, want the refusal sentence — the decision is in the thread, not only in a log", run.Payload)
+		t.Error("completed run has no ended_at — a terminal run has an end")
 	}
 
 	ans, err := led.Entry(ctx, res.EntryID)
@@ -772,31 +775,28 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	if ans.ParentID != nil {
 		t.Errorf("the turn is drawn inside %q — the answer is its own body (nocx-4em1z)", *ans.ParentID)
 	}
-	if ans.Phase != content.PhaseClosed || ans.Status != content.EntryFailure {
-		t.Errorf("turn phase/status = %q/%q, want closed/failure — the turn closes with the run", ans.Phase, ans.Status)
+	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
+		t.Errorf("turn phase/status = %q/%q, want closed/success — the turn closes with the run", ans.Phase, ans.Status)
 	}
 	if len(ans.Executions) != 1 {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
-	if len(ans.Executions[0].Artifacts) != 0 {
-		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children (ADR-0037)",
-			len(ans.Executions[0].Artifacts))
-	}
-	// Nothing streamed, so NO prose block was opened at all — an empty one
-	// would be the claim that the assistant printed a blank paragraph before
-	// the refusal, which is a different thing from having said nothing.
-	if prose := proseUnder(t, led, res.EntryID); len(prose) != 0 {
-		t.Errorf("a refused exchange left %+v, want no prose at all", prose)
+	// The answer streamed: the model's reply after the refusal is prose in
+	// the thread (ADR-0037), exactly what the brief's "with prose in it"
+	// means.
+	if prose := proseUnder(t, led, res.EntryID); len(prose) == 0 {
+		t.Error("the answered turn has no prose block — the model's words after the refusal must be in the thread")
 	}
 
 	// The refusal precedes every submission: the ledger holds the TURN and
-	// NOTHING ELSE — no tool attempt was ever opened.
+	// the prose block the answer streamed into — and NOTHING ELSE: no tool
+	// attempt was ever opened.
 	summaries, err := led.ListEntries(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
-	if len(summaries) != 1 {
-		t.Fatalf("ledger has %d entries, want exactly 1 (the turn)", len(summaries))
+	if len(summaries) != 2 {
+		t.Fatalf("ledger has %d entries, want 2 (the turn and its prose child) — a refused call opens no action entry", len(summaries))
 	}
 	for _, s := range summaries {
 		if s.Kind == content.EntryAction {

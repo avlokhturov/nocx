@@ -101,11 +101,12 @@ func (s *scopeHarness) approve(t *testing.T, scope string) approvalWireResult {
 	return got
 }
 
-// deny answers no. The decline terminalizes BEFORE it answers, so the
-// runState notification precedes the response on the wire.
+// deny answers no. The decline no longer terminalizes (nocx-uvac6.1): the
+// refusal becomes the call's result, the run resumes, and the response names
+// the run as streaming — there is no runState notification preceding it.
 func (s *scopeHarness) deny(t *testing.T, scope string) approvalWireResult {
 	t.Helper()
-	_, got, errObj := approveDeclineOverWire(t, s.conn, s.answer(false, scope), 2)
+	got, errObj := approveOverWire(t, s.conn, s.answer(false, scope), 2)
 	if errObj != nil {
 		t.Fatalf("agent.approve deny scope %q: %+v", scope, errObj)
 	}
@@ -272,19 +273,29 @@ func TestAgentApprove_ScopeAlways_PolicyWriteFailureStillResumesTheRun(t *testin
 
 // TestAgentApprove_ScopeAlways_PolicyWriteFailureStillDeclines: the same at
 // the other end of the decision. A deny whose standing part could not be
-// recorded still terminalizes the run — the call the person refused is
-// refused — and says so.
+// recorded still goes through as the refusal of THIS call — the run resumes
+// with the refusal as that call's result (nocx-uvac6.1) — and says so.
 func TestAgentApprove_ScopeAlways_PolicyWriteFailureStillDeclines(t *testing.T) {
 	h := suspendedRun(t, failingPolicyStore{err: errors.New("disk is full")})
 
 	res := h.deny(t, "always")
 
-	if res.State != string(content.RunFailed) {
-		t.Fatalf("state = %q, want failed — the decline still stands", res.State)
+	if res.State != string(content.RunStreaming) {
+		t.Fatalf("state = %q, want streaming — a failed standing write must not lose the refusal", res.State)
 	}
 	if !strings.Contains(res.Warning, "disk is full") {
 		t.Fatalf("warning = %q, want it to name the failure", res.Warning)
 	}
+	ap := assistant.Approval{
+		RunID: strconv.FormatInt(h.runID, 10), Attempt: 1, Tool: "files.read",
+		CallID: "call_1", ArgHash: "hash-a",
+	}
+	if kind, ok := h.ws.agentApprovals.DeclinedKind(ap); !ok || kind != assistant.DeclineCallOnce {
+		t.Fatalf("declined kind = %q/%v, want once/true — a failed standing write must not claim permanence", kind, ok)
+	}
+	// And the run really did resume: the engine was asked a second time and
+	// streams its answer.
+	readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 }
 
 // ── egress: two answers, once only ────────────────────────────────────────

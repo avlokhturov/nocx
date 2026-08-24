@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -300,14 +301,17 @@ func wrappedEndpoint(mw *policyMiddleware, name, callID, args string) (string, e
 	return wrapped(context.Background(), args)
 }
 
-// ── criterion 1: a refusal terminalizes ──────────────────────────────────
+// ── criterion 1: a refusal is an answer (nocx-uvac6.1) ───────────────────
 
-// TestAsk_RefusalTerminalizes is acceptance criterion 1: a call outside the
-// grant is REFUSED — the run fails with ErrPolicyRefused, no tool message is
-// produced and no second model request is made. Asserted on what the engine
-// sent (the fake server received exactly one request and the run's error is
-// the refusal), not on a spy over next.
-func TestAsk_RefusalTerminalizes(t *testing.T) {
+// TestAsk_RefusalContinuesAsToolResult is the brief's first acceptance
+// criterion: a call outside the grant is REFUSED — and the refusal is a
+// TOOL RESULT the model receives, naming the tool and why, and the run
+// CONTINUES to a terminal state of its own accord, with prose in it. The
+// system prompt promises this ("A refusal is an answer") and the
+// conversation design names it ("refused by policy"). Asserted on what the
+// engine sent: the second request carries the refusal as a tool message,
+// and the run completes with the model's answer. Not a spy over next.
+func TestAsk_RefusalContinuesAsToolResult(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "in scope")
 
@@ -319,34 +323,72 @@ func TestAsk_RefusalTerminalizes(t *testing.T) {
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
-	if err == nil {
-		t.Fatal("Ask succeeded — the out-of-grant call was not refused")
+	var answer string
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			answer += e.Text
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Ask failed: %v — a refusal is an answer, not a fault", err)
 	}
-	if !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("Ask error = %v, want ErrPolicyRefused", err)
+	if !strings.Contains(answer, "ok") {
+		t.Fatalf("answer = %q, want the model's reply after the refusal", answer)
 	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests after the refusal, want exactly 1 — a refusal must terminalize", n)
+	if n := f.requests.Load(); n != 2 {
+		t.Fatalf("the engine made %d model requests, want 2 (the refused call, then the answer) — a refusal must not terminalize the run", n)
 	}
-	// Nothing ran: no attempt was opened (refusal precedes the attempt
-	// write) and no tool result was produced.
+	// Nothing ran: a refusal precedes the attempt write.
 	if s := ledger.started(); s != 0 {
 		t.Fatalf("ledger opened %d executions after a refusal, want 0", s)
 	}
+	// The refusal rode the second request as a tool message — the model
+	// was TOLD, in our words, and never in eino's.
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &req); err != nil {
+		t.Fatalf("request 2 body: %v", err)
+	}
+	found := false
+	for _, m := range req.Messages {
+		if m["role"] == "tool" {
+			found = true
+			content, _ := m["content"].(string)
+			if !strings.Contains(content, "files.read") {
+				t.Fatalf("the refusal text does not name the tool that was proposed: %q", content)
+			}
+			if !strings.Contains(content, "REFUSED") {
+				t.Fatalf("the refusal text = %q, want a refusal in our words", content)
+			}
+			for _, w := range []string{"NodeRunError", "node path", "ToolNode", "ErrPolicyRefused"} {
+				if strings.Contains(content, w) {
+					t.Fatalf("the refusal text carries the framework's or our internals %q: %q", w, content)
+				}
+			}
+		}
+	}
+	if !found {
+		t.Fatal("request 2 carried no tool message — the refusal never reached the model")
+	}
 }
 
-// ── criterion 2: the batch latch ─────────────────────────────────────────
+// ── criterion 2: one refusal is one call's answer ────────────────────────
 
-// TestAsk_RefusalOnSecondCallPreventsThird is acceptance criterion 2: three
-// calls in one model response — the second refuses, so the third must not
-// run. sequentialRunToolCall runs every task and never inspects
-// tasks[i].err; the batch latch is what stops the third. Asserted by what
-// the ledger records: exactly one execution (the first call's), never a
-// second or third.
-func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
+// TestAsk_RefusedCallIsOneCallsAnswerNotTheBatchs: three calls in one model
+// response — the second refuses. The refusal is THAT call's result: the
+// first and the third (both permitted) run, and the model receives all
+// three outcomes. ADR-0028's "stop the rest" existed because a refusal
+// ended the run — nothing it produced would ever reach the model. The
+// refusal is an answer now (nocx-uvac6.1), so that premise is gone and the
+// latch trips for ESCALATIONS only (the escalation half below): every call
+// in the batch is decided on its own merits. Asserted by what the ledger
+// records — two executions, the refused one opened none.
+func TestAsk_RefusedCallIsOneCallsAnswerNotTheBatchs(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "a.txt"), "first")
+	writeFile(t, filepath.Join(dir, "b.txt"), "third")
 
 	ledger := &fakeLedger{}
 	f, srv := newFakeOpenAI(callThenAnswer(
@@ -361,17 +403,40 @@ func TestAsk_RefusalOnSecondCallPreventsThird(t *testing.T) {
 		t.Fatalf("newClient: %v", clErr)
 	}
 	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil })
-	if err == nil {
-		t.Fatal("Ask succeeded — the refusal did not terminalize the run")
+	if err != nil {
+		t.Fatalf("Ask failed: %v — a refused call in a batch must not fail the run", err)
 	}
-	if !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("Ask error = %v, want ErrPolicyRefused", err)
+	if n := f.requests.Load(); n != 2 {
+		t.Fatalf("the engine made %d model requests, want 2 (the batch, then the answer)", n)
 	}
-	if n := f.requests.Load(); n != 1 {
-		t.Fatalf("the engine made %d model requests, want exactly 1", n)
+	if s := ledger.started(); s != 2 {
+		t.Fatalf("ledger opened %d executions, want exactly 2 (the first and the third call) — the refused one opens none, and the third is not stopped by it", s)
 	}
-	if s := ledger.started(); s != 1 {
-		t.Fatalf("ledger opened %d executions, want exactly 1 (the first call) — the refused second call must stop the third", s)
+	// The refusal and the third call's result both reached the model.
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &req); err != nil {
+		t.Fatalf("request 2 body: %v", err)
+	}
+	refused, third := false, false
+	for _, m := range req.Messages {
+		if m["role"] != "tool" {
+			continue
+		}
+		c, _ := m["content"].(string)
+		if strings.Contains(c, "REFUSED") {
+			refused = true
+		}
+		if strings.Contains(c, "b.txt") {
+			third = true
+		}
+	}
+	if !refused {
+		t.Fatal("the model was not told the second call was refused")
+	}
+	if !third {
+		t.Fatal("the third call's result never reached the model — the refusal swallowed the rest of the batch")
 	}
 }
 
@@ -543,6 +608,247 @@ func TestMiddleware_ApprovalBindsToExactArguments(t *testing.T) {
 	}
 	if s := ledger.started(); s != 3 {
 		t.Fatalf("ledger opened %d executions, want 3 — the changed call recorded a NEW proposal and nothing ran under the old approval", s)
+	}
+}
+
+// ── a person's no: the declined proposal (nocx-uvac6.1) ──────────────────
+
+// TestMiddleware_DeclinedProposalReturnsRefusalInsteadOfReasking is the
+// brief's second acceptance criterion at the seam the engine cannot reach:
+// the person's no is recorded against the EXACT proposal, and the resumed
+// pipeline must not re-ask about it — the refusal is the call's result. A
+// retry of the same call with a NEW call id is a different proposal: under
+// an unchanged matrix it asks again, which is what a one-off no means.
+func TestMiddleware_DeclinedProposalReturnsRefusalInsteadOfReasking(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	writeFile(t, filepath.Join(dir, "a.txt"), "first")
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+
+	approvals := NewApprovalStore()
+	mw := middlewareFor(t, grant, &fakeLedger{}, approvals)
+
+	proposal := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)}
+	approvals.Request(proposal)
+	approvals.Decline(proposal, DeclineCallOnce)
+
+	// The declined proposal: the refusal IS the result — the call does not
+	// run and is not re-asked.
+	out, err := wrappedEndpoint(mw, "files.read", "call_1", args)
+	if err != nil {
+		t.Fatalf("the declined proposal returned an error %v — the refusal must be a tool result", err)
+	}
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "declined") {
+		t.Fatalf("declined-call result = %q, want the person's refusal in our words", out)
+	}
+	if strings.Contains(out, "in this session") || strings.Contains(out, "from now on") {
+		t.Fatalf("one-off refusal = %q, must not claim a standing refusal", out)
+	}
+	// A retry with a NEW call id is a different proposal: the matrix still
+	// asks, so it escalates rather than running — a one-off no is not
+	// standing. The escalation surfaces as the interrupt error, the same
+	// shape TestMiddleware_ApprovalBindsToExactArguments asserts.
+	if retryOut, retryErr := wrappedEndpoint(mw, "files.read", "call_2", args); retryErr == nil {
+		t.Fatalf("the retry RAN after a one-off decline (result %q) — a one-off no must not be standing", retryOut)
+	}
+}
+
+// TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns (nocx-uvac6.1): the
+// approval store is process-lifetime and SHARED by every run, and a standing
+// no is a fact about the run it was given in. A "deny always" in run 1 must
+// never answer a call in run 2 — run 2's grant is minted from the matrix the
+// answer wrote (and, for a standing no, already refuses the effect), so a
+// run-2 call is decided by run 2's own policy, never by another run's
+// declined record. Without the run scoping, run 2's call here returns run
+// 1's standing refusal instead of escalating under the unchanged matrix.
+func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	writeFile(t, filepath.Join(dir, "a.txt"), "first")
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+
+	approvals := NewApprovalStore()
+
+	// Run 1: the person answers "deny always" to the exact proposal — the
+	// declined record carries run 1's identity and the effect class.
+	proposal := Approval{RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1", ArgHash: canonicalArgHash(args)}
+	approvals.Request(proposal)
+	approvals.NoteEffect(Approval{
+		RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1",
+		ArgHash: canonicalArgHash(args), Effect: content.EffectObserve,
+	})
+	approvals.Decline(proposal, DeclineCallAlways)
+
+	mw1 := middlewareFor(t, grant, &fakeLedger{}, approvals)
+	out, err := wrappedEndpoint(mw1, "files.read", "call_1", args)
+	if err != nil {
+		t.Fatalf("run 1's declined proposal returned an error %v — want the refusal as a tool result", err)
+	}
+	if !strings.Contains(out, "from now on") {
+		t.Fatalf("run 1's refusal = %q, want the standing sentence", out)
+	}
+
+	// Run 2: a NEW ask, its own middleware and its own run id. The matrix
+	// still asks (this test's grant is the same ask-every-time matrix), so
+	// the call must ESCALATE — a fresh question — never be answered by run
+	// 1's declined record.
+	reg, regErr := agenttools.Assemble(os.DirFS(realToolsFS))
+	if regErr != nil {
+		t.Fatalf("Assemble: %v", regErr)
+	}
+	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", 1, "", nil, nil, nil)
+	if mwErr != nil {
+		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
+	}
+	if out2, err2 := wrappedEndpoint(mw2, "files.read", "call_1", args); err2 == nil {
+		t.Fatalf("run 2's call returned %q with no error — run 1's standing decline leaked across runs; run 2 must decide for itself", out2)
+	}
+}
+
+// refusal text reaches the provider as a tool message.
+func TestAsk_DeclinedProposalResumesWithRefusalAndContinues(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	writeFile(t, filepath.Join(dir, "a.txt"), "approved read")
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+
+	ledger := &fakeLedger{}
+	approvals := NewApprovalStore()
+	f, srv := newFakeOpenAI(reProposingModel("files.read", args))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+
+	// 1. The ask suspends: the person is asked about the first roll's call.
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
+	var asked *ApprovalRequestedError
+	if !errors.As(err, &asked) || asked.Request == nil {
+		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	}
+
+	// 2. The person says no to exactly that proposal — what
+	//    agent.approve(approved:false) puts in the store.
+	approvals.Decline(Approval{
+		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
+		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
+	}, DeclineCallOnce)
+
+	// 3. The resume: the run continues with the refusal as that call's
+	//    result, and the model answers in words.
+	var got strings.Builder
+	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(e AskEvent) error {
+		if e.Kind == AskAnswer {
+			got.WriteString(e.Text)
+		}
+		return nil
+	})
+	var again *ApprovalRequestedError
+	if errors.As(err, &again) {
+		t.Fatalf("the resume asked the SAME question again after the decline (call id %q): a person can never get past it", again.Request.CallID)
+	}
+	if err != nil {
+		t.Fatalf("resume Ask error = %v, want the refusal to be answered", err)
+	}
+	if !strings.Contains(got.String(), "ok") {
+		t.Fatalf("answer = %q, want the model's reply after the refusal", got.String())
+	}
+	// The refusal reached the provider in OUR words, as that call's result.
+	if !strings.Contains(f.body(), "REFUSED") || !strings.Contains(f.body(), "declined") {
+		t.Fatalf("the refusal text never reached the provider: %s", f.body())
+	}
+}
+
+// retryAfterRefusalThenAnswer is a provider that proposes the same call,
+// then — having seen its refusal as a tool result — proposes it again, then
+// answers. Every proposal carries its own call id, because that is what a
+// provider does, and the second refusal must be classified by the POLICY,
+// not by the declined record (which binds to the first call id only).
+func retryAfterRefusalThenAnswer(name, args string) func(w http.ResponseWriter, r *http.Request) {
+	var n int
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), `"role":"tool"`) {
+			n++
+			if n == 1 {
+				// Saw the first refusal; propose the same call again.
+				streamToolCalls(w, toolCallSpec{name: name, args: args, id: "call_retry"})
+				return
+			}
+			streamOK(w)
+			return
+		}
+		streamToolCalls(w, toolCallSpec{name: name, args: args, id: "call_1"})
+	}
+}
+
+// TestAsk_StandingRefusalTellsTheModelTheSecondTime is the brief's third
+// acceptance criterion: "deny always" (or "deny in this session") tells the
+// model the refusal is STANDING, so it does not re-propose the same call
+// inside the same turn. The first injected refusal — the declined proposal
+// itself — says the person refused this kind of call from now on; the
+// retry (a fresh call id, so a fresh proposal) is refused by the standing
+// matrix the re-minted grant carries, and the model is told the refusal
+// stands.
+func TestAsk_StandingRefusalTellsTheModelTheSecondTime(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	writeFile(t, filepath.Join(dir, "a.txt"), "approved read")
+	args := fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))
+
+	ledger := &fakeLedger{}
+	approvals := NewApprovalStore()
+	f, srv := newFakeOpenAI(retryAfterRefusalThenAnswer("files.read", args))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+
+	// The ask suspends on the first proposal.
+	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, approvals), func(AskEvent) error { return nil })
+	var asked *ApprovalRequestedError
+	if !errors.As(err, &asked) || asked.Request == nil {
+		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
+	}
+
+	// "Deny always": the decline is recorded against the exact proposal
+	// WITH its effect class (the transport notes the effect when the
+	// question reaches the person), and the standing part lands in the
+	// matrix the runs AFTER this one are minted from (the transport's
+	// applyStandingAnswer). The DECLINED resume itself keeps the grant the
+	// question was asked under — resumeRunDeclined — so the suspended
+	// call's tool stays declared and the checkpoint restores.
+	declined := Approval{
+		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
+		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
+	}
+	approvals.NoteEffect(Approval{
+		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt, Tool: asked.Request.Tool,
+		CallID: asked.Request.CallID, ArgHash: asked.Request.ArgHash,
+		Effect: content.EffectObserve,
+	})
+	approvals.Decline(declined, DeclineCallAlways)
+
+	// The resume, under the ORIGINAL grant: the declined call is answered
+	// with the standing refusal, the model retries, and the retry — a fresh
+	// call id of the same effect class — is refused by the DECLINED record
+	// itself, told the second time that the refusal is standing. Then the
+	// model answers.
+	resumed := askParams(srv.URL, &grant, ledger, approvals)
+	if askErr := cl.Ask(context.Background(), resumed, func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("the resumed run failed: %v", askErr)
+	}
+	// The last request the provider received carries the SECOND refusal
+	// (the retry's), and it says the refusal is standing.
+	if !strings.Contains(f.body(), "REFUSED") {
+		t.Fatalf("the retry's refusal never reached the provider: %s", f.body())
+	}
+	if !strings.Contains(f.body(), "from now on") {
+		t.Fatalf("the second refusal does not say the refusal is standing: %s", f.body())
+	}
+
+	if !strings.Contains(f.body(), "REFUSED: the person declined") {
+		t.Fatalf("the FIRST refusal (the declined proposal) did not say the person declined: %s", f.body())
 	}
 }
 

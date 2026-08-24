@@ -339,9 +339,10 @@ type approveParams struct {
 }
 
 // agentApproveResponse is the agent.approve result: the state the run moved
-// to — streaming (the approved resume is in flight) or declined (the
-// terminal close was persisted). The outcome the renderer draws comes from
-// the agent.runState notification either way.
+// to — streaming (the resumed drive is in flight, for a yes or a policy
+// decline) or failed (the egress decline's terminal close was persisted).
+// The outcome the renderer draws comes from the agent.runState notification
+// either way.
 type agentApproveResponse struct {
 	State string `json:"state"`
 	// Warning is the sentence to show when the part of the answer that was
@@ -1209,9 +1210,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // suspendForApproval moves the run to awaiting_approval and sends the
 // question. The DURABLE state is the honest part (criterion 4): a
 // reconnecting renderer reads awaiting_approval — distinguishable from a run
-// mid-answer — even though the notification itself was one-shot. The run is
-// NOT terminalized: the person's answer resumes it (agent.approve) or
-// terminalizes it (decline).
+// NOT terminalized: the person's answer resumes it — a yes, or a policy no
+// whose refusal is the call's result (nocx-uvac6.1); only an egress no
+// terminalizes it (agent-declined).
 //
 // dropped is the live-view drop count the suspending stream accumulated;
 // it is recorded into the stored stream context so the resume's or the
@@ -1251,10 +1252,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	}
 	// Carry the drops across the suspension: the resume re-drives this
 	// same context (runAskStream starts from rc.droppedBefore), and the
-	// decline terminalizes with it too. The gate that asked is carried the
-	// same way and for the same reason — agent.approve refuses a standing
-	// answer to an egress question, and by then only this record remembers
-	// which of the two gates produced it.
+	// egress decline's terminal close carries it the same way. The gate
+	// that asked is carried the same way and for the same reason —
+	// agent.approve refuses a standing answer to an egress question, and
+	// by then only this record remembers which of the two gates produced
+	// it.
 	h.pendingRunsMu.Lock()
 	if stored, ok := h.pendingRuns[rc.runID]; ok {
 		stored.droppedBefore = dropped
@@ -1295,9 +1297,10 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 // handleApprove answers agent.approve — the person's decision on one exact
 // proposal (design §7.2, acceptance criteria 2, 7, 8). Yes resumes the run
 // as a NEW attempt of the same entry (the middleware runs the approved call
-// as the proposal's subsequent attempt); no terminalizes the run with
-// agent-declined. A stale or unknown approval id is answered honestly and
-// resumes nothing.
+// as the proposal's subsequent attempt); no (nocx-uvac6.1) resumes the run
+// with the refusal as that call's result — except on the egress gate, where
+// a no ends the run as agent-declined. A stale or unknown approval id is
+// answered honestly and resumes nothing.
 func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1353,18 +1356,56 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		return
 	}
 	if !p.Approved {
-		// The person declined: the run terminalizes with the reason that
-		// says a person declined (criterion 2, no-half), and the withheld
-		// egress bytes — if any — are dropped: the person said don't send.
-		// The standing part is recorded FIRST, so that a "deny always"
-		// writes its row even though the run terminalizes on the next
-		// line — the refusal of this call and the standing refusal of the
-		// effect are two facts, and only one of them dies with the run.
+		// The person declined (nocx-uvac6.1): the run is NOT over — the
+		// refusal becomes this call's result and the model answers it in
+		// words ("a refusal is an answer", systemprompt.go). The decline
+		// is settled against the exact proposal before any standing policy
+		// write, so a responder that loses the race cannot mutate policy or
+		// resume a run it no longer owns.
+		//
+		// The EGRESS gate is the one decline that still ends the run: its
+		// question is whether the withheld result may LEAVE for the
+		// provider, and a no means it never will — there is no result to
+		// continue with. The withheld bytes are dropped and the run closes
+		// as agent-declined, which is what "refuse and ask" (design §7.1)
+		// means at its other end. This is deliberate: the refusal-as-result
+		// contract is for calls that did not run, and an egress decline is
+		// about a result that DID run but will not be sent.
+		if rc.pendingReason == "egress" {
+			h.approvals.ClearRetained(ap)
+			h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermAgentDeclined,
+				"the person declined to send the result to the model", h.r)
+			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
+			return
+		}
+		if !h.approvals.Decline(ap, declineKindForScope(p.Scope)) {
+			// The pending check passed but the decline lost the race
+			// (another connection answered first). Honest refusal: no
+			// standing row was written and nothing resumed.
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32602,
+				Message: "Invalid params: unknown approval — it was already answered",
+			})
+			return
+		}
+		// The standing part is recorded only after the decline settled,
+		// so a loser can never write a row for a question it did not win.
 		warning := h.applyStandingAnswer(p, ap, rc.sessionID)
-		h.approvals.ClearRetained(ap)
-		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermAgentDeclined,
-			"the run was declined", h.r)
-		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
+		if warning != "" && p.Scope != approveScopeOnce {
+			// The standing write did not stick. The refusal is still
+			// this call's result, but it must not claim permanence the
+			// policy will not honour.
+			h.approvals.DowngradeDeclined(ap)
+		}
+		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
+			h.resumeRunDeclined(taskCtx, rc, h.r)
+		}}); rej != nil {
+			h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed,
+				"too many answers in flight — try again in a moment", h.r)
+			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
+			return
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunStreaming), Warning: warning}))
 		return
 	}
 	if !h.approvals.Approve(ap) {
@@ -1514,6 +1555,43 @@ func validateAgentApproveRaw(raw json.RawMessage) string {
 	return ""
 }
 
+// resumeRunDeclined is resumeRun for the person's NO (nocx-uvac6.1). The
+// grant is deliberately NOT re-minted here, and that is the point: the
+// standing half of a no has already written the matrix row / session overlay
+// (applyStandingAnswer), and a re-minted grant would REFUSE the effect the
+// suspended call belongs to — which undeclares its tool (ADR-0028 decision
+// 3: a refused effect is never declared), and an undeclared tool is a
+// checkpoint whose branch nobody can restore. The declined record IS the
+// run's authority for the call it was given on — and for a standing no, for
+// every retry of the same effect class in this run (DeclinedEffect) — so
+// the refusal is enforced at the middleware with the person's own sentence,
+// while the written row governs the runs that come after this one.
+func (h agentHandlers) resumeRunDeclined(ctx context.Context, rc askRunContext, r Responder) {
+	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
+		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
+	}); err != nil {
+		// The move was refused: the run is already terminal (closed by
+		// another path). Nothing to resume; the decline stands harmless.
+		return
+	}
+	h.runAskStream(ctx, rc, r)
+}
+
+// declineKindForScope maps the wire's answer scope to the declined record's
+// standing half — the sentence the model is refused with. "once" covers the
+// call only; "session" and "always" are the standing noes the middleware
+// also applies to a retry of the same effect class in this run.
+func declineKindForScope(scope string) assistant.DeclineKind {
+	switch scope {
+	case approveScopeSession:
+		return assistant.DeclineCallSession
+	case approveScopeAlways:
+		return assistant.DeclineCallAlways
+	default:
+		return assistant.DeclineCallOnce
+	}
+}
+
 // terminalize persists the run's terminal state AND its entries in one
 // transaction (FinishAgentRun), then notifies the wire. The notification may
 // go nowhere — the connection may be gone — but the ledger is the record,
@@ -1586,11 +1664,14 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 //
 // A cause per sentence, deliberately: one message for three causes is how a
 // cause stops being findable. Every arm is reached by a TYPE, never by a
-// string match against the framework's text — the typed chain survives eino
-// intact (compose.internalError implements Unwrap; ToolsNode wraps with %w),
-// which is measured and guarded by TestAskFailure_TheTypedChainSurvivesEino
-// and written down on assistant.PolicyRefusedError.
+// string match against the framework's text — the typed chain survives eino.
+// A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
+// result, not an error, so it never reaches this function at all.
 func classifyAskFailure(err error) (content.TerminationReason, string) {
+	// The engine's own failure sentence: the endpoint answered, and did not
+	// answer (a StreamError is nocx's type, never the framework's). It is
+	// the FIRST arm because it is the most specific thing Ask can return
+	// about itself.
 	var se *assistant.StreamError
 	if errors.As(err, &se) {
 		return content.TermFailed, se.Message
@@ -1606,13 +1687,6 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	var leaseErr *assistant.RunLeaseError
 	if errors.As(err, &leaseErr) {
 		return leaseErr.Reason, runLeaseSentence(leaseErr.Reason)
-	}
-	// Cause 1: the policy refused a proposed call. The sentence names the
-	// tool and the reason and says what the person can do — a refusal is an
-	// answer, not a fault.
-	var refused *assistant.PolicyRefusedError
-	if errors.As(err, &refused) {
-		return content.TermFailed, policyRefusalSentence(refused)
 	}
 	// Cause 1b: the policy permitted the call, the tool RAN, and it failed.
 	// Its message is already the product's own — the renderer's "could not
@@ -1658,19 +1732,6 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	// Anything else. It still says nothing eino wrote: the trace is in the
 	// log, named there so a person can find it.
 	return content.TermFailed, "the model failed to answer. The details are in nocx's log."
-}
-
-// policyRefusalSentence states one refusal in the product's words: what was
-// proposed, why it did not run, and what the person can do about it. Written
-// per reason — a single sentence covering both would tell a person to change
-// a setting that is not the one standing in their way.
-func policyRefusalSentence(e *assistant.PolicyRefusedError) string {
-	switch e.Reason {
-	case assistant.RefusedOutOfScope:
-		return "nocx refused the assistant's " + e.Tool + " call: it named something outside what this question is allowed to reach. Widen what the assistant may touch in Settings, then ask again."
-	default:
-		return "nocx refused the assistant's " + e.Tool + " call: your agent policy does not allow this kind of action. Allow it in Settings, then ask again."
-	}
 }
 
 // runLeaseSentence is the human-readable statement of one lease bound, for

@@ -163,25 +163,28 @@ func TestExecuteRun_AResolutionNamingNoEntryStillReturnsTheOutputAndJoinsNothing
 	}
 }
 
-// TestMiddleware_RunRefusedOutsideGrantTerminates is the policy half of the
+// TestMiddleware_RunRefusedOutsideGrantIsAResult is the policy half of the
 // same rule, through the real middleware: a model call naming a session the
-// grant does not cover is REFUSED (terminal — ErrPolicyRefused), and the
-// renderer is never asked. The grant names session-a; the model names
-// session-b.
-func TestMiddleware_RunRefusedOutsideGrantTerminates(t *testing.T) {
+// grant does not cover is REFUSED — the refusal is the call's result in our
+// words (nocx-uvac6.1), and the renderer is never asked. The grant names
+// session-a; the model names session-b.
+func TestMiddleware_RunRefusedOutsideGrantIsAResult(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 1, 0, 1, "x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	_, err := wrappedEndpoint(mw, "run", "c1", `{"sessionId":"session-b","command":"ls"}`)
-	if !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("out-of-grant run error = %v, want ErrPolicyRefused", err)
+	out, err := wrappedEndpoint(mw, "run", "c1", `{"sessionId":"session-b","command":"ls"}`)
+	if err != nil {
+		t.Fatalf("out-of-grant run error = %v, want the refusal as a tool result", err)
+	}
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "run") {
+		t.Fatalf("refusal result = %q, want a refusal naming the tool in our words", out)
 	}
 	if calls := req.runCalls(); len(calls) != 0 {
 		t.Fatalf("a refused call reached the renderer: %+v", calls)
 	}
 
-	out, err := wrappedEndpoint(mw, "run", "c2", `{"sessionId":"session-a","command":"ls"}`)
+	out, err = wrappedEndpoint(mw, "run", "c2", `{"sessionId":"session-a","command":"ls"}`)
 	if err != nil {
 		t.Fatalf("in-grant run failed: %v", err)
 	}

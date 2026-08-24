@@ -124,16 +124,25 @@ uses all three, strongest first:
   when the tool is about to be executed". This is where the arguments are visible and where
   the three outcomes live:
 
-- **refuse** — do not call `next`, **and return `ErrPolicyRefused`**. Withholding `next` is
-  not by itself terminal: a middleware must return something, and a `ToolOutput` with no
-  error becomes a tool result the model reads and works around. `ToolsNode` aborts on a
-  non-interrupt error rather than producing a tool message, so the category is what makes the
-  refusal a control decision; the run adapter terminalizes the attempt as `refused`, and no
-  second model request is made.
+- **refuse** — do not call `next`. **AMENDED 2026-08-24 (nocx-uvac6.1):** return a
+  nocx-owned TOOL RESULT in the refused call's own slot, with no error, and let the run
+  continue. The earlier decision required a refusal error because a tool result with no error
+  was treated as text the model could work around; the system prompt promises the opposite:
+  "a refusal is an answer", so the refusal-as-result is now the deliberate contract. The
+  distinction is structural: a refusal returns `(result, nil)`, while every real failure
+  remains on the error channel. No downstream code rediscovers a refusal category; the former
+  refusal error sentinel is deleted.
 - **stop the rest** — eino's sequential runner invokes every task and inspects errors only
-  afterwards, so the middleware carries a batch latch: after a refusal or an interrupt, later
-  calls in the same model response return without calling `next`. The framework's
-  `ExecuteSequentially` gives order, not short-circuiting.
+  afterwards, so the middleware carries a batch latch. **AMENDED 2026-08-24
+  (nocx-uvac6.1):** the latch trips for escalations only; a refusal is one call's answer and
+  every other call in the same response is decided on its own merits. This is a trade-off,
+  not an obsolete implementation detail: the narrowed rule was defence in depth, stopping
+  a pre-planned alternative route inside one response before any refusal result reached the
+  model. The current tool registry has no sequence where a refused call's forbidden resource
+  becomes reachable through another call in the same batch: a later call inherits no
+  arguments, output, scope or capability from the refused one. The system prompt still tells
+  the model never to route around a refusal, so that defence now lives in the prompt rather
+  than the refusal latch. `ExecuteSequentially` still gives order, not short-circuiting.
 - **escalate** — `StatefulInterrupt` **before** calling `next`, so the call that is asking has
   not run; approval resumes from the checkpoint as a **new attempt with
   a new grant**, never by mutating a running one (ADR-0020 §5).
@@ -187,9 +196,9 @@ second implementation of iteration that is already written and tested.
 - **We inherit an upgrade cadence we do not control** on the most security-sensitive path in
   the product, and the surface is wider than two APIs: the agent driver, all four tool-wrapper
   shapes, `ToolsNode`'s error classification, sequential-versus-parallel execution, the
-  interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and the
-  tests that prove never-declared, refusal-terminalizes and narrowing are what turn it into a
-  red build.
+  interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and
+  the tests that prove never-declared, refusal-as-result-and-continues, and narrowing are what
+  turn it into a red build.
 - **Checkpoints are process-lifetime state, not records.** They live in one in-memory store
   keyed by run id, are deleted on terminalization, and are swept at startup by the store being
   born empty — so approval does not survive a restart, which is already what the recovery rule

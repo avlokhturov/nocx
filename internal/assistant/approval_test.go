@@ -90,6 +90,29 @@ func TestApprovalStore_Seam(t *testing.T) {
 	}
 }
 
+func TestApprovalStore_DeclinePreservesEffectForStandingWrite(t *testing.T) {
+	store := NewApprovalStore()
+	ap := Approval{
+		RunID: "run-1", Attempt: 1, Tool: "files.read", CallID: "call_1",
+		ArgHash: "hash-a",
+	}
+	store.Request(ap)
+	store.NoteEffect(Approval{
+		RunID: ap.RunID, Attempt: ap.Attempt, Tool: ap.Tool, CallID: ap.CallID,
+		ArgHash: ap.ArgHash, Effect: content.EffectObserve,
+	})
+
+	if !store.Decline(ap, DeclineCallAlways) {
+		t.Fatal("Decline of the pending proposal returned false")
+	}
+	if effect, ok := store.EffectFor(ap); !ok || effect != content.EffectObserve {
+		t.Fatalf("EffectFor after decline = %q/%v, want observe/true for the standing-write path", effect, ok)
+	}
+	if store.Decline(ap, DeclineCallAlways) {
+		t.Fatal("a second Decline of the same proposal won after the first settlement")
+	}
+}
+
 // ── criterion 5 / nocx-5dldy: the thread, read back from a real store ─────
 
 // TestAsk_EscalationRecordsTheProposalThread: an escalation is a ledger

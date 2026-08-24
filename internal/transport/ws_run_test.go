@@ -219,19 +219,14 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	}
 }
 
-// TestRun_GrantRefusesBeforeAnySubmission is criterion 4 over the wire: the
-// model names a lane the grant does not cover. The policy refuses BEFORE
-// anything is submitted — the broker is never asked, so no agent.runRequest
-// notification ever leaves, and the run terminalizes with the refusal
-// sentence. Asserted by trying: every notification until the terminal state
-// is examined, and the provider saw exactly the one ask request (a refused
-// call never re-asks the model).
+// TestRun_GrantRefusesBeforeAnySubmission (nocx-uvac6.1): a run call naming
+// a lane the grant does not cover is REFUSED — the refusal is that call's
+// result, in our words, and the run continues to a terminal state of its
+// own accord. The refusal must precede every submission, so no runRequest
+// may appear, and the run completes with the model's answer.
 func TestRun_GrantRefusesBeforeAnySubmission(t *testing.T) {
-	// The model calls run on a session the grant does NOT name: the harness
-	// session is the grant's base scope, and the tool call names another.
 	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
 	defer srv.Close()
-
 	client, err := assistant.NewClient(nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
@@ -284,13 +279,24 @@ func TestRun_GrantRefusesBeforeAnySubmission(t *testing.T) {
 			break
 		}
 	}
-	if st.State != "failed" {
-		t.Fatalf("runState = %q, want failed (the refusal is terminal)", st.State)
+	// The refusal is an answer, not a fault: the run went on and the model
+	// answered, so the turn completed.
+	if st.State != "completed" {
+		t.Fatalf("runState = %q, want completed — a refused call must not fail the run", st.State)
 	}
-	if !strings.Contains(st.Error, "refused") {
-		t.Fatalf("runState error = %q, want the refusal sentence", st.Error)
+	if st.Error != "" {
+		t.Fatalf("runState error = %q, want none on a completed run", st.Error)
 	}
-	if fake.requests.Load() != 1 {
-		t.Fatalf("provider received %d requests, want exactly 1 (a refused call never re-asks the model)", fake.requests.Load())
+	// The refusal rode the second request as a tool result: the provider
+	// was asked again, and the answer it got carried the refusal in our
+	// words, never the framework's.
+	if fake.requests.Load() != 2 {
+		t.Fatalf("provider received %d requests, want 2 (the refused call, then the answer) — the run must continue", fake.requests.Load())
+	}
+	if len(fake.bodies) < 2 || !strings.Contains(fake.bodies[1], "REFUSED") {
+		t.Fatalf("the second request did not carry the refusal as a tool result: %v", fake.bodies)
+	}
+	if len(fake.bodies) >= 2 && strings.Contains(fake.bodies[1], "NodeRunError") {
+		t.Fatalf("the refusal text carried the framework's words: %v", fake.bodies[1])
 	}
 }

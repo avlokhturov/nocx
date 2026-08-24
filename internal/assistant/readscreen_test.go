@@ -127,25 +127,28 @@ func TestExecuteReadScreen_SessionOutsideGrantNeverRequests(t *testing.T) {
 	}
 }
 
-// TestMiddleware_ReadScreenRefusedOutsideGrantTerminates is the policy half
+// TestMiddleware_ReadScreenRefusedOutsideGrantIsAResult is the policy half
 // of the same rule, through the real middleware: a model call naming a
-// session the grant does not cover is REFUSED (terminal — ErrPolicyRefused),
-// and the renderer is never asked. The grant names session-a; the model
-// names session-b.
-func TestMiddleware_ReadScreenRefusedOutsideGrantTerminates(t *testing.T) {
+// session the grant does not cover is REFUSED — the refusal is the call's
+// result in our words (nocx-uvac6.1), and the renderer is never asked. The
+// grant names session-a; the model names session-b.
+func TestMiddleware_ReadScreenRefusedOutsideGrantIsAResult(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRequester{body: liveFrameBody("x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	_, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-b"}`)
-	if !errors.Is(err, ErrPolicyRefused) {
-		t.Fatalf("out-of-grant readScreen error = %v, want ErrPolicyRefused", err)
+	out, err := wrappedEndpoint(mw, "readScreen", "c1", `{"sessionId":"session-b"}`)
+	if err != nil {
+		t.Fatalf("out-of-grant readScreen error = %v, want the refusal as a tool result", err)
+	}
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "readScreen") {
+		t.Fatalf("refusal result = %q, want a refusal naming the tool in our words", out)
 	}
 	if calls := req.calls(); len(calls) != 0 {
 		t.Fatalf("a refused call reached the renderer: %+v", calls)
 	}
 
-	out, err := wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":"session-a"}`)
+	out, err = wrappedEndpoint(mw, "readScreen", "c2", `{"sessionId":"session-a"}`)
 	if err != nil {
 		t.Fatalf("in-grant readScreen failed: %v", err)
 	}

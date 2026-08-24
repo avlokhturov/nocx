@@ -58,6 +58,29 @@ type approvalEntry struct {
 	effect  content.Effect
 }
 
+// DeclineKind is what a person's no means, recorded with the declined
+// proposal so the resumed attempt's middleware can say it in the right
+// words (nocx-uvac6.1): the refusal is the call's result, and whether it is
+// standing — and how far — changes the sentence the model reads.
+type DeclineKind string
+
+const (
+	// DeclineCallOnce: the no covers this call only; nothing is standing.
+	DeclineCallOnce DeclineKind = "once"
+	// DeclineCallSession: the no, and a standing refusal of this kind of
+	// call for the rest of this session.
+	DeclineCallSession DeclineKind = "session"
+	// DeclineCallAlways: the no, and a standing refusal of this kind of
+	// call from now on.
+	DeclineCallAlways DeclineKind = "always"
+)
+
+type declinedEntry struct {
+	runID  string
+	kind   DeclineKind
+	effect content.Effect
+}
+
 // retainedValue is the withheld result of an egress finding (design §7.1):
 // the exact bytes — or the exact error string — the person was shown, never a
 // re-run's freshly produced ones.
@@ -67,11 +90,13 @@ type retainedValue struct {
 }
 
 // ApprovalStore keeps the pending requests (what the human is being asked),
-// the approvals (what the human said yes to) and the retained egress results
-// (what was withheld pending the decision). All keyed by the exact proposal.
+// the approvals (what the human said yes to), the declined proposals (what
+// the human said no to) and the retained egress results (what was withheld
+// pending the decision). All keyed by the exact proposal.
 type ApprovalStore struct {
 	mu       sync.Mutex
 	approved map[approvalKey]approvalEntry
+	declined map[approvalKey]declinedEntry
 	pending  map[approvalKey]approvalEntry
 	retained map[approvalKey]retainedValue
 }
@@ -79,10 +104,11 @@ type ApprovalStore struct {
 // NewApprovalStore builds the process-lifetime approval store. The transport
 // owns one per server and passes it on every Ask, so the run that escalated
 // and the run that resumes consult the SAME decisions; the store is what
-// carries a yes across the suspension.
+// carries a yes or a no across the suspension.
 func NewApprovalStore() *ApprovalStore {
 	return &ApprovalStore{
 		approved: make(map[approvalKey]approvalEntry),
+		declined: make(map[approvalKey]declinedEntry),
 		pending:  make(map[approvalKey]approvalEntry),
 		retained: make(map[approvalKey]retainedValue),
 	}
@@ -132,6 +158,81 @@ func (s *ApprovalStore) IsApproved(ap Approval) bool {
 	return ok
 }
 
+// Decline records a NO to this exact proposal (nocx-uvac6.1): the pending
+// ask is answered and the proposal moves to declined, so the resumed
+// attempt's re-run of the pipeline returns the refusal as the call's result
+// instead of re-asking. It returns false when the proposal was NOT pending
+// — never asked, or already answered — and records nothing: a no to a
+// question nobody was asked is not a decision.
+//
+// kind is what the no means beyond this call — the standing half of the
+// answer, which the middleware's refusal text carries ("in this session",
+// "from now on", or nothing for a one-off no). The standing ROW itself is
+// written by the transport into the session overlay / global matrix; the
+// store only remembers which sentence the model was refused with, and —
+// from the pending record — the effect class the no was given on, which is
+// what lets a STANDING no also answer a retry of the same kind (the
+// declined record is keyed by the exact proposal; a retry mints a new call
+// id, so the effect is the only thing that carries across).
+func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.pending[keyOf(ap)]
+	if !ok {
+		return false
+	}
+	delete(s.pending, keyOf(ap))
+	s.declined[keyOf(ap)] = declinedEntry{runID: ap.RunID, kind: kind, effect: cur.effect}
+	return true
+}
+
+// DeclinedKind returns what the person's no to this exact proposal meant.
+// ok is false when the proposal was never declined — the ordinary case for
+// every call that was not asked about.
+func (s *ApprovalStore) DeclinedKind(ap Approval) (DeclineKind, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.declined[keyOf(ap)]
+	return e.kind, ok
+}
+
+// DowngradeDeclined lowers a declined proposal's standing half to a one-off
+// no when the standing policy write did not stick. The person still refused
+// this call, but the model must not be told the refusal is permanent when
+// later policy decisions will not enforce it.
+func (s *ApprovalStore) DowngradeDeclined(ap Approval) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := keyOf(ap)
+	if e, ok := s.declined[k]; ok {
+		e.kind = DeclineCallOnce
+		s.declined[k] = e
+	}
+}
+
+// DeclinedEffect reports a STANDING no covering this effect class WITHIN
+// ONE RUN: a "deny in this session" or "deny always" answer, whose record
+// carries the run it was given in and the effect it was given on. The
+// effect-match exists so a retry of the same kind — which mints a new call
+// id and therefore misses the exact proposal — is refused with the same
+// standing sentence. It is scoped to runID because the store is
+// process-lifetime and shared by every run: a standing no in run 1 must
+// never answer a call in run 2, whose grant was minted (and, for a standing
+// no, already refuses) from the matrix the answer wrote. A one-off no
+// (DeclineCallOnce) covers only the exact proposal it was given on and
+// never matches here — a retry after a one-off no is a fresh proposal the
+// person may be asked about again.
+func (s *ApprovalStore) DeclinedEffect(runID string, effect content.Effect) (DeclineKind, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.declined {
+		if e.runID == runID && e.effect == effect && e.kind != DeclineCallOnce {
+			return e.kind, true
+		}
+	}
+	return "", false
+}
+
 // IsPending reports whether the human is CURRENTLY being asked about this
 // exact proposal — the source of truth a stale or unknown approval id is
 // answered against (acceptance criterion 7): an id that is not pending was
@@ -159,8 +260,8 @@ func (s *ApprovalStore) EntryIDFor(ap Approval) (string, bool) {
 	return "", false
 }
 
-// NoteEffect records the effect class the PENDING proposal was decided
-// under — the matrix row a "this session" or "always" answer is about
+// NoteEffect records the effect class the gate decided this proposal under —
+// the matrix row a "this session" or "always" answer is about
 // (nocx-ki305). It is recorded separately from Request because the two facts
 // have two writers: the middleware calls Request at escalation, carrying the
 // binding and the ledger entry, and the effect only reaches the transport,
@@ -187,16 +288,20 @@ func (s *ApprovalStore) NoteEffect(ap Approval) {
 }
 
 // EffectFor returns the effect class the proposal was decided under. ok is
-// false when the proposal is neither pending nor approved, or was recorded
-// without one — and a false there is the fail-toward-asking end: the answer
-// applies to this call and nothing is written to any policy.
+// false when the proposal is neither pending, approved, nor declined, or was
+// recorded without one — and a false there is the fail-toward-asking end:
+// the answer applies to this call and nothing is written to any policy.
 func (s *ApprovalStore) EffectFor(ap Approval) (content.Effect, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if e, ok := s.pending[keyOf(ap)]; ok && e.effect != "" {
+	k := keyOf(ap)
+	if e, ok := s.pending[k]; ok && e.effect != "" {
 		return e.effect, true
 	}
-	if e, ok := s.approved[keyOf(ap)]; ok && e.effect != "" {
+	if e, ok := s.approved[k]; ok && e.effect != "" {
+		return e.effect, true
+	}
+	if e, ok := s.declined[k]; ok && e.effect != "" {
 		return e.effect, true
 	}
 	return "", false
