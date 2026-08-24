@@ -29,288 +29,26 @@ package assistant
 // a body the capture truncated says so (truncated: "cap" — the middle went,
 // the head and tail are what the store has).
 //
-// The SEAM is BlockSource below. Authority is not on it: the capability
-// (agenttools.BlockReader) holds the grant's sessions and the executor
-// refuses an out-of-grant session BEFORE the source is asked, exactly as
-// readScreen and run do — the request never leaves the process.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 )
 
-// defaultBlockListLimit is how many blocks one blocks.list answers with when
-// the model names no limit: enough to cover "what have I been doing" without
-// spending the run's context on a page nobody reads. The reply says whether
-// older blocks remain.
-const defaultBlockListLimit = 10
-
-// maxBlockListLimit is the ceiling on one page, matching the params schema.
-const maxBlockListLimit = 50
-
-// defaultBlockLines and maxBlockLines bound one blocks.read window in LINES
-// (the unit the model aims with, because the total it was given is a line
-// count). The byte bound below is the second, independent one.
 const (
-	defaultBlockLines = 200
-	maxBlockLines     = 2000
+	defaultBlockListLimit = 10
+	maxBlockListLimit     = 50
+	defaultBlockLines     = 200
+	maxBlockLines         = 2000
+	maxBlockWindowBytes   = 64 << 10
 )
 
-// maxBlockWindowBytes is the context budget of one window: a block may hold
-// a quarter of a megabyte, and the run must not spend it on one call. A
-// window the bound cuts short says so in the window it returns — never a
-// silent truncation (design §4.4).
-const maxBlockWindowBytes = 64 << 10
-
-// ErrBlockNotFound is the one answer to "no block of this session carries
-// that id". It is deliberately the SAME answer for an id that does not exist
-// and for an id that exists in another pane or another session: the model
-// learns nothing about a block it may not read, not even that it is there.
-var ErrBlockNotFound = errors.New("no such block in this session")
-
-// BlockSource is the seam the block tools read the granted session's
-// finished blocks through. The transport implements it over the ledger — it
-// is the side that can resolve which pane a session is the pipe of, which is
-// what a block is anchored to (ws_ledger.go: entries.session_id is
-// deliberately NULL and pane_id is the durable anchor) — and it applies that
-// scope itself, so a row outside the granted session's pane is never in the
-// answer to be filtered.
-//
-// It is infrastructure, not authority: the capability decides WHICH sessions
-// this run may name, and this decides how a block of a named session is
-// read. Nil for a run the transport did not wire it into, which the tools
-// report honestly rather than answering with an empty list.
-type BlockSource interface {
-	// ListBlocks returns the newest limit blocks of sessionID's pane, newest
-	// first, and whether older ones remain. A session the process does not
-	// hold is an error, never an empty list — "no blocks" and "no such
-	// session" must not look alike.
-	ListBlocks(ctx context.Context, sessionID string, limit int) (BlockList, error)
-	// ReadBlock returns the window [start, start+count) of one block's
-	// output, clamped to what the block holds, together with the total. A
-	// block sessionID's pane does not carry — including one that exists
-	// elsewhere — is ErrBlockNotFound.
-	ReadBlock(ctx context.Context, sessionID, blockID string, start, count int) (BlockWindow, error)
-}
-
-// BlockSummary is one row of the list: what the model needs to choose a
-// block, and the total it needs to aim a window at.
-type BlockSummary struct {
-	// ID is the ledger entry id — exactly what blocks.read takes.
-	ID string
-	// Command is the command as it was recorded, which is the MASKED text:
-	// the durable command is always the masked one (ws_ledger.go), so a
-	// secret the person typed is not handed to the model by this tool.
-	Command string
-	// Status is the block's frozen outcome (success | failure | interrupted
-	// | unknown), and ExitCode the shell's code when the row carries one.
-	Status   string
-	ExitCode *int
-	// Lines is how many lines of output the store kept for this block —
-	// the total blocks.read's window is aimed with. Zero with BodyKept
-	// false means no body was kept at all.
-	Lines int
-	// BodyKept says whether the store holds this block's output. False is a
-	// FACT, not a failure: history off, output retention off, or a command
-	// marked sensitive.
-	BodyKept bool
-	// EndedAt is when the command finished, Unix milliseconds, when the row
-	// carries it.
-	EndedAt *int64
-}
-
-// BlockList is one page of the session's blocks, newest first.
-type BlockList struct {
-	Blocks []BlockSummary
-	// More reports that older blocks exist beyond this page.
-	More bool
-}
-
-// BlockWindow is one block's facts plus the window of its output that was
-// actually read. Start/End are the span the source returned — clamped to the
-// block, so a window past the end is the empty span at Total rather than an
-// error.
-type BlockWindow struct {
-	Command   string
-	Status    string
-	ExitCode  *int
-	Total     int
-	Start     int
-	End       int
-	Text      string
-	BodyKept  bool
-	Truncated string // "cap" when the stored body dropped its middle at capture
-}
-
-// ── the returns the model reads ──────────────────────────────────────────
-
-type blocksListResult struct {
-	SessionID string          `json:"sessionId"`
-	Returned  int             `json:"returned"`
-	More      bool            `json:"more"`
-	Blocks    []blocksListRow `json:"blocks"`
-	Note      string          `json:"note,omitempty"`
-	_         struct{}        `json:"-"`
-}
-
-type blocksListRow struct {
-	BlockID  string `json:"blockId"`
-	Command  string `json:"command"`
-	Status   string `json:"status"`
-	ExitCode *int   `json:"exitCode"`
-	Lines    int    `json:"lines"`
-	BodyKept bool   `json:"bodyKept"`
-	EndedAt  *int64 `json:"endedAt,omitempty"`
-}
-
-type blocksReadResult struct {
-	SessionID string    `json:"sessionId"`
-	BlockID   string    `json:"blockId"`
-	Command   string    `json:"command"`
-	Status    string    `json:"status"`
-	ExitCode  *int      `json:"exitCode"`
-	Total     int       `json:"total"`
-	Window    blockSpan `json:"window"`
-	Returned  blockSpan `json:"returned"`
-	Text      string    `json:"text"`
-	BodyKept  bool      `json:"bodyKept"`
-	Truncated string    `json:"truncated,omitempty"`
-	Note      string    `json:"note,omitempty"`
-}
-
-type blockSpan struct {
-	Start int `json:"start"`
-	End   int `json:"end"`
-}
-
-// ── the executors ────────────────────────────────────────────────────────
-
-// executeBlocksList runs blocks.list: the narrowed capability gates the
-// session, then the source answers from the pane's record. The capability
-// check happens BEFORE the read — naming a session outside the grant is
-// refused here and nothing is ever queried (the bead's first and third
-// criteria, asserted by trying).
-func executeBlocksList(ctx context.Context, reader *agenttools.BlockReader, source BlockSource, args json.RawMessage) (string, error) {
-	var p struct {
-		SessionID string `json:"sessionId"`
-		Limit     int    `json:"limit"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		// Unreachable through the middleware (validation precedes policy,
-		// let alone execution); the direct-call seam still answers honestly.
-		return "", fmt.Errorf("blocks.list: args: %w", err)
-	}
-	if !reader.Allows(p.SessionID) {
-		return "", fmt.Errorf("blocks.list: session %q is outside the run's grant — nothing was read", p.SessionID)
-	}
-	if source == nil {
-		return "", errors.New("blocks.list: no block source is wired for this run")
-	}
-	limit := p.Limit
-	if limit <= 0 {
-		limit = defaultBlockListLimit
-	}
-	if limit > maxBlockListLimit {
-		limit = maxBlockListLimit
-	}
-	list, err := source.ListBlocks(ctx, p.SessionID, limit)
-	if err != nil {
-		return "", fmt.Errorf("blocks.list: %w", err)
-	}
-	out := blocksListResult{
-		SessionID: p.SessionID,
-		Returned:  len(list.Blocks),
-		More:      list.More,
-		Blocks:    make([]blocksListRow, 0, len(list.Blocks)),
-	}
-	for _, b := range list.Blocks {
-		out.Blocks = append(out.Blocks, blocksListRow{
-			BlockID: b.ID, Command: b.Command, Status: b.Status, ExitCode: b.ExitCode,
-			Lines: b.Lines, BodyKept: b.BodyKept, EndedAt: b.EndedAt,
-		})
-	}
-	if len(out.Blocks) == 0 {
-		// An empty page and an unanswerable question must not look alike:
-		// the model is told this is what the record holds for this session,
-		// so it asks the person rather than inventing a history.
-		out.Note = "this session has recorded no finished blocks yet"
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return "", fmt.Errorf("blocks.list: marshal result: %w", err)
-	}
-	return string(b), nil
-}
-
-// executeBlocksRead runs blocks.read: the same narrowing, then one window of
-// one block. A window past the end of the output is answered honestly — the
-// window asked for is echoed, the window returned is what the block could
-// give, and the total says where it stops (design §4.4).
-func executeBlocksRead(ctx context.Context, reader *agenttools.BlockReader, source BlockSource, args json.RawMessage) (string, error) {
-	var p struct {
-		SessionID string `json:"sessionId"`
-		BlockID   string `json:"blockId"`
-		Start     int    `json:"start"`
-		Count     int    `json:"count"`
-	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("blocks.read: args: %w", err)
-	}
-	if p.Start < 0 {
-		return "", errors.New("blocks.read: a window starts at line 0 or later")
-	}
-	if !reader.Allows(p.SessionID) {
-		return "", fmt.Errorf("blocks.read: session %q is outside the run's grant — nothing was read", p.SessionID)
-	}
-	if p.BlockID == "" {
-		return "", errors.New("blocks.read: a blockId is required — blocks.list spells them")
-	}
-	if source == nil {
-		return "", errors.New("blocks.read: no block source is wired for this run")
-	}
-	count := p.Count
-	if count <= 0 {
-		count = defaultBlockLines
-	}
-	if count > maxBlockLines {
-		count = maxBlockLines
-	}
-	win, err := source.ReadBlock(ctx, p.SessionID, p.BlockID, p.Start, count)
-	if err != nil {
-		return "", fmt.Errorf("blocks.read: %w", err)
-	}
-	text, end := boundBlockText(win.Text, win.Start, win.End)
-	out := blocksReadResult{
-		SessionID: p.SessionID,
-		BlockID:   p.BlockID,
-		Command:   win.Command,
-		Status:    win.Status,
-		ExitCode:  win.ExitCode,
-		Total:     win.Total,
-		Window:    blockSpan{Start: p.Start, End: p.Start + count},
-		Returned:  blockSpan{Start: win.Start, End: end},
-		Text:      text,
-		BodyKept:  win.BodyKept,
-		Truncated: win.Truncated,
-	}
-	switch {
-	case !win.BodyKept:
-		out.Note = "this block's output was not kept: history or output retention is off, or the command was marked sensitive"
-	case win.Truncated == "cap":
-		out.Note = "the stored body was capped when it was captured: the middle of the output is gone, the head and the tail are what the store has"
-	case p.Start >= win.Total && win.Total > 0:
-		out.Note = "the window starts past the end of the output; total is where it stops"
-	}
-	b, err := json.Marshal(out)
-	if err != nil {
-		return "", fmt.Errorf("blocks.read: marshal result: %w", err)
-	}
-	return string(b), nil
-}
+var ErrSessionItemNotFound = errors.New("no such item in this session")
 
 // boundBlockText applies the window's BYTE bound — the line count is what
 // the model aims with, and this is the budget it cannot overrun with 2000
@@ -355,4 +93,250 @@ func indexNewline(s string) int {
 		}
 	}
 	return -1
+}
+// SessionSource is the shared read seam for session.list and session.read.
+// The transport implements it from the ledger for item state and finished
+// output. A running item is completed by the renderer half of session.read,
+// so the backend never reconstructs live terminal text.
+type SessionSource interface {
+	ListSessionItems(ctx context.Context, sessionID string, limit int) (SessionItems, error)
+	ReadSessionItem(ctx context.Context, sessionID, itemID string, start, count int) (SessionItemRead, error)
+}
+
+type SessionItem struct {
+	ID       string
+	Command  string
+	State    string
+	ExitCode *int
+	Lines    int
+}
+
+type SessionItems struct {
+	Items []SessionItem
+	More  bool
+}
+
+type SessionItemRead struct {
+	ID        string
+	Command   string
+	State     string
+	ExitCode  *int
+	Total     int
+	Start     int
+	End       int
+	Text      string
+	Note      string
+}
+
+type sessionListResult struct {
+	SessionID string            `json:"sessionId"`
+	Items     []sessionListItem `json:"items"`
+	More      bool              `json:"more,omitempty"`
+}
+type sessionListItem struct {
+	ID       string `json:"id"`
+	Command  string `json:"command"`
+	State    string `json:"state"`
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Lines    int    `json:"lines"`
+}
+
+type sessionReadResult struct {
+	SessionID string            `json:"sessionId"`
+	ID        string            `json:"id,omitempty"`
+	State     string            `json:"state"`
+	Source    string            `json:"source"`
+	ExitCode  *int              `json:"exitCode,omitempty"`
+	Total     int               `json:"total,omitempty"`
+	Window    blockSpan         `json:"window,omitempty"`
+	Returned  blockSpan         `json:"returned,omitempty"`
+	Text      string            `json:"text"`
+	Cursor    *readScreenCursor `json:"cursor,omitempty"`
+	Identity  *readScreenIdent  `json:"identity,omitempty"`
+	Note      string            `json:"note,omitempty"`
+}
+
+type blockSpan struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
+}
+
+func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, args json.RawMessage) (string, error) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+		Limit     int    `json:"limit"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("session.list: args: %w", err)
+	}
+	if !reader.Allows(p.SessionID) {
+		return "", fmt.Errorf("session.list: session %q is outside the run's grant", p.SessionID)
+	}
+	if source == nil {
+		return "", errors.New("session.list: no session source is wired for this run")
+	}
+	if p.Limit <= 0 {
+		p.Limit = defaultBlockListLimit
+	}
+	if p.Limit > maxBlockListLimit {
+		p.Limit = maxBlockListLimit
+	}
+	items, err := source.ListSessionItems(ctx, p.SessionID, p.Limit)
+	if err != nil {
+		return "", fmt.Errorf("session.list: %w", err)
+	}
+	out := sessionListResult{
+		SessionID: p.SessionID,
+		Items:     make([]sessionListItem, 0, len(items.Items)),
+		More:      items.More,
+	}
+	for _, item := range items.Items {
+		out.Items = append(out.Items, sessionListItem{
+			ID: item.ID, Command: item.Command, State: item.State, ExitCode: item.ExitCode, Lines: item.Lines,
+		})
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("session.list: marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
+	var p struct {
+		SessionID string `json:"sessionId"`
+		ID        string `json:"id"`
+		Start     int    `json:"start"`
+		Count     int    `json:"count"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("session.read: args: %w", err)
+	}
+	if p.Start < 0 || p.Count < 0 {
+		return "", errors.New("session.read: start and count must be non-negative")
+	}
+	if !reader.Allows(p.SessionID) {
+		return "", fmt.Errorf("session.read: session %q is outside the run's grant", p.SessionID)
+	}
+	if p.ID == "" {
+		return executeSessionScreen(ctx, p.SessionID, requester, p.Start, p.Count)
+	}
+	if source == nil {
+		return "", errors.New("session.read: no session source is wired for this run")
+	}
+	if p.Count <= 0 {
+		p.Count = defaultBlockLines
+	}
+	if p.Count > maxBlockLines {
+		p.Count = maxBlockLines
+	}
+	item, err := source.ReadSessionItem(ctx, p.SessionID, p.ID, p.Start, p.Count)
+	if err != nil {
+		return "", fmt.Errorf("session.read: %w", err)
+	}
+	if item.State == "running" {
+		return executeSessionItemScreen(ctx, p.SessionID, p.ID, requester, p.Start, p.Count)
+	}
+	out := sessionReadResult{
+		SessionID: p.SessionID,
+		ID:        item.ID,
+		State:     item.State,
+		Source:    "ledger",
+		ExitCode:  item.ExitCode,
+		Total:     item.Total,
+		Window:    blockSpan{Start: p.Start, End: p.Start + p.Count},
+		Returned:  blockSpan{Start: item.Start, End: item.End},
+		Text:      item.Text,
+		Note:      item.Note,
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("session.read: marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, requester RendererRequester, start, count int) (string, error) {
+	body, err := executeSessionScreen(ctx, sessionID, requester, start, count)
+	if err != nil {
+		return "", err
+	}
+	var screen sessionReadResult
+	if err := json.Unmarshal([]byte(body), &screen); err != nil {
+		return "", fmt.Errorf("session.read: screen result: %w", err)
+	}
+	screen.ID = itemID
+	screen.State = "running"
+	b, err := json.Marshal(screen)
+	if err != nil {
+		return "", fmt.Errorf("session.read: marshal running result: %w", err)
+	}
+	return string(b), nil
+}
+
+func executeSessionScreen(ctx context.Context, sessionID string, requester RendererRequester, start, count int) (string, error) {
+	if requester == nil {
+		return "", errors.New("session.read: no renderer requester is wired for this run")
+	}
+	var region *FrameRegion
+	if count > 0 {
+		region = &FrameRegion{Start: start, End: start + count}
+	}
+	body, err := requester.RequestScreen(ctx, sessionID, region)
+	if err != nil {
+		return "", err
+	}
+	var frame frameBodyWire
+	if err := json.Unmarshal(body, &frame); err != nil {
+		return "", fmt.Errorf("session.read: frame body: %w", err)
+	}
+	if frame.Identity == nil {
+		return "", errors.New("session.read: the renderer's frame carried no capture identity")
+	}
+	asked := blockSpan{Start: 0, End: frame.Identity.Rows}
+	if region != nil {
+		asked = blockSpan{Start: region.Start, End: region.End}
+	}
+	returned := asked
+	if frame.Range != nil {
+		returned = blockSpan{Start: frame.Range.Start, End: frame.Range.End}
+	}
+	var lines []string
+	for _, row := range frame.Rows {
+		if row.Kind == "text" {
+			lines = append(lines, row.Text)
+			continue
+		}
+		var line strings.Builder
+		for _, cell := range row.Cells {
+			line.WriteString(cell.Char)
+		}
+		lines = append(lines, line.String())
+	}
+	out := sessionReadResult{
+		SessionID: sessionID,
+		State:     "screen",
+		Source:    "renderer",
+		Total:     frame.Identity.Rows,
+		Window:    asked,
+		Returned:  returned,
+		Text:      strings.Join(lines, "\n"),
+	}
+	if frame.Cursor != nil {
+		out.Cursor = &readScreenCursor{Line: frame.Cursor.Line, Col: frame.Cursor.Col}
+	}
+	out.Identity = &readScreenIdent{
+		Buffer: struct {
+			Kind string `json:"kind"`
+		}{Kind: frame.Identity.Buffer.Kind},
+		Cols: frame.Identity.Cols, Rows: frame.Identity.Rows, Generation: frame.Identity.Generation,
+	}
+	if frame.Identity.Buffer.Kind == "alternate" {
+		out.Note = "the alternate buffer has no scrollback; this is the current screen, not accumulated output"
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return "", fmt.Errorf("session.read: marshal screen result: %w", err)
+	}
+	return string(b), nil
 }

@@ -29,37 +29,24 @@ func narrowFilesRead(grant content.Grant) (Capability, error) {
 	return r, nil
 }
 
-// narrowReadScreen is the readScreen row's capability constructor: the
-// grant's ResourceSession scopes, nothing else. The renderer request seam —
-// how a read is performed — is infrastructure wired at the run (the
-// assistant's RendererRequester), not authority, so it does not live on the
-// capability: the capability answers ONLY "may this run read this session",
-// and an executor that holds it cannot name a session outside the grant
-// (design §2.2: authority crosses in neither direction).
-func narrowReadScreen(grant content.Grant) (Capability, error) {
-	return NewScreenReader(grant.Scopes), nil
+// narrowSession is the session.list and session.read row's constructor:
+// exactly the granted ResourceSession scopes. The session capability carries
+// only the set of session ids; execution infrastructure is supplied by the
+// assistant run and is not authority.
+func narrowSession(grant content.Grant) (Capability, error) {
+	return NewSessionReader(grant.Scopes), nil
 }
 
 // narrowRun is the run row's capability constructor: the grant's
-// ResourceSession scopes, nothing else — the same narrowing readScreen
-// gets, as its own type (the middleware's InRenderer branch dispatches on
-// the capability type, so the two tools stay distinguishable and the type
-// switch is the exhaustiveness proof). The renderer request seam — how a
-// run is submitted — is infrastructure wired at the run (the assistant's
-// RendererRequester), not authority: the capability answers ONLY "may this
-// run submit a command to this session", and an executor that holds it
-// cannot name a session outside the grant.
+// ResourceSession scopes, nothing else — the same session-scoped authority
+// model used by session.read, as its own type (the middleware's execution
+// dispatch distinguishes capabilities, and the type switch is the
+// exhaustiveness proof). The renderer request seam — how a run is submitted
+// — is infrastructure wired at the run (the assistant's RendererRequester),
+// not authority: the capability answers ONLY "may this run submit a command
+// to this session", and an executor that holds it cannot name a session
+// outside the grant.
 func narrowRun(grant content.Grant) (Capability, error) {
 	return NewRunner(grant.Scopes), nil
 }
 
-// narrowBlocks is the blocks.list / blocks.read rows' capability
-// constructor: the grant's ResourceSession scopes, nothing else — the same
-// narrowing readScreen and run get, as its own type. Both rows share it
-// because they share one authority question ("may this run read this
-// session's blocks"); what each does with the answer is the executor's, and
-// the ledger seam they read through is wired at the run (the assistant's
-// BlockSource), not here, so the capability stays pure authority.
-func narrowBlocks(grant content.Grant) (Capability, error) {
-	return NewBlockReader(grant.Scopes), nil
-}

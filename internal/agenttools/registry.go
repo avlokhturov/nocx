@@ -110,18 +110,13 @@ type Registry struct {
 }
 
 // declarations is the table — the only place a tool comes into existence.
-// Six rows, three execution states (design §4.1–§4.2): files.read and the
-// two block tools execute in Go (their Narrow is wired and their executors
-// live in internal/assistant — blocks.list and blocks.read answer from the
-// pane's durable ledger record, which is where a frozen block's text lives
-// once its rows have left the grid),
-// readScreen and run execute in the renderer (InRenderer tools — the
-// executor asks the renderer through the transport's broker; readScreen
-// reads a session's screen, run submits a command through the same submit
-// path a person uses), and git.status is declared-but-not-executable
-// (Narrow nil — the middleware refuses to run it honestly). The exclusion
-// tests need at least two permitted/refused rows so a grant can be shown to
-// admit and to refuse.
+// Five rows, four execution states (design §4.1–§4.2): files.read executes
+// in Go; session.list executes in Go against the ledger; session.read uses
+// Dynamic dispatch, selecting the ledger for an exited item and the
+// renderer broker for a running item or the current screen; run executes in
+// the renderer; and git.status remains declared-but-not-executable (Narrow
+// nil). The dynamic row is explicit so state-dependent ownership cannot hide
+// behind either InGo or InRenderer.
 var declarations = []Declaration{
 	{
 		Name:        "files.read",
@@ -134,14 +129,24 @@ var declarations = []Declaration{
 		Narrow:      narrowFilesRead,
 	},
 	{
-		Name:        "readScreen",
-		Description: "Read what is on a terminal session's screen right now — the text, the cursor and the styling; reach for this for a command that is still RUNNING, or for a full-screen program the person is in, since you are never shown the screen unless you go and read it. It shows only the live screen: a command that has already finished has left it, and blocks.list is where its output went.",
+		Name:        "session.list",
+		Description: "List what can be addressed in a terminal session right now — each item has an id, the command or program, and whether it is running or exited; an empty list is honest for a pane with no recorded blocks.",
 		Effect:      content.EffectObserve,
 		Resources:   []content.ResourceKind{content.ResourceSession},
 		ResourceArg: "sessionId",
-		Executes:    InRenderer,
-		Params:      "readScreen.schema.json",
-		Narrow:      narrowReadScreen,
+		Executes:    InGo,
+		Params:      "session.list.schema.json",
+		Narrow:      narrowSession,
+	},
+	{
+		Name:        "session.read",
+		Description: "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourceSession},
+		ResourceArg: "sessionId",
+		Executes:    Dynamic,
+		Params:      "session.read.schema.json",
+		Narrow:      narrowSession,
 	},
 	{
 		Name:        "run",
@@ -153,26 +158,6 @@ var declarations = []Declaration{
 		Params:      "run.schema.json",
 		Narrow:      narrowRun,
 		OpensBlock:  true,
-	},
-	{
-		Name:        "blocks.list",
-		Description: "List the commands that have already finished in a terminal session — newest first, each with the id blocks.read takes, what was run, how it ended and how many lines it printed; reach for this whenever the question is about what the person has run or what something printed, because a finished command's output has left the screen and readScreen can no longer see it.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourceSession},
-		ResourceArg: "sessionId",
-		Executes:    InGo,
-		Params:      "blocks.list.schema.json",
-		Narrow:      narrowBlocks,
-	},
-	{
-		Name:        "blocks.read",
-		Description: "Read a window of one finished command's output, by the id blocks.list gave you; reach for this once you know which command you care about, and aim the window with the line count blocks.list reported — the answer says which window you actually got, so asking past the end of the output is safe.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourceSession},
-		ResourceArg: "sessionId",
-		Executes:    InGo,
-		Params:      "blocks.read.schema.json",
-		Narrow:      narrowBlocks,
 	},
 	{
 		Name:        "git.status",

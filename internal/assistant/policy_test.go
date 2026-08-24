@@ -1020,10 +1020,8 @@ func TestExecutorsCoverTheRegistry(t *testing.T) {
 			if _, ok := executors[tl.Name]; !ok {
 				t.Fatalf("tool %q executes in Go but has no executor entry", tl.Name)
 			}
-		case agenttools.InRenderer:
-			// The middleware's executeInRenderer branch is the executor; a
-			// Narrowed InRenderer tool without the branch is a compile-time
-			// impossibility, asserted by the branch's own type switch.
+		case agenttools.InRenderer, agenttools.Dynamic:
+			// InRenderer and Dynamic have explicit middleware dispatch.
 		default:
 			t.Fatalf("tool %q has an unknown execution site %q", tl.Name, tl.Executes)
 		}
@@ -1051,7 +1049,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "readScreen", "run", "blocks.list", "blocks.read", "git.status"}
+	want := []string{"files.read", "session.list", "session.read", "run", "git.status"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}

@@ -70,7 +70,7 @@ func newToolCallingServer(session string) (*toolCallingServer, *httptest.Server)
 			// The exact SSE shape the assistant engine tests use: one chunk
 			// carrying the tool call and finish_reason tool_calls, then the
 			// end-of-stream marker (policy_test.go's streamToolCalls).
-			streamToolCallChunk(w, "readScreen", fmt.Sprintf(`{"sessionId":%q}`, s.session))
+			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, s.session))
 			return
 		}
 		streamOKChunks(w)
@@ -336,7 +336,7 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "readScreen", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
+			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
 			return
 		}
 		streamOKChunks(w)
@@ -423,7 +423,7 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "readScreen", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
+			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
 			return
 		}
 		streamOKChunks(w)

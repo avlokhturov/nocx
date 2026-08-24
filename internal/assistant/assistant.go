@@ -123,13 +123,9 @@ type AskEvent struct {
 // later "show me what it returned" reaches through; it is not a second copy
 // of the bytes.
 //
-// The ARGUMENTS used to be left off too, on the argument that the derived
-// resource is the readable half. It is — when it differs between calls, and
-// for every session-scoped tool it does not: readScreen, blocks.list and
-// blocks.read all name the pane, so one turn announced four calls a person
-// could not tell apart, two of them reads of different finished commands
-// (ADR-0037). What separates two calls of one tool is what the model asked
-// for, so that is what is announced.
+// The ARGUMENTS are part of the announcement: session.list names the pane,
+// while session.read may name an item and a window. What separates calls of
+// one tool is what the model asked for, so that is what is announced.
 type ToolCall struct {
 	// Tool is the declared tool name, e.g. "files.read".
 	Tool string

@@ -119,7 +119,7 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 // middleware rather than the framework's own index lookup — with an argument
 // object the schema the model was shown does not allow.
 func malformedReadScreen(w http.ResponseWriter, _ *http.Request) {
-	streamToolCallChunk(w, "readScreen", `{"sessionId":"s","notADeclaredProperty":1}`)
+	streamToolCallChunk(w, "session.read", `{"sessionId":"s","notADeclaredProperty":1}`)
 }
 
 // unreachableEndpoint is a loopback port nothing listens on. http:// is
@@ -140,7 +140,7 @@ func outOfScopeReadScreenThenAnswer(w http.ResponseWriter, r *http.Request) {
 		streamOKChunks(w)
 		return
 	}
-	streamToolCallChunk(w, "readScreen", `{"sessionId":"a-session-this-grant-does-not-cover"}`)
+	streamToolCallChunk(w, "session.read", `{"sessionId":"a-session-this-grant-does-not-cover"}`)
 }
 
 // TestAsk_RefusalCompletesTheRun is the transport half of nocx-uvac6.1: a

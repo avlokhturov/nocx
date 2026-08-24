@@ -205,11 +205,11 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 	if uerr := json.Unmarshal(raw, &got); uerr != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", uerr, raw)
 	}
-	if got.Tool != "readScreen" || got.Reason != "policy" {
-		t.Fatalf("notification = %s, want the policy escalation of readScreen", raw)
+	if got.Tool != "session.read" || got.Reason != "policy" {
+		t.Fatalf("notification = %s, want the policy escalation of session.read", raw)
 	}
 	if got.Effect != "observe" {
-		t.Fatalf("effect = %q, want %q — readScreen's declared class, as the gate decided it", got.Effect, "observe")
+		t.Fatalf("effect = %q, want %q — session.read's declared class, as the gate decided it", got.Effect, "observe")
 	}
 	if got.Resource == nil {
 		t.Fatalf("resource is null, want the session the call named: %s", raw)
