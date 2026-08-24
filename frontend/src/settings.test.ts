@@ -13,6 +13,8 @@
  *   - nocx-ucxl: clicking a rail section always changes the content pane
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
@@ -1187,5 +1189,53 @@ describe("the person's own instructions to the assistant", () => {
     // caption already says the same thing.
     expect(target.querySelector('.ui-settings-error')).toBeNull()
     expect(save).toHaveBeenCalled()
+  })
+  it('shows the full static nocx prompt above personal instructions with pane placeholders', async () => {
+    const area = await openInstructions()
+    const prompt = target.querySelector<HTMLElement>('.ui-code-block')
+    const heading = Array.from(target.querySelectorAll('h2')).find(
+      (element) => element.textContent === 'What the person added',
+    )
+    const row = document.getElementById('st-setting-assistant.personalInstructions')
+    expect(prompt).toBeTruthy()
+    expect(prompt!.getAttribute('aria-label')).toBe('nocx system prompt')
+    expect(prompt!.getAttribute('tabindex')).toBe('0')
+    expect(prompt!.textContent).toContain('<session id>')
+    expect(prompt!.textContent).toContain('<working directory>')
+    expect(prompt!.textContent).toContain('<local shell or ssh session>')
+    expect(prompt!.textContent).toContain('<host or local machine>')
+    expect(prompt!.textContent).toContain('<attached or absent>')
+    expect(prompt!.textContent).not.toContain('s-real-session')
+    expect(prompt!.textContent).not.toContain('/home/real-user/project')
+    expect(prompt!.textContent).not.toContain('real-host.example')
+    expect(prompt!.textContent).not.toContain('What the person added')
+    expect(row).toBeTruthy()
+    expect(heading).toBeTruthy()
+    expect(row!.textContent).toContain('Your instructions to the assistant')
+    expect(prompt!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(prompt!.compareDocumentPosition(heading!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(heading!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(prompt!.compareDocumentPosition(area) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps the long prompt in the kit scroll container so the personal field remains reachable', async () => {
+    await openInstructions()
+    const wrap = target.querySelector<HTMLElement>('.ui-code-block-wrap')
+    const prompt = target.querySelector<HTMLElement>('.ui-code-block')
+    const row = document.getElementById('st-setting-assistant.personalInstructions')
+
+    expect(wrap).toBeTruthy()
+    expect(prompt).toBeTruthy()
+    expect(prompt!.parentElement).toBe(wrap)
+    expect(prompt!.getAttribute('tabindex')).toBe('0')
+    expect(row).toBeTruthy()
+    expect(prompt!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const codeBlockCss = readFileSync(
+      resolve(import.meta.dirname ?? '.', 'styles/components/code-block.css'),
+      'utf8',
+    )
+    expect(codeBlockCss).toMatch(
+      /\.ui-code-block\s*\{[\s\S]*max-height:\s*200px;[\s\S]*overflow:\s*auto;/,
+    )
   })
 })

@@ -79,14 +79,20 @@ import {
   type GroupedRailItem,
   IconButton,
   StatusCard,
+  CodeBlock,
+  Section,
 } from './ui'
 import { ResetIcon } from './ui/icons'
+import { systemPromptText } from './systemprompt'
 import {
   historyDiscardSentence,
   historyUnavailableSentence,
   type HistoryStatus,
   type HistoryStatusStore,
 } from './history-status'
+
+/** The generated settings page that explains the standing prompt. */
+const INSTRUCTIONS_SECTION = 'Instructions'
 
 /** The section whose controls the history degrade contradicts. It is the
  *  Go-declared section string (internal/settings/settings.go), matched here
@@ -1292,6 +1298,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
                     title={section}
                     divided
                   >
+                    {/* The prompt artifact is generated from the Go renderer and
+                        contains placeholders instead of any focused pane facts.
+                        CodeBlock owns the fixed scroll cap, so this long
+                        read-only text cannot push the person's field away. */}
+                    <Show when={section === INSTRUCTIONS_SECTION}>
+                      <CodeBlock ariaLabel="nocx system prompt">{systemPromptText}</CodeBlock>
+                    </Show>
                     {/* The degrade notice, above the controls it
                         contradicts. A kit StatusCard, placed and never
                         repainted: a state plus what to do about it is
@@ -1320,9 +1333,20 @@ export function SettingsComponent(props: SettingsComponentProps) {
                         description={discardNotice()!.description}
                       />
                     </Show>
-                    <For each={sectionDecls()}>
-                      {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
-                    </For>
+                    <Show
+                      when={section === INSTRUCTIONS_SECTION}
+                      fallback={
+                        <For each={sectionDecls()}>
+                          {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                        </For>
+                      }
+                    >
+                      <Section title="What the person added" divided>
+                        <For each={sectionDecls()}>
+                          {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
+                        </For>
+                      </Section>
+                    </Show>
                   </PageSection>
                 )
               }}
