@@ -827,6 +827,8 @@ export interface RunningBlockActions {
   ask(): void
   /** Stop it, through the backend's escalation ladder. */
   stop(): void
+  /** Attach all output rows through the host's single chip seam. */
+  attachOutput?(blockEl: HTMLElement, rowStart: number, rowEnd: number): void
 }
 
 function buildOverflowMenu(
@@ -981,6 +983,20 @@ function buildOverflowMenu(
       })
     })
 
+
+    if (!blockEl.classList.contains('cmd-block-running') && running?.attachOutput) {
+      const attach = document.createElement('button')
+      attach.className = 'cmd-overflow-menu-item'
+      attach.dataset.action = 'attach-output'
+      attach.textContent = 'Attach output'
+      attach.addEventListener('click', (ev) => {
+        ev.stopPropagation()
+        const rowEnd = blockEl.querySelectorAll('.cmd-output .term-line').length
+        if (rowEnd > 0) running.attachOutput?.(blockEl, 0, rowEnd)
+        closeMenu()
+      })
+      menu.appendChild(attach)
+    }
     // Wrap is a per-block override of the kind's default, and it lives here
     // rather than as a control on the block because it is rare: the kind is
     // right nearly always (a command's grid must not re-wrap — nocx-juau —
@@ -1210,6 +1226,7 @@ export function createCommandBlock(
   // accept. A call site that forgets it must not compile.
   author: CommandAuthor,
   answerText?: AnswerTextSource,
+  menuActions?: RunningBlockActions,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -1262,7 +1279,7 @@ export function createCommandBlock(
     // Overflow menu (P2-9) — always the LAST element of the header-right
     // group (owner directive: ⋮ never shifts position). It reads the block's
     // copyable text from the BLOCK, at click time (nocx-ex636).
-    const overflow = buildOverflowMenu(wrapper, command, answerText)
+    const overflow = buildOverflowMenu(wrapper, command, answerText, menuActions)
     const right = header.querySelector('.cmd-header-right')
     if (right) right.appendChild(overflow)
     wrapper.appendChild(header)
@@ -1402,6 +1419,7 @@ export function freezeBlock(
   store: CommandSnapshotStore,
   status: 'success' | 'failure' | 'entered' | 'unknown',
   author: CommandAuthor = 'shell',
+  menuActions?: RunningBlockActions,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -1417,6 +1435,8 @@ export function freezeBlock(
     onSelect,
     store,
     author,
+    undefined,
+    menuActions,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -2021,6 +2041,7 @@ export class BlockManager {
       this._snapshotStore,
       status,
       rec.author,
+      this._runningActions,
     )
 
     this._reown(rec.el, newEl)
@@ -2264,6 +2285,7 @@ export class BlockManager {
       // that matters here: an answer block's copy reads the ledger.
       'shell',
       this._answerText,
+      this._runningActions,
     )
     // WHERE THE TURN'S CHILDREN GO. Its own element, under the header, so the
     // children are addressable as a list and the header stays exactly one

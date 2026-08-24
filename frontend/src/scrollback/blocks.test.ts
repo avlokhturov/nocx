@@ -3344,4 +3344,62 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
       el.remove()
     }
   })
+  it('offers Attach output for the rendered output span and delegates the chip action', () => {
+    const container = document.createElement('div')
+    const attachOutput = vi.fn()
+    const el = createCommandBlock(
+      'command',
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      '<span class="term-line">12K\t/</span><span class="term-line">second row</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      { ask: vi.fn(), stop: vi.fn(), attachOutput },
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      const attach = named(items, 'attach-output')
+      expect(attach?.textContent).toBe('Attach output')
+      attach?.click()
+      expect(attachOutput).toHaveBeenCalledWith(el, 0, 2)
+    } finally {
+      el.remove()
+    }
+    const answerAttachOutput = vi.fn()
+    const answer = createCommandBlock(
+      'ask',
+      2,
+      'What happened?',
+      '~',
+      '',
+      '<span class="term-line">answer row</span><span class="term-line">second answer row</span>',
+      null,
+      null,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      { ask: vi.fn(), stop: vi.fn(), attachOutput: answerAttachOutput },
+    )
+    document.body.append(answer)
+    try {
+      const answerAttach = named(menuItems(answer), 'attach-output')
+      expect(answerAttach?.textContent).toBe('Attach output')
+      answerAttach?.click()
+      expect(answerAttachOutput).toHaveBeenCalledWith(answer, 0, 2)
+    } finally {
+      answer.remove()
+    }
+  })
 })

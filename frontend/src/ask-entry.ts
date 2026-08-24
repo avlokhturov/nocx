@@ -30,8 +30,6 @@ export interface ReferenceChip {
    *  chip's scope. Never re-derived from DOM selection at submit time
    *  (AD-8: selection is copy; the chip is the mode's record). */
   readonly blockEl: HTMLElement
-  /** The chip's name: the block's command and the covered row range. */
-  readonly label: string
   /** First covered term-line index, inclusive, 0-based. */
   readonly rowStart: number
   /** One past the last covered term-line index, exclusive. */
@@ -57,7 +55,7 @@ function chipSourceOf(node: Node | null): HTMLElement | null {
  *  them. */
 export function chipFromSelection(
   sel: Selection | null,
-): Omit<ReferenceChip, 'id' | 'label'> | null {
+): Omit<ReferenceChip, 'id'> | null {
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
   const range = sel.getRangeAt(0)
   const startOutput = chipSourceOf(range.startContainer)
@@ -94,17 +92,6 @@ export function chipFingerprint(
   return `${chip.blockEl.dataset.blockId ?? 'block'}:${chip.rowStart}:${chip.rowEnd}`
 }
 
-/** The chip's name: the block's command and the covered row range — the
- *  block names itself, the rows say what part is frozen. Derived HERE, in
- *  the one minting seam, so every chip in the product is named by the same
- *  function (the label becomes the region's text in a later bead; this is
- *  where that change lands once). */
-function referenceChipLabel(blockEl: HTMLElement, rowStart: number, rowEnd: number): string {
-  const header = blockEl.querySelector<HTMLElement>('.cmd-header-text')
-  const name = header?.textContent?.trim() || 'block'
-  const rows = rowEnd - rowStart === 1 ? `row ${rowStart + 1}` : `rows ${rowStart + 1}–${rowEnd}`
-  return `${name} · ${rows}`
-}
 
 /** Monotonic chip id source — ids are for dismissal and dedupe, never for
  *  anything the backend sees. Owned here so attachRegion can mint the whole
@@ -113,10 +100,9 @@ let chipSeq = 0
 
 /** Mint a reference chip for a region of a finished block — the ONE seam
  *  every chip in the product goes through (nocx-a7mw7.1, design Risks):
- *  the selection affordance today, the block menu's Attach output and the
- *  attach chord in later beads all call this, and no other path mints a
- *  chip. The label and the identity are both derived here; the caller
- *  supplies only the frozen region. */
+ *  the selection affordance, the block menu's Attach output and the attach
+ *  chord all call this, and no other path mints a chip. The caller supplies
+ *  only the frozen region; the block marks and counter provide presentation. */
 export function attachRegion(
   blockEl: HTMLElement,
   rowStart: number,
@@ -127,7 +113,6 @@ export function attachRegion(
     blockEl,
     rowStart,
     rowEnd,
-    label: referenceChipLabel(blockEl, rowStart, rowEnd),
   }
 }
 

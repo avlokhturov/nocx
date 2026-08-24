@@ -75,7 +75,6 @@ function chipOf(block: HTMLElement, rowStart: number, rowEnd: number): Reference
   return {
     id: `chip-${++chipSeq}`,
     blockEl: block,
-    label: `ls · rows ${rowStart + 1}–${rowEnd}`,
     rowStart,
     rowEnd,
   }

@@ -4508,13 +4508,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
-  /** The reference chip strip inside the editor. */
-  function chipStripOf(ed: CommandEditor): HTMLElement {
-    return ed.root.querySelector<HTMLElement>('.nocx-editor-references')!
-  }
-
-  function chipsIn(ed: CommandEditor): HTMLElement[] {
-    return Array.from(chipStripOf(ed).querySelectorAll<HTMLElement>('.nocx-editor-reference-chip'))
+  /** The single attachment counter inside the editor chrome. */
+  function attachmentCount(ed: CommandEditor): number {
+    const counter = ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')
+    if (!counter || counter.style.display === 'none') return 0
+    return Number(counter.querySelector('.nocx-editor-reference-count__value')?.textContent?.match(/\d+/)?.[0] ?? 0)
   }
 
   /** Dispatch a submit key exactly where a person's keystroke lands. */
@@ -4547,7 +4545,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     const last = lines[end - 1]
     const range = document.createRange()
     range.setStart(first.firstChild ?? first, 0)
-    range.setEnd(last.lastChild ?? last, (last.textContent ?? '').length)
+    const textNode = Array.from(last.childNodes).find((node) => node.nodeType === Node.TEXT_NODE)
+    range.setEnd(textNode ?? last, textNode ? textNode.textContent?.length ?? 0 : last.childNodes.length)
     range.getClientRects = () =>
       Array.from(
         { length: end - start },
@@ -4824,7 +4823,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The selection made an OFFER, not a chip: nothing is in the input
       // line — copying output attaches nothing (the complaint the bead
       // exists to end) — and the Attach button floats instead.
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
       const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')
       expect(wrap).not.toBeNull()
       expect(wrap!.style.display).not.toBe('none')
@@ -4842,7 +4841,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // copy-on-select outright would pass this test — there would be no copy
       // left to attach anything.
       expect(clipboard.writeText).toHaveBeenCalled()
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
 
       // The offer changed NOTHING else: the active target is untouched and
       // the indicator still says Run.
@@ -4865,10 +4864,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       // Pressing Attach freezes the offered region into exactly one chip.
       pressAttach()
-      const chips = chipsIn(ed)
-      expect(chips).toHaveLength(1)
-      expect(chips[0].textContent).toContain('ls')
-      expect(chips[0].textContent).toContain('rows 1–2')
+      expect(attachmentCount(ed)).toBe(1)
       // The press put the affordance away (the offer is spent).
       expect(attachOfferVisible()).toBe(false)
     } finally {
@@ -4892,19 +4888,124 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       // The three intermediate selections a real drag fires: 1–1, 1–2,
       // 1–3. Each moves the OFFER; none of them mints a chip.
       selectRows(block, 0, 1)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
       expect(attachOfferVisible()).toBe(true)
       selectRows(block, 0, 2)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
       selectRows(block, 0, 3)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
 
       // One press on the final selection raises exactly ONE chip, covering
       // the whole drag — the three intermediate selections never stacked.
       pressAttach()
-      expect(chipsIn(ed)).toHaveLength(1)
-      expect(chipsIn(ed)[0].textContent).toContain('rows 1–3')
+      expect(attachmentCount(ed)).toBe(1)
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Attach output in the block menu attaches every rendered term-line', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
+      block.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+      const item = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+      ).find((button) => button.dataset.action === 'attach-output')
+      expect(item?.textContent).toBe('Attach output')
+      item?.click()
+      expect(attachmentCount(ed)).toBe(1)
+      expect(block.querySelectorAll('.term-line[data-attached]').length).toBe(3)
+      expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Ctrl+Shift+A attaches the current selection without summoning or moving the target', async () => {
+    const { client, dispatcherCalls } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 2)
+      const event = new KeyboardEvent('keydown', {
+        key: 'a',
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      document.dispatchEvent(event)
+      expect(event.defaultPrevented).toBe(true)
+      expect(attachmentCount(ed)).toBe(1)
+      expect(activeLabel(content)).toBe('Shell')
+      expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('shows one counter beside cwd, marks covered rows, and dismisses from the mark', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
+      selectRows(block, 1, 3)
+      pressAttach()
+      const lines = Array.from(block.querySelectorAll<HTMLElement>('.term-line'))
+      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, 'true', 'true'])
+      const counter = ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')
+      expect(counter?.querySelector('.nocx-editor-reference-count__value')?.textContent).toBe(
+        '1 attachment',
+      )
+      expect(counter?.closest('.nocx-editor-chrome-left')).not.toBeNull()
+      expect(
+        counter?.closest<HTMLElement>('.nocx-editor-chrome-left')?.querySelector('.nocx-editor-cwd'),
+      ).not.toBeNull()
+      expect(ed.root.querySelectorAll('.nocx-editor-reference-count')).toHaveLength(1)
+      const counterButton = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-reference-count')!
+      const firstAttached = lines[1]
+      const scrollIntoView = vi.fn()
+      firstAttached.scrollIntoView = scrollIntoView
+      counterButton.click()
+      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center', behavior: 'smooth' })
+      expect(firstAttached.classList.contains('term-line-attachment-flash')).toBe(true)
+      counterButton
+        .querySelector<HTMLButtonElement>('.nocx-editor-reference-count__drop')!
+        .click()
+      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, undefined, undefined])
+      selectRows(block, 1, 3)
+      pressAttach()
+      const mark = lines[1].querySelector<HTMLElement>('.term-line-attachment-mark')
+      expect(mark).not.toBeNull()
+      mark?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, undefined, undefined])
+      expect(ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')?.style.display).toBe(
+        'none',
+      )
     } finally {
       teardown()
     }
@@ -4925,14 +5026,14 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
       selectRows(block, 0, 2)
       pressAttach()
-      expect(chipsIn(ed)).toHaveLength(1)
+      expect(attachmentCount(ed)).toBe(1)
       // The press spent the offer; re-selecting the IDENTICAL region
       // re-offers, and pressing again must not stack a second chip.
       expect(attachOfferVisible()).toBe(false)
       selectRows(block, 0, 2)
       expect(attachOfferVisible()).toBe(true)
       pressAttach()
-      expect(chipsIn(ed)).toHaveLength(1)
+      expect(attachmentCount(ed)).toBe(1)
       expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
     } finally {
       teardown()
@@ -4965,7 +5066,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       btn.dispatchEvent(md)
       expect(md.defaultPrevented).toBe(true)
       btn.click()
-      expect(chipsIn(ed)).toHaveLength(1)
+      expect(attachmentCount(ed)).toBe(1)
 
       // The selection survived the press — same anchor, same focus, same
       // text. Attaching touched nothing.
@@ -5002,7 +5103,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       sel.removeAllRanges()
       document.dispatchEvent(new Event('selectionchange'))
       expect(attachOfferVisible()).toBe(false)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
 
       // A selection crossing two blocks has no single frame: no offer.
       const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
@@ -5036,7 +5137,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       sel.addRange(runningRange)
       document.dispatchEvent(new Event('selectionchange'))
       expect(attachOfferVisible()).toBe(false)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
     } finally {
       teardown()
     }
@@ -5091,7 +5192,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       pressAttach()
       selectRows(blockB, 0, 1)
       pressAttach()
-      expect(chipsIn(ed)).toHaveLength(2)
+      expect(attachmentCount(ed)).toBe(2)
 
       const sentBefore = sessionOf(content).send.mock.calls.length
       typeAndAsk(ed, content, 'how are these related?')
@@ -5122,7 +5223,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ])
       // Nothing shell ran; the chips were consumed by the question.
       expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore)
-      expect(chipsIn(ed)).toHaveLength(0)
+      expect(attachmentCount(ed)).toBe(0)
     } finally {
       teardown()
     }
@@ -5146,9 +5247,10 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       pressAttach()
       selectRows(blockB, 0, 1)
       pressAttach()
-      const [chipA] = chipsIn(ed)
-      chipA.querySelector<HTMLButtonElement>('.nocx-editor-reference-chip__drop')?.click()
-      expect(chipsIn(ed)).toHaveLength(1)
+      blockA
+        .querySelector<HTMLElement>('.term-line-attachment-mark')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
+      expect(attachmentCount(ed)).toBe(1)
 
       typeAndAsk(ed, content, 'what is left?')
       await vi.waitFor(() => {

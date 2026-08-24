@@ -1313,6 +1313,8 @@ export class TerminalContent extends BasePaneContent {
         runningActions: {
           ask: () => void this.summonEditor(),
           stop: () => this.signalActiveCommand('stop'),
+          attachOutput: (blockEl, rowStart, rowEnd) =>
+            this.applyAttachedRegion(blockEl, rowStart, rowEnd),
         },
       })
 
@@ -1758,10 +1760,9 @@ export class TerminalContent extends BasePaneContent {
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
           onToggleTarget: () => this.toggleInputTarget(),
-          onDismissChip: (id) => {
-            this.referenceChips = this.referenceChips.filter((c) => c.id !== id)
-            this.editor?.setReferenceChips(this.referenceChips)
-          },
+          onDismissChip: (id) => this.dismissReferenceChip(id),
+          onDismissAllChips: () => this.clearReferenceChips(),
+          onRevealChip: (id) => this.revealReferenceChip(id),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -2279,6 +2280,17 @@ export class TerminalContent extends BasePaneContent {
       this._globalKeydown = (e: KeyboardEvent) => {
         // Read the flag the chrome set, not the class it rendered (nocx-fttm).
         if (!target.isConnected || !this._active) return
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          e.shiftKey &&
+          !e.altKey &&
+          e.key.toLowerCase() === 'a' &&
+          this.attachCurrentSelection()
+        ) {
+          e.preventDefault()
+          e.stopPropagation()
+          return
+        }
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault()
@@ -4197,6 +4209,19 @@ export class TerminalContent extends BasePaneContent {
     this.attachAffordance?.show(last)
   }
 
+  /** Attach the current finished-block selection for Ctrl/Cmd+Shift+A. */
+  private attachCurrentSelection(): boolean {
+    const sel = window.getSelection()
+    if (!sel || sel.isCollapsed) return false
+    const anchor = sel.anchorNode
+    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return false
+    const chip = chipFromSelection(sel)
+    if (!chip || !this.scrollback?.scrollbackInner.contains(chip.blockEl)) return false
+    this.applyAttachedRegion(chip.blockEl, chip.rowStart, chip.rowEnd)
+    this.hideAttachOffer()
+    return true
+  }
+
   /** Put the affordance away and forget the offer — a collapse, a
    *  non-satisfying selection, or a press. */
   private hideAttachOffer(): void {
@@ -4222,20 +4247,76 @@ export class TerminalContent extends BasePaneContent {
    *  Every chip in the product reaches the line through this method — the
    *  block menu's Attach output and the attach chord arrive in later beads
    *  and call the same seam. */
+  /** Repaint the block marks from the chip list — the one owner of attachment
+   *  presentation. A block may be rebuilt for a wrap or restore event, so
+   *  marks are always derived from the frozen regions, never toggled by a
+   *  caller-side DOM mutation. */
+  private repaintAttachmentMarks(): void {
+    const inner = this.scrollback?.scrollbackInner
+    if (!inner) return
+    inner.querySelectorAll<HTMLElement>('.term-line').forEach((line) => {
+      delete line.dataset.attached
+      line.querySelectorAll('.term-line-attachment-mark').forEach((mark) => mark.remove())
+    })
+    for (const chip of this.referenceChips) {
+      const lines = Array.from(chip.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
+        chip.rowStart,
+        chip.rowEnd,
+      )
+      for (const line of lines) {
+        line.dataset.attached = 'true'
+        const mark = document.createElement('button')
+        mark.type = 'button'
+        mark.className = 'term-line-attachment-mark'
+        mark.dataset.chipId = chip.id
+        mark.setAttribute('aria-label', 'remove attached output')
+        mark.addEventListener('click', (event) => {
+          event.stopPropagation()
+          this.dismissReferenceChip(chip.id)
+        })
+        mark.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          event.stopPropagation()
+          this.dismissReferenceChip(chip.id)
+        })
+        line.appendChild(mark)
+      }
+    }
+  }
+
+  private dismissReferenceChip(id: string): void {
+    this.referenceChips = this.referenceChips.filter((chip) => chip.id !== id)
+    this.editor?.setReferenceChips(this.referenceChips)
+    this.repaintAttachmentMarks()
+  }
+
+  private revealReferenceChip(id: string): void {
+    const chip = this.referenceChips.find((candidate) => candidate.id === id)
+    if (!chip) return
+    const line = chip.blockEl.querySelectorAll<HTMLElement>('.term-line')[chip.rowStart]
+    if (!line) return
+    line.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
+    line.classList.remove('term-line-attachment-flash')
+    void line.offsetWidth
+    line.classList.add('term-line-attachment-flash')
+  }
+
   private applyAttachedRegion(blockEl: HTMLElement, rowStart: number, rowEnd: number): void {
     const chip = attachRegion(blockEl, rowStart, rowEnd)
     const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
     if (existing) return
     this.referenceChips = [...this.referenceChips, chip]
     this.editor?.setReferenceChips(this.referenceChips)
+    this.repaintAttachmentMarks()
   }
 
   /** Drop every reference chip: a question sent to Ask consumed them, or
-   *  a `clear` took their blocks. The editor's strip follows. */
+   *  a `clear` took their blocks. The block marks and counter follow it. */
   private clearReferenceChips(): void {
-    if (this.referenceChips.length === 0) return
     this.referenceChips = []
     this.editor?.clearReferenceChips()
+    this.repaintAttachmentMarks()
   }
 
   dispose(): void {
