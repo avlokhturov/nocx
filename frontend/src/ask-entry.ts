@@ -99,7 +99,7 @@ export function chipFingerprint(
  *  the one minting seam, so every chip in the product is named by the same
  *  function (the label becomes the region's text in a later bead; this is
  *  where that change lands once). */
-export function referenceChipLabel(blockEl: HTMLElement, rowStart: number, rowEnd: number): string {
+function referenceChipLabel(blockEl: HTMLElement, rowStart: number, rowEnd: number): string {
   const header = blockEl.querySelector<HTMLElement>('.cmd-header-text')
   const name = header?.textContent?.trim() || 'block'
   const rows =

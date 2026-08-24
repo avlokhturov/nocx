@@ -28,7 +28,7 @@ import {
 export const SELECTION_GAP_PX = 4
 
 /** The wrapper's identity — the surface's element, placed by the surface. */
-export const WRAPPER_CLASS = 'attach-affordance'
+const WRAPPER_CLASS = 'attach-affordance'
 
 /** A selection's last client rect, in viewport coordinates. */
 export interface AnchorRect {

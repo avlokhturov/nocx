@@ -4837,6 +4837,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       scrollbackOf(content).scrollbackArea.dispatchEvent(
         new MouseEvent('mouseup', { bubbles: true }),
       )
+      // BOTH halves, or this asserts nothing: the copy REACHED the clipboard,
+      // and it attached nothing. Without the first, a change that broke
+      // copy-on-select outright would pass this test — there would be no copy
+      // left to attach anything.
+      expect(clipboard.writeText).toHaveBeenCalled()
       expect(chipsIn(ed)).toHaveLength(0)
 
       // The offer changed NOTHING else: the active target is untouched and
