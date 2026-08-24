@@ -204,6 +204,33 @@
   margin-left: auto;
 }
 
+.nocx-editor-reference-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-text-muted);
+  font: inherit;
+}
+
+.nocx-editor-reference-count__value,
+.nocx-editor-reference-count__drop {
+  border: 0;
+  padding: 1px 4px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.nocx-editor-reference-count__value:hover,
+.nocx-editor-reference-count__drop:hover {
+  color: var(--color-text);
+}
+
+.nocx-editor-reference-count__drop:hover {
+  color: var(--color-danger);
+}
+
 /* ── Chip ────────────────────────────────────────────────────────────── */
 
 .nocx-chip {
@@ -459,35 +486,6 @@
   display: flex;
   align-items: center;
   padding: 0 6px 0 0;
-}
-
-.nocx-editor-references {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.nocx-editor-reference-chip {
-  padding: 1px 6px;
-  font-size: var(--font-size-2xs);
-  color: var(--color-text-muted);
-}
-
-.nocx-editor-reference-chip__drop {
-  background: none;
-  border: none;
-  margin: 0;
-  padding: 0 0 0 5px;
-  font: inherit;
-  line-height: 1;
-  color: var(--color-text-dim);
-  cursor: pointer;
-}
-
-.nocx-editor-reference-chip__drop:hover {
-  color: var(--color-danger);
 }
 
 /* ── The composition-time secret candidate mark (ADR-0021) ─────────────
@@ -1059,6 +1057,46 @@
      block — old or new — adopts the current geometry, deliberately (see
      cell-metric.ts). */
   letter-spacing: var(--term-cell-delta, 0px);
+}
+
+.term-line[data-attached] {
+  position: relative;
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-accent), transparent 35%);
+}
+
+.term-line-attachment-mark {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 10px;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.term-line-attachment-mark:focus-visible {
+  outline: 1px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.term-line-attachment-flash {
+  animation: term-line-attachment-flash 700ms ease-out;
+}
+
+@keyframes term-line-attachment-flash {
+  from {
+    background: color-mix(in srgb, var(--color-accent), transparent 72%);
+  }
+  to {
+    background: color-mix(in srgb, var(--color-accent), transparent 94%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .term-line-attachment-flash {
+    animation: none;
+  }
 }
 
 /* The ask kind's body (nocx-ex636): prose from a model wraps at the

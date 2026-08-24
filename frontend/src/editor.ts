@@ -164,16 +164,19 @@ export interface EditorActions {
   /** A reference chip's drop control: the host removes that chip (the
    *  chip is data the host owns; this only reports the dismissal). */
   onDismissChip?: (id: string) => void
+  /** The counter's close control removes every attached region. */
+  onDismissAllChips?: () => void
+  /** The counter's main control reveals the first attached region. */
+  onRevealChip?: (id: string) => void
 }
 
 export class CommandEditor {
   readonly root: HTMLElement
-  private view: EditorView
   private chrome: HTMLElement
-  /** The reference chip strip (nocx-4wtlh): the chips a selection raises,
-   *  rendered between the chrome row and the input. The chips are DATA the
-   *  host owns; this container is their surface. Hidden while empty. */
-  private referencesEl: HTMLElement
+  private view: EditorView
+
+  /** The single attachment counter in the chrome row. */
+  private referenceCount: HTMLElement
   /** Left chip group: the location + cwd chips sit together, the clock
    *  keeps the right edge of the chrome row. */
   private chromeLeft: HTMLElement
@@ -340,6 +343,31 @@ export class CommandEditor {
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
+    this.referenceCount = document.createElement('span')
+    this.referenceCount.className = 'nocx-editor-reference-count'
+    this.referenceCount.style.display = 'none'
+    this.referenceCount.setAttribute('role', 'group')
+    const revealFirst = () => {
+      const first = this.referenceCount.dataset.firstChipId
+      if (first) this.actions.onRevealChip?.(first)
+    }
+    this.referenceCount.addEventListener('click', (event) => {
+      if (event.target === this.referenceCount) revealFirst()
+    })
+    const referenceCountValue = document.createElement('button')
+    referenceCountValue.type = 'button'
+    referenceCountValue.className = 'nocx-editor-reference-count__value'
+    referenceCountValue.addEventListener('click', revealFirst)
+    const referenceCountDrop = document.createElement('button')
+    referenceCountDrop.type = 'button'
+    referenceCountDrop.className = 'nocx-editor-reference-count__drop'
+    referenceCountDrop.textContent = '×'
+    referenceCountDrop.setAttribute('aria-label', 'remove all attachments')
+    referenceCountDrop.addEventListener('click', (event) => {
+      event.stopPropagation()
+      this.actions.onDismissAllChips?.()
+    })
+    this.referenceCount.append(referenceCountValue, referenceCountDrop)
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
 
@@ -375,21 +403,12 @@ export class CommandEditor {
       this.recoveryChip,
       this.locationChip,
       this.cwdChip,
+      this.referenceCount,
       this.modelEndpointChip,
       this.modelChip,
     )
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
-
-    // ── Reference chip strip (nocx-4wtlh) ─────────────────────────────
-    // Between the chrome and the input: part of the input surface, never
-    // floating over it. Rendered by setReferenceChips; the host owns the
-    // chips' lifecycle (selection raises them, a question consumes them,
-    // a cleared scrollback takes their blocks).
-    this.referencesEl = document.createElement('div')
-    this.referencesEl.className = 'nocx-editor-references'
-    this.referencesEl.style.display = 'none'
-    this.root.appendChild(this.referencesEl)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -1145,34 +1164,21 @@ export class CommandEditor {
     return this.root.contains(el)
   }
 
-  /** Render the reference chips the host owns (nocx-4wtlh). Each chip is
-   *  the kit's nocx-chip identity with a drop control; the strip hides
-   *  itself when empty. The host re-renders on every add/remove — the
-   *  chips are a short list and the strip is their only surface. */
-  setReferenceChips(chips: ReadonlyArray<{ id: string; label: string }>): void {
-    this.referencesEl.replaceChildren()
+  /** Render the one attachment counter in the chrome row. The blocks carry
+   *  the marks; this row carries only how many references are pending and
+   *  where to reveal the first one. */
+  setReferenceChips(chips: ReadonlyArray<{ id: string }>): void {
     if (chips.length === 0) {
-      this.referencesEl.style.display = 'none'
+      this.referenceCount.style.display = 'none'
+      delete this.referenceCount.dataset.firstChipId
       return
     }
-    this.referencesEl.style.display = ''
-    for (const chip of chips) {
-      const el = document.createElement('span')
-      el.className = 'nocx-chip nocx-editor-reference-chip'
-      el.dataset.chipId = chip.id
-      el.title = chip.label
-      const name = document.createElement('span')
-      name.className = 'nocx-editor-reference-chip__name'
-      name.textContent = chip.label
-      const drop = document.createElement('button')
-      drop.type = 'button'
-      drop.className = 'nocx-editor-reference-chip__drop'
-      drop.textContent = '×'
-      drop.setAttribute('aria-label', `remove reference ${chip.label}`)
-      drop.addEventListener('click', () => this.actions.onDismissChip?.(chip.id))
-      el.append(name, drop)
-      this.referencesEl.appendChild(el)
-    }
+    this.referenceCount.style.display = ''
+    this.referenceCount.dataset.firstChipId = chips[0].id
+    const value = this.referenceCount.querySelector<HTMLButtonElement>(
+      '.nocx-editor-reference-count__value',
+    )
+    if (value) value.textContent = `${chips.length} attachment${chips.length === 1 ? '' : 's'}`
   }
 
   /** Drop every reference chip (the host consumed them — a question

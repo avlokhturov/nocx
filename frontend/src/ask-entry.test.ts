@@ -55,22 +55,20 @@ function select(block: HTMLElement, start: number, end: number): Selection {
 }
 
 describe('attachRegion — the ONE chip-minting seam', () => {
-  it('freezes a region into a chip: the block, the row span, and the coordinate label', () => {
+  it('freezes a region into a chip with only its frozen coordinates', () => {
     const block = blockOf('ls', ['total 12', 'docs', 'orca'])
     const chip = attachRegion(block, 1, 3)
     expect(chip.blockEl).toBe(block)
     expect(chip.rowStart).toBe(1)
     expect(chip.rowEnd).toBe(3)
-    // The chip names the block and the rows — the old label contract,
-    // produced here so every chip is named the same way (the label becomes
-    // the region's text in a later bead; the seam is where it changes).
-    expect(chip.label).toBe('ls · rows 2–3')
+    expect('label' in chip).toBe(false)
   })
 
-  it('names a single row in the singular and a range in the plural', () => {
+  it('keeps a single-row region as a one-row span', () => {
     const block = blockOf('git log', ['commit abc'])
-    expect(attachRegion(block, 0, 1).label).toBe('git log · row 1')
-    expect(attachRegion(block, 0, 1).rowEnd).toBe(1)
+    const chip = attachRegion(block, 0, 1)
+    expect(chip.rowStart).toBe(0)
+    expect(chip.rowEnd).toBe(1)
   })
 
   it('gives every chip a stable identity — two attachments are two chips, never one', () => {
