@@ -2428,7 +2428,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 1,
           maskedKinds: ['openai'],
           entryId: 'e-ggha',
-          author: 'shell',
+          source: 'user',
           redactions: [],
           maskedCommand: 'echo sk-***',
           captures: [
@@ -2521,7 +2521,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
-          author: 'shell',
+          source: 'user',
           redactions: [],
           captures: [],
           maskedCommand: 'make',
@@ -2616,7 +2616,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
-          author: 'agent',
+          source: 'assistant',
           redactions: [],
           captures: [],
           maskedCommand: 'make',
@@ -2729,7 +2729,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: '',
-          author: 'agent',
+          source: 'assistant',
           redactions: [],
           captures: [],
           maskedCommand: 'make',
@@ -2905,7 +2905,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedCount: 0,
           maskedKinds: [],
           entryId: 'e1',
-          author: 'shell',
+          source: 'user',
           redactions: [],
           captures: [],
           maskedCommand: 'echo hello',
@@ -5663,9 +5663,9 @@ describe('a frozen block sends what it printed (nocx-2f0f)', () => {
           maskedKinds: [],
           entryId: 'e-capture',
           // Required by the contract, and load-bearing: the renderer refuses
-          // an ack whose author is not the one it minted (design §3.1), so a
+          // an ack whose source is not the one it minted (design §3.1), so a
           // fixture without it is a backend that dropped the fact.
-          author: 'shell',
+          source: 'user',
           redactions: [],
           maskedCommand: 'echo hello',
           captures: [],
@@ -5967,9 +5967,15 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     // dangling one all land here, and the answer is the ledger's own order
     // with the assistant's command drawn as an independent agent block. It
     // is never attached to the turn that happens to sit above it.
-    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'ask', intent: 'what went wrong?' })
     const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
-    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
+    const ranByAgent = entry({
+      id: 'cmd-1',
+      seq: 3,
+      kind: 'shell',
+      source: 'assistant',
+      intent: 'cat -n a.txt',
+    })
     const client = makeClient()
     client.call.mockImplementation((method: string, params?: unknown) => {
       if (method === 'ledger.query') {
@@ -6020,9 +6026,15 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     // assistant ran is seated INSIDE its turn at the stored position, and
     // a command the person typed keeps its ledger place outside. Nothing
     // is reordered that the relation does not name.
-    const turn = entry({ id: 'turn-1', seq: 1, kind: 'agent', intent: 'what went wrong?' })
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'ask', intent: 'what went wrong?' })
     const typed = entry({ id: 'typed-1', seq: 2, intent: 'git status' })
-    const ranByAgent = entry({ id: 'cmd-1', seq: 3, kind: 'agent', intent: 'cat -n a.txt' })
+    const ranByAgent = entry({
+      id: 'cmd-1',
+      seq: 3,
+      kind: 'shell',
+      source: 'assistant',
+      intent: 'cat -n a.txt',
+    })
     const client = makeClient()
     client.call.mockImplementation((method: string, params?: unknown) => {
       if (method === 'ledger.query') {
@@ -6051,6 +6063,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
                 entryId: 'txt-1',
                 position: 0,
                 kind: 'text',
+                source: 'assistant',
                 intent: '',
                 args: null,
                 effect: null,
@@ -6061,6 +6074,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
                 entryId: 'cmd-1',
                 position: 1,
                 kind: 'shell',
+                source: 'assistant',
                 intent: 'cat -n a.txt',
                 args: null,
                 effect: null,

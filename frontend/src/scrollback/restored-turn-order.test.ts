@@ -28,7 +28,7 @@
 import { describe, it, expect } from 'vitest'
 import { BlockManager } from './blocks'
 import { restoredBlock, restoredTurn } from './restored-block'
-import { arrangedByCause, type RestorableBlock } from '../restore-client'
+import { arrangedByCause, blocksForPane, type RestorableBlock } from '../restore-client'
 import type { Caused } from '../generated/ledger.get'
 import { DEFAULT_SNAPSHOT } from './serializer'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -140,15 +140,16 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     // typed something in this pane while the assistant was working.
     // arrangedByCause puts it back where it belongs; nothing else moves.
     const page: RestorableBlock[] = [
-      block('turn-1', QUESTION, 'agent'),
+      block('turn-1', QUESTION, 'shell'),
       block('typed-1', 'git status', 'shell'),
-      block('cmd-1', COMMAND, 'agent'),
+      block('cmd-1', COMMAND, 'shell'),
     ]
     const causes: Caused[] = [
       {
         entryId: 'act-0',
         position: 0,
         kind: 'action',
+        source: 'assistant' as const,
         intent: 'files.read',
         args: { path: '/repo/a.txt' },
         effect: 'observe',
@@ -161,6 +162,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
         entryId: 'txt-1',
         position: 1,
         kind: 'text',
+        source: 'assistant' as const,
         intent: '',
         args: null,
         effect: null,
@@ -171,6 +173,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
         entryId: 'act-1',
         position: 2,
         kind: 'action',
+        source: 'assistant' as const,
         intent: 'run',
         args: null,
         effect: 'mutate-destructive',
@@ -181,6 +184,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
         entryId: 'cmd-1',
         position: 3,
         kind: 'shell',
+        source: 'assistant' as const,
         intent: COMMAND,
         args: null,
         effect: null,
@@ -191,6 +195,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
         entryId: 'txt-2',
         position: 4,
         kind: 'text',
+        source: 'assistant' as const,
         intent: '',
         args: null,
         effect: null,
@@ -222,6 +227,141 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     // that the relation does not name).
     expect(topLevel(restored)).toEqual([`ask:${QUESTION}`, 'command:git status'])
     expect(topLevel(live)).toEqual([`ask:${QUESTION}`])
+  })
+
+  it('CRITERION 1 — a command the assistant ran restores as a command with a terminal grid, not as prose (the defect)', () => {
+    // The whole point of the task: a command the assistant ran is
+    // kind='shell' WITH source='assistant', and the restore must draw the
+    // GRAMMAR from the kind (a terminal grid, never re-wrapped) and the
+    // BADGE from the source. The old code derived both from kind, so an
+    // agent-run command came back as prose.
+    const restored = draw(
+      [
+        block('turn-1', QUESTION, 'shell'),
+        // The block's display author is what blocksForPane maps from
+        // entries.source — 'agent' is how an assistant-run command's badge
+        // reads once the source column has done its job.
+        block('cmd-1', COMMAND, 'agent'),
+      ],
+      [
+        {
+          entryId: 'cmd-1',
+          position: 0,
+          kind: 'shell',
+          source: 'assistant' as const,
+          intent: COMMAND,
+          args: null,
+          effect: null,
+          resource: null,
+          opensBlock: false,
+        },
+      ],
+      // The command's own body: a VT grid, which restoredBlock renders as
+      // term-lines.
+      new Map([['cmd-1', '\u001b[32mok\u001b[0m']]),
+    )
+    const cmd = restored.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+    expect(cmd).not.toBeNull()
+    // A terminal grid: the VT body renders as term-lines, never as prose
+    // under the answer-body renderer.
+    expect(cmd!.querySelector('.term-line')).not.toBeNull()
+    expect(cmd!.querySelector('[data-answer-body]')).toBeNull()
+    // The badge is read from SOURCE (the block's display vocabulary maps
+    // assistant → 'agent'), never guessed from the kind.
+    expect(cmd!.querySelector('[data-author]')?.getAttribute('data-author')).toBe('agent')
+  })
+
+  // CRITERION 2 — THE MATRIX, IN ONE DRAW.
+  //
+  // Criterion 1 asserts the cell the defect lived in. This asserts that the
+  // two columns are READ INDEPENDENTLY, which is the property that stops the
+  // defect coming back in another cell.
+  //
+  // One turn with two commands under it. The commands differ ONLY in source;
+  // the turn differs from both only in kind. So:
+  //
+  //   a reader that dropped SOURCE badges the two commands the same
+  //   a reader that dropped KIND draws the turn like a command
+  //
+  // and each mistake is caught by a different assertion below, which is why
+  // this is one draw and not three tests.
+  //
+  // Written by the coordinator rather than by the author of the change
+  // (AGENTS.md rule 4): a test written by the implementer in the same pass
+  // encodes the implementer's model, including the parts that are wrong.
+  it('CRITERION 2 — grammar comes from kind and the badge from source, read independently', async () => {
+    const MINE = 'ls -la'
+    const THEIRS = 'df -h'
+    const cause = (
+      entryId: string,
+      position: number,
+      intent: string,
+      source: 'user' | 'assistant',
+    ) => ({
+      entryId,
+      position,
+      kind: 'shell' as const,
+      source,
+      intent,
+      args: null,
+      effect: null,
+      resource: null,
+      opensBlock: false,
+    })
+    // THE PAGE COMES THROUGH THE REAL MAPPING, and that is the whole
+    // difference between this test and a test of its own fixture. `block()`
+    // takes the display author as an argument, so a page built with it
+    // asserts what the test decided; the badge would then survive the source
+    // column being dropped entirely. So the rows are built from WIRE
+    // ENTRIES by blocksForPane — the same function the pane calls — and the
+    // author is derived from `source` by the product, once.
+    const page = await blocksForPane(
+      fakeClient([
+        wireEntry('turn-1', QUESTION, 'ask', 'user'),
+        wireEntry('cmd-mine', MINE, 'shell', 'user'),
+        wireEntry('cmd-theirs', THEIRS, 'shell', 'assistant'),
+      ]),
+      'pane-1',
+    )
+    const restored = draw(
+      page,
+      [cause('cmd-mine', 0, MINE, 'user'), cause('cmd-theirs', 1, THEIRS, 'assistant')],
+      new Map([
+        ['cmd-mine', 'a.txt'],
+        ['cmd-theirs', '9.7G'],
+      ]),
+    )
+
+    const of = (command: string): HTMLElement => {
+      const el = Array.from(restored.querySelectorAll<HTMLElement>('.cmd-block')).find(
+        (b) => b.querySelector('.cmd-header-text')?.textContent === command,
+      )
+      expect(el, `no block drew for ${command}`).not.toBeUndefined()
+      return el!
+    }
+    const badgeOf = (el: HTMLElement): string | null =>
+      el.querySelector('[data-author]')?.getAttribute('data-author') ?? null
+
+    const mine = of(MINE)
+    const theirs = of(THEIRS)
+
+    // WHAT IS NOT ASSERTED HERE, AND WHERE IT IS. The grammar is decided by
+    // `restoredBody`, which this harness bypasses: `blockFacts` hands the
+    // builder a kind directly, so reading the kind back off the DOM here
+    // would assert what the test itself supplied. Mutation-checking is what
+    // told the two apart — dropping the source read fails the badge
+    // assertions below, and re-pointing the GRAMMAR at the wrong column does
+    // not fail anything in this file. So the grammar half lives with its
+    // owner, in restore-client.test.ts ("a command the ASSISTANT ran is a
+    // command, not prose"), where it is asserted at the seam that decides
+    // and does fail under that mutation.
+    //
+    // What this test owns is the other half: SOURCE decides the badge, and
+    // it is the ONLY thing these two rows differ by. Equal badges here is a
+    // reader that dropped the column.
+    expect(badgeOf(mine)).toBeNull()
+    expect(badgeOf(theirs)).toBe('agent')
+    expect(badgeOf(mine)).not.toBe(badgeOf(theirs))
   })
 })
 
@@ -281,7 +421,7 @@ function draw(
               location: '',
               kind: 'text',
               body: body ?? '',
-              author: 'agent',
+              author: cause.source === 'assistant' ? ('agent' as const) : ('shell' as const),
               status: 'success',
               durationMs: null,
               exitCode: null,
@@ -306,7 +446,7 @@ function draw(
               location: '',
               kind: 'tool',
               body: null,
-              author: 'agent',
+              author: cause.source === 'assistant' ? ('agent' as const) : ('shell' as const),
               status: 'success',
               durationMs: null,
               exitCode: null,
@@ -344,6 +484,46 @@ function blockFacts(b: RestorableBlock, body = 'out') {
     kind: 'command' as const,
     entryId: b.entryId,
   }
+}
+
+/** One `ledger.query` entry as the wire really shapes it, narrowed to what
+ *  blocksForPane reads. `kind` and `source` are given SEPARATELY on purpose:
+ *  a fixture that derived one from the other would hide the very
+ *  independence the matrix test asserts. */
+function wireEntry(
+  id: string,
+  intent: string,
+  kind: 'shell' | 'ask',
+  source: 'user' | 'assistant',
+): Record<string, unknown> {
+  return {
+    id,
+    intent,
+    kind,
+    source,
+    cwd: '/repo',
+    host: '',
+    status: 'success',
+    durationMs: 0,
+    exitCode: 0,
+  }
+}
+
+/** A client that answers `ledger.query` with the page it was built from, so
+ *  blocksForPane runs its real mapping over real wire shapes. Newest-first,
+ *  because that is the order the method documents and blocksForPane
+ *  reverses. */
+function fakeClient(entries: Record<string, unknown>[]): Parameters<typeof blocksForPane>[0] {
+  return {
+    call: () =>
+      Promise.resolve({
+        entries: [...entries].reverse(),
+        scope: 'everywhere',
+        exhausted: true,
+        hasRows: true,
+        coverage: null,
+      }),
+  } as unknown as Parameters<typeof blocksForPane>[0]
 }
 
 function block(entryId: string, command: string, author: 'shell' | 'agent'): RestorableBlock {

@@ -82,7 +82,7 @@ func (s *sqliteContent) PriorTurn(ctx context.Context, paneID, beforeEntryID str
 	// differs, not by a literal two packages would both have to hold.
 	var out PriorTurn
 	err = s.db.QueryRowContext(ctx, `SELECT e.id, e.intent FROM entries e
-		 WHERE e.pane_id = ? AND e.kind = 'agent' AND e.ingest_seq < ?
+		 WHERE e.pane_id = ? AND e.kind = 'ask' AND e.ingest_seq < ?
 		   AND EXISTS (SELECT 1 FROM executions x
 		                WHERE x.entry_id = e.id AND x.lane = ?)
 		 ORDER BY e.ingest_seq DESC LIMIT 1`, paneID, seq, agentLane).

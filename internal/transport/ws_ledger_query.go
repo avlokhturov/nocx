@@ -60,16 +60,20 @@ type ledgerEntryWire struct {
 	// Host is the environment's endpoint, "" for the local machine — and
 	// NULL when no environment row carries the entry's environment_id, which
 	// is "unknown" and must not be rendered as "local".
-	Host        *string `json:"host"`
-	Cwd         string  `json:"cwd"`
-	Kind        string  `json:"kind"`
-	Intent      string  `json:"intent"`
-	Phase       string  `json:"phase"`
-	Status      string  `json:"status"`
-	SubmittedAt int64   `json:"submittedAt"`
-	StartedAt   *int64  `json:"startedAt"`
-	EndedAt     *int64  `json:"endedAt"`
-	DurationMs  *int64  `json:"durationMs"`
+	Host *string `json:"host"`
+	Cwd  string  `json:"cwd"`
+	Kind string  `json:"kind"`
+	// Source is who submitted the content or intent this row represents —
+	// entries.source, never derived from the kind. The restore badge is
+	// painted from it (frontend/src/restore-client.ts).
+	Source      string `json:"source"`
+	Intent      string `json:"intent"`
+	Phase       string `json:"phase"`
+	Status      string `json:"status"`
+	SubmittedAt int64  `json:"submittedAt"`
+	StartedAt   *int64 `json:"startedAt"`
+	EndedAt     *int64 `json:"endedAt"`
+	DurationMs  *int64 `json:"durationMs"`
 	// ExitCode is the shell arm's fact. Null is a real value — an
 	// interrupted command has none — and is never rendered as zero.
 	ExitCode    *int            `json:"exitCode"`
@@ -175,7 +179,11 @@ type ledgerCausedWire struct {
 	EntryID  string `json:"entryId"`
 	Position int    `json:"position"`
 	Kind     string `json:"kind"`
-	Intent   string `json:"intent"`
+	// Source is who submitted the child's content — the same entries.source
+	// fact a page row carries, so a restored turn's badge never guesses it
+	// from the child's kind.
+	Source string `json:"source"`
+	Intent string `json:"intent"`
 	// Args is what an ACTION child asked for, and null on every other kind.
 	// A restored call is named from it exactly as the live announcement was
 	// (agent.runToolCall.args): the tool and the derived resource are the
@@ -195,6 +203,7 @@ func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 		EntryID:    c.EntryID,
 		Position:   c.Position,
 		Kind:       string(c.Kind),
+		Source:     string(c.Source),
 		Intent:     c.Intent,
 		Args:       c.Args,
 		Resource:   c.Resource,
@@ -541,7 +550,7 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 	}
 	return ledgerEntryWire{
 		ID: row.ID, Seq: row.IngestSeq, EnvID: row.EnvironmentID, Host: host,
-		Cwd: row.Cwd, Kind: string(row.Kind), Intent: row.Intent,
+		Cwd: row.Cwd, Kind: string(row.Kind), Source: string(row.Source), Intent: row.Intent,
 		Phase: string(row.Phase), Status: string(row.Status),
 		SubmittedAt: row.SubmittedAt, StartedAt: row.StartedAt, EndedAt: row.EndedAt,
 		DurationMs: row.DurationMs, ExitCode: exit,
@@ -653,10 +662,10 @@ func ledgerQueryOf(p ledgerQueryParams) (content.LedgerQuery, string) {
 	}
 	if p.Kind != nil {
 		switch content.EntryKind(*p.Kind) {
-		case content.EntryShell, content.EntryAgent, content.EntryAction:
+		case content.EntryShell, content.EntryAsk, content.EntryAction, content.EntryFrame, content.EntryText:
 			q.Kind = content.EntryKind(*p.Kind)
 		default:
-			return q, "kind must be one of shell, agent, action"
+			return q, "kind must be one of shell, ask, action, frame, text"
 		}
 	}
 	if p.Status != nil {

@@ -64,6 +64,7 @@ type fakeCause struct {
 type fakeSubmission struct {
 	intent  string
 	payload string
+	source  content.Source
 }
 
 func (f *fakeLedger) EnsureEnvironment(context.Context, content.Environment) error {
@@ -87,7 +88,7 @@ func (f *fakeLedger) Submit(_ context.Context, in content.SubmitEntry) (content.
 	if f.failSubmit {
 		return content.SubmitResult{}, errors.New("fake ledger: submit failed")
 	}
-	f.submissions = append(f.submissions, fakeSubmission{intent: in.Intent, payload: in.Payload})
+	f.submissions = append(f.submissions, fakeSubmission{intent: in.Intent, payload: in.Payload, source: in.Source})
 	return content.SubmitResult{ID: "entry-" + in.Intent}, nil
 }
 

@@ -5153,7 +5153,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	exit := 2
 	entry := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000001", Seq: 7,
-		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make deploy", Phase: "closed", Status: "failure",
 		SubmittedAt: started, StartedAt: &started, EndedAt: &ended,
 		DurationMs: &duration, ExitCode: &exit, MaskedCount: 1,
@@ -5165,7 +5165,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	// The row a live command produces: no end, no exit code, no host row.
 	running := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000002", Seq: 8,
-		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make watch", Phase: "bound", Status: "running",
 		SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
 	}
@@ -5209,11 +5209,11 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 			Caused: []ledgerCausedWire{
 				{
 					EntryID: "01924f9c-0000-7000-8000-00000000000a", Position: 0,
-					Kind: "action", Intent: "files.read", Effect: &effect,
+					Kind: "action", Source: "assistant", Intent: "files.read", Effect: &effect,
 					Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/go.mod"},
 				},
 				{
-					EntryID: running.ID, Position: 1, Kind: "shell",
+					EntryID: running.ID, Position: 1, Kind: "shell", Source: "assistant",
 					Intent: "make watch", Effect: nil, Resource: nil,
 				},
 			},
@@ -5369,7 +5369,7 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 // `caused` list is a shape nobody is holding to anything.
 func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	schema := loadSchema(t, "ledger.get.schema.json")
-	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"agent",` +
+	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"ask","source":"user",` +
 		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
 		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
 		`"redactions":[]}`
@@ -5429,7 +5429,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	}
 	// And the shape it must ACCEPT, so the refusals above are a contract
 	// and not an accident of a schema that refuses everything.
-	ok := body(`[{"entryId":"b","position":0,"kind":"action","intent":"files.read",` +
+	ok := body(`[{"entryId":"b","position":0,"kind":"action","source":"assistant","intent":"files.read",` +
 		`"args":{"path":"/repo/go.mod"},` +
 		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(ok)); err != nil {
@@ -5439,7 +5439,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	// names no intent, has no effect and no resource, and opens no block. The
 	// server sends these now, so a schema that could not express one would be
 	// a contract the wire cannot keep.
-	prose := body(`[{"entryId":"t","position":1,"kind":"text","intent":"","args":null,` +
+	prose := body(`[{"entryId":"t","position":1,"kind":"text","source":"assistant","intent":"","args":null,` +
 		`"effect":null,"resource":null,"opensBlock":false}]`)
 	if err := validateJSONErr(schema, []byte(prose)); err != nil {
 		t.Fatalf("the schema refused a run of prose: %v", err)

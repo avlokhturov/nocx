@@ -54,6 +54,7 @@ func frameDigest(in CaptureFrame) string {
 	enc := json.NewEncoder(h)
 	_ = enc.Encode(struct {
 		Client, Cwd, Source string
+		Subject             Source
 		EnvironmentID       string
 		SessionID           *string
 		Rows                []FrameRow
@@ -63,7 +64,7 @@ func frameDigest(in CaptureFrame) string {
 		SerializerVersion   *int
 	}{
 		Client: in.Client, Cwd: in.Cwd, Source: string(in.Source),
-		EnvironmentID: in.Env.ID, SessionID: in.SessionID,
+		Subject: in.Subject, EnvironmentID: in.Env.ID, SessionID: in.SessionID,
 		Rows: in.Rows, Cursor: in.Cursor, Identity: in.Identity,
 		Range: in.Range, SerializerVersion: in.SerializerVersion,
 	})
@@ -194,6 +195,16 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 	if in.Client == "" {
 		return CaptureFrameResult{}, errors.New("content: capture frame: client is required — it binds the idempotency key")
 	}
+	// Empty Subject is the ask gesture — the renderer's captureFrame call,
+	// which is a person selecting blocks and asking. The readScreen pull is
+	// a different producer that stamps SourceAssistant when it ever
+	// persists; until then the honest default for a capture naming no
+	// subject is the person's. Defaulted HERE, before frameDigest, so a
+	// legacy empty-subject replay hashes identically to the normalized
+	// frame it created (the same rule Submit follows for Source).
+	if in.Subject == "" {
+		in.Subject = SourceUser
+	}
 	switch in.Source {
 	case FrameLive:
 		if in.Identity == nil {
@@ -267,11 +278,11 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 			return fmt.Errorf("content: capture frame: assign ingest_seq: %w", seqErr)
 		}
 		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, capture_key, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'closed', 'success', ?, ?, '{}')`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'frame', ?, ?, 'closed', 'success', ?, ?, '{}')`,
 			frameID, seq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
-			FrameIntent, now, in.CaptureID); insertErr != nil {
+			string(in.Subject), FrameIntent, now, in.CaptureID); insertErr != nil {
 			return insertErr
 		}
 
@@ -484,9 +495,9 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		// restorable at all (nocx-4em1z). session_id beside it is
 		// provenance and is swept on the next Open.
 		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, 'normal', '{}')`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ask', 'user', ?, 'open', 'pending', ?, 'normal', '{}')`,
 			in.ID, seq, in.Client, digest, in.Env.ID, in.PaneID, in.SessionID, in.Cwd,
 			in.Question, now); insertErr != nil {
 			return insertErr
@@ -835,9 +846,9 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 		// entries says exactly this, and the row is written to satisfy it
 		// rather than to be refused by it.
 		if _, err = tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
 			 phase, status, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', '', 'closed', 'success', ?, 'normal', ?)`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', 'assistant', '', 'closed', 'success', ?, 'normal', ?)`,
 			entryID, seq, client, proseDigest(turnID, pos), envID, turnID, pos, cwd,
 			time.Now().UnixMilli(), string(facts)); err != nil {
 			return err
@@ -883,23 +894,24 @@ func (s *sqliteContent) SealProse(ctx context.Context, entryID string) error {
 }
 
 // validateFrameReference checks one reference against the STORED frame:
-// the id names a frame (kind=agent, intent=frame-capture), it belongs to
-// the asking session — "an ask naming a frame from another session is
-// rejected" (design §5) — and the region lies inside the frame's own rows
-// and columns. Any failure refuses the whole ask transaction.
+// the id names a frame (kind=frame — the discriminated column, never an
+// intent comparison), it belongs to the asking session — "an ask naming a
+// frame from another session is rejected" (design §5) — and the region
+// lies inside the frame's own rows and columns. Any failure refuses the
+// whole ask transaction.
 func validateFrameReference(ctx context.Context, tx *sql.Tx, in AgentAsk, ref AgentReference) error {
-	var kind, intent string
+	var kind string
 	var sessionID sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT kind, intent, session_id FROM entries WHERE id = ?`, ref.FrameID).
-		Scan(&kind, &intent, &sessionID)
+		`SELECT kind, session_id FROM entries WHERE id = ?`, ref.FrameID).
+		Scan(&kind, &sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrFrameNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if kind != string(EntryAgent) || intent != FrameIntent {
+	if kind != string(EntryFrame) {
 		return ErrNotAFrame
 	}
 	if !sessionID.Valid || in.SessionID == nil || sessionID.String != *in.SessionID {

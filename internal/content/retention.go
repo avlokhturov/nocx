@@ -214,6 +214,17 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 	if err != nil {
 		return EvictionResult{}, err
 	}
+	// THE SEAT GOES WITH THE PARENT. ON DELETE SET NULL nulls the
+	// children's parent_id, and the schema's CHECK (parent_id IS NOT NULL
+	// OR pos IS NULL) then refuses the surviving child, which still holds
+	// its seat. The seat is derived from what is stored (AddCause) —
+	// a row with no parent has no place in any ordering — so the children
+	// of the victims are detached in their own UPDATE, before the DELETE.
+	detach := `UPDATE entries SET pos = NULL WHERE parent_id IN (` + placeholders + `)` //nolint:gosec // see above
+	if _, detErr := tx.ExecContext(ctx, detach, args...); detErr != nil {
+		return EvictionResult{}, fmt.Errorf("content: evict: detach the children of the run: %w", detErr)
+	}
+
 	// Edges, executions, artifacts, chunks and grants cascade from the
 	// entry (schema question 5) — the DELETE is the whole removal.
 	del := `DELETE FROM entries WHERE id IN (` + placeholders + `)` //nolint:gosec // see above

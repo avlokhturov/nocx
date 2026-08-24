@@ -16,7 +16,7 @@
 // carries references, and a shell-originated attempt opens no record at all
 // (the command-text decision of bead nocx-u7uh.7 — an authenticated origin
 // does not make a line the user typed a password into safe to store).
-import type { CommandAuthor, CommandRecord, CommandStatus } from './command-ledger'
+import type { CommandRecord, CommandStatus } from './command-ledger'
 import type { ExecutionAttempt } from './lifecycle/state'
 import type { HistoryQuery } from './generated/history.query'
 import type { HistoryRecord } from './generated/history.record'
@@ -37,9 +37,10 @@ export interface HistoryRecordParams {
   cwd: string
   host: string
   /** Who submitted the command, minted at submit by the submitting target
-   *  (design §3.1, nocx-iadtt) — the entries.kind vocabulary. The store
-   *  side never derives it from anything else. */
-  author: CommandAuthor
+   *  (design §3.1, nocx-iadtt) — mapped into the LEDGER's entries.source
+   *  vocabulary ('user' is the human, 'assistant' is the assistant's lane)
+   *  here at the wire. The store side never derives it from anything else. */
+  source: 'user' | 'assistant'
   status: CommandStatus
   exitCode: number | null
   startedAt: number | null
@@ -77,7 +78,13 @@ export function recordCommand(
     command: rec.command,
     cwd: rec.cwd,
     host: rec.host,
-    author: rec.author,
+    // The wire speaks the LEDGER's vocabulary now (entries.source):
+    // 'shell' the InputTarget author is 'user', 'agent' is 'assistant'.
+    // One mapping, here at the wire — the renderer's display vocabulary
+    // and the store's source vocabulary are different words for one fact,
+    // and deriving the wire value from the kind again would repaint the
+    // defect the source column exists to remove (nocx-dc2fr).
+    source: rec.author === 'agent' ? 'assistant' : 'user',
     status: rec.status,
     exitCode: rec.exitCode,
     // The ledger clocks wall-clock epoch milliseconds (Date.now()), already
@@ -104,17 +111,18 @@ export function recordCommand(
       send: () => client.call<HistoryRecord>('history.record', params),
     })
     .then((ack) => {
-      // The ack is trusted only when it confirms the author the record was
+      // The ack is trusted only when it confirms the source the record was
       // minted with (design §3.1, nocx-iadtt): the backend must keep the
       // fact it was handed, never derive its own from a lane or a run
       // state. A mismatch means the row was accepted under a different
-      // author than the renderer minted — a wire-integrity failure, not a
+      // source than the renderer minted — a wire-integrity failure, not a
       // recoverable difference. Treated like a dropped record (null:
       // nothing to show; the masked command and capture offers belong to a
       // row the renderer cannot vouch for) and logged for the one place
-      // that can act on it.
-      if (ack !== null && ack.author !== rec.author) {
-        log.warn('history.record: ack author mismatch', { sent: rec.author, acked: ack.author })
+      // that can act on it. Compared in the wire vocabulary — the ack
+      // echoes the source it accepted.
+      if (ack !== null && ack.source !== params.source) {
+        log.warn('history.record: ack source mismatch', { sent: params.source, acked: ack.source })
         return null
       }
       return ack

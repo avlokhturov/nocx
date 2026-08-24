@@ -367,8 +367,8 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
-	if q.Kind != content.EntryAgent || q.Intent != "list the files" {
-		t.Errorf("question kind/intent = %q/%q, want agent/%q", q.Kind, q.Intent, "list the files")
+	if q.Kind != content.EntryAsk || q.Intent != "list the files" {
+		t.Errorf("question kind/intent = %q/%q, want ask/%q", q.Kind, q.Intent, "list the files")
 	}
 	if q.Phase != content.PhaseClosed || q.Status != content.EntrySuccess {
 		t.Errorf("question phase/status = %q/%q, want closed/success — the exchange completed", q.Phase, q.Status)
@@ -473,8 +473,8 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	if err != nil || ans == nil {
 		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
 	}
-	if ans.Kind != content.EntryAgent {
-		t.Errorf("turn kind = %q, want agent", ans.Kind)
+	if ans.Kind != content.EntryAsk {
+		t.Errorf("turn kind = %q, want ask", ans.Kind)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
 		t.Errorf("turn phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
@@ -555,8 +555,8 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	if err != nil || q == nil {
 		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
 	}
-	if q.Kind != content.EntryAgent || q.Intent != "list the files" {
-		t.Errorf("question kind/intent = %q/%q, want agent/%q", q.Kind, q.Intent, "list the files")
+	if q.Kind != content.EntryAsk || q.Intent != "list the files" {
+		t.Errorf("question kind/intent = %q/%q, want ask/%q", q.Kind, q.Intent, "list the files")
 	}
 	if q.Phase != content.PhaseClosed || q.Status != content.EntrySuccess {
 		t.Errorf("question phase/status = %q/%q, want closed/success", q.Phase, q.Status)
@@ -624,8 +624,8 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	if err != nil || ans == nil {
 		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
 	}
-	if ans.Kind != content.EntryAgent {
-		t.Errorf("turn kind = %q, want agent", ans.Kind)
+	if ans.Kind != content.EntryAsk {
+		t.Errorf("turn kind = %q, want ask", ans.Kind)
 	}
 	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
 		t.Errorf("turn phase/status = %q/%q, want closed/success", ans.Phase, ans.Status)
@@ -825,8 +825,8 @@ func assertNothingClaimsToBeTheAnswer(t *testing.T, led content.LedgerRepository
 		t.Fatalf("Caused: %v", err)
 	}
 	for _, c := range caused {
-		if c.Kind == content.EntryAgent {
-			t.Errorf("caused %+v: an agent entry is a turn, never a turn's answer", c)
+		if c.Kind == content.EntryAsk {
+			t.Errorf("caused %+v: an ask entry is a turn, never a turn's answer", c)
 		}
 	}
 }

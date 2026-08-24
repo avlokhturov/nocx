@@ -41,12 +41,23 @@ export interface RestorableBlock {
    *  Coercing it to 0 here is what made a restored turn claim '0ms'. */
   durationMs: number | null
   exitCode: number | null
-  /** WHO submitted it — the entry's own kind, which is what that column
-   *  means (ledger_command.go: "Author is WHO submitted the command, and it
-   *  is the entry's own kind"). It is what paints the agent badge on a
+  /** WHO submitted it, in the block's display vocabulary — mapped from the
+   *  entry's OWN source column (entries.source: 'user'|'assistant'), never
+   *  guessed from the kind. A command the assistant ran is kind='shell'
+   *  with source='assistant', and the badge must say the second half;
+   *  deriving it from kind again would repaint the defect this split
+   *  exists to remove (nocx-dc2fr). It is what paints the agent badge on a
    *  restored block, and dropping it is why a restored tab used to forget
    *  that the assistant had run the command (nocx-4em1z). */
   author: 'shell' | 'agent'
+}
+
+/** The block's display author, from the ledger's source vocabulary. The
+ *  badge's language is the InputTarget's ('shell' is the human, 'agent' is
+ *  the assistant's lane); the LEDGER's is entries.source. One mapping, at
+ *  the restore boundary — the two are never conflated anywhere else. */
+function authorFromSource(source: 'user' | 'assistant'): 'shell' | 'agent' {
+  return source === 'assistant' ? 'agent' : 'shell'
 }
 
 /** The ledger's status vocabulary, narrowed to what a frozen block draws.
@@ -97,7 +108,7 @@ export async function blocksForPane(client: WSClient, paneId: string): Promise<R
       status: frozenStatus(e.status),
       durationMs: e.durationMs,
       exitCode: e.exitCode,
-      author: e.kind === 'agent' ? ('agent' as const) : ('shell' as const),
+      author: authorFromSource(e.source),
     }))
     .reverse()
 }
@@ -241,27 +252,27 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
     // What the block DRAWS with: a command's grid is the vt; a turn's
-    // prose is text/plain. When both survive on an agent entry, the prose
+    // prose is text/plain. When both survive on an ask entry, the prose
     // is what a turn draws — the grid beside it predates the grammar.
-    const chosen = entry.entry.kind === 'agent' ? (text ?? vt) : (vt ?? text)
+    const chosen = entry.entry.kind === 'ask' ? (text ?? vt) : (vt ?? text)
     if (!chosen) {
       // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
       // artifact survived: since ADR-0037 a turn carries NO artifact of its
       // own (its prose is a `text` child), so an empty artifact list is the
       // ordinary shape of a whole turn, not evidence it was a command.
       return {
-        kind: entry.entry.kind === 'agent' ? 'ask' : 'command',
+        kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
         body: null,
         caused,
         proseEvicted: !!entry.proseEvicted,
       }
     }
     const body = await client.call<LedgerArtifact>('ledger.artifact', { id: chosen.id })
-    // The kind is the ENTRY's, whatever artifact survived: an agent entry
+    // The kind is the ENTRY's, whatever artifact survived: an ask entry
     // is a turn, everything else is a command. The VT choice above decided
     // which artifact is the BODY to draw with, not what the block is.
     return {
-      kind: entry.entry.kind === 'agent' ? 'ask' : 'command',
+      kind: entry.entry.kind === 'ask' ? 'ask' : 'command',
       body: body.body,
       caused,
       proseEvicted: !!entry.proseEvicted,

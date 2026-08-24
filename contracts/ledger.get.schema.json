@@ -59,6 +59,7 @@
         "entryId",
         "position",
         "kind",
+        "source",
         "intent",
         "args",
         "effect",
@@ -80,8 +81,12 @@
           "type": "boolean"
         },
         "kind": {
-          "description": "What kind of entry it is. Closed set, mirroring the store's CHECK constraint — `text` included, because a run of assistant prose is a child like any other since ADR-0037 and the read returns it.",
-          "enum": ["shell", "agent", "action", "text"]
+          "description": "What kind of entry it is. Closed set, mirroring the store's CHECK constraint — `text` included, because a run of assistant prose is a child like any other since ADR-0037 and the read returns it. `ask` is a TURN, which is never a child of a turn; the member is here because the enum mirrors the store.",
+          "enum": ["shell", "ask", "action", "text"]
+        },
+        "source": {
+          "description": "Who submitted the child's content or intent — the same entries.source fact a page row carries, so a restored turn's badge never guesses it from the child's kind.",
+          "enum": ["user", "assistant"]
         },
         "intent": {
           "description": "The child's own intent: the command line for a shell entry, the declared tool name for an action, and EMPTY for a `text` child — prose has no intent, which is a clause of its CHECK rather than a convention a reader has to know.",

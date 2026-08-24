@@ -76,16 +76,23 @@ type CompletedCommand struct {
 	// TerminationReason is the execution's own fact: which of the outcomes a
 	// status plus an exit code cannot separate (ADR-0020 §4) this run had.
 	TerminationReason TerminationReason
-	// Author is WHO submitted the command, and it is the entry's own kind
-	// (design §3.1, nocx-iadtt/nocx-e5vsc): EntryShell is the person at the
-	// keyboard, EntryAgent is the assistant's lane. It is carried from the
-	// renderer's submit — the one place that knows which input target ran
-	// the line — and never derived here from a lane or a run state, or a
-	// human command typed while the agent works would be recorded as the
-	// agent's. Empty defaults to EntryShell: a caller that names no author
-	// is the ordinary shell path, which is what every caller was before
-	// the author existed.
-	Author EntryKind
+	// Source is the IMMEDIATE subject that submitted the command (design
+	// §3.1, nocx-iadtt/nocx-e5vsc): SourceUser is the person at the
+	// keyboard, SourceAssistant is the assistant's lane. A command is a
+	// SHELL entry whatever its source — the kind says what the row is, and
+	// source says who asked for it. It is carried from the renderer's
+	// submit — the one place that knows which input target ran the line —
+	// and never derived here from a lane or a run state, or a human command
+	// typed while the agent works would be recorded as the assistant's.
+	// REQUIRED, and deliberately not defaulted. It used to default to the
+	// person's shell, on the argument that a caller naming no author was the
+	// ordinary path — true while this was the author of a command, and wrong
+	// now that it is provenance the audit reads. "Nobody said who submitted
+	// this" must not become "the person did": that is a claim, it is the one
+	// this column exists to make, and a silent default makes it without
+	// anybody deciding. A caller that forgets is a caller with a bug, and it
+	// is told so.
+	Source Source
 }
 
 // RecordCompleted writes one finished command and returns the entry id the
@@ -107,16 +114,14 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 	if in.TerminationReason == "" {
 		in.TerminationReason = TermCompleted
 	}
-	switch in.Author {
-	case "":
-		in.Author = EntryShell
-	case EntryShell, EntryAgent:
+	switch in.Source {
+	case SourceUser, SourceAssistant:
 	default:
-		// `action` is a no-block effect and can never be a command's author,
-		// and an unknown kind would write a row the CHECK constraint refuses
-		// halfway through the transaction. Refused here, where the message
-		// can say what the vocabulary is.
-		return "", fmt.Errorf("content: record: %q is not a command author; want shell or agent", in.Author)
+		// `source`, `action` and `text` are not subjects a command can have
+		// asked for, and an unknown source would write a row the CHECK
+		// constraint refuses halfway through the transaction. Refused here,
+		// where the message can say what the vocabulary is.
+		return "", fmt.Errorf("content: record: %q is not a command source; want user or assistant", in.Source)
 	}
 	// Keep-history-off: a command runs and no row appears, and that is not an
 	// error — the same rule the interim table's Add followed, moved here with
@@ -168,17 +173,19 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		// replays this id — the backend minted it — so it is provenance here
 		// rather than an idempotency check, and it is written because every
 		// entry has one and a NULL would be a second shape of row.
+		// The kind is ALWAYS shell: a command is WHAT the row is, and the
+		// source says WHO asked for it.
 		digest := entryDigest(SubmitEntry{
 			Client: in.Client, EnvironmentID: in.Env.ID, Cwd: in.Cwd, Intent: in.Intent,
-			Payload: in.Payload, Kind: in.Author, Sensitivity: in.Sensitivity,
+			Payload: in.Payload, Kind: EntryShell, Source: in.Source, Sensitivity: in.Sensitivity,
 			PaneID: pane,
 		})
 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, started_at, ended_at, duration_ms, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'closed', ?, ?, ?, ?, ?, ?, ?)`,
-			entryID, seq, in.Client, digest, in.Env.ID, pane, in.Cwd, string(in.Author), in.Intent,
+			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'shell', ?, ?, 'closed', ?, ?, ?, ?, ?, ?, ?)`,
+			entryID, seq, in.Client, digest, in.Env.ID, pane, in.Cwd, string(in.Source), in.Intent,
 			string(in.Status), now, in.StartedAt, in.EndedAt, in.DurationMs,
 			string(in.Sensitivity), in.Payload); err != nil {
 			return err

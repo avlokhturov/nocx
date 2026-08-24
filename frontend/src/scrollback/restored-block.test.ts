@@ -262,8 +262,8 @@ describe('a block built from the store', () => {
     // fragments (ADR-0037): a restored turn says its question once, like a
     // live one.
     const [el] = turn([
-      { entryId: 'cmd-1', kind: 'shell' },
-      { entryId: 'cmd-2', kind: 'shell' },
+      { entryId: 'cmd-1', kind: 'shell', source: 'user' },
+      { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
     const headers = Array.from(el.querySelectorAll('.cmd-header-text')).map(
       (h) => h.textContent ?? '',
@@ -277,8 +277,8 @@ describe('a block built from the store', () => {
     // block whose `.cmd-children` hold the same seats the store recorded,
     // exactly as the live path draws them.
     const [el] = turn([
-      { entryId: 'cmd-1', kind: 'shell' },
-      { entryId: 'cmd-2', kind: 'shell' },
+      { entryId: 'cmd-1', kind: 'shell', source: 'user' },
+      { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
     const box = el.querySelector(':scope > .cmd-children')
     expect(box).not.toBeNull()
@@ -291,8 +291,8 @@ describe('a block built from the store', () => {
     // The command is older than the page limit, or retention took it.
     // Nothing is invented to stand in for it.
     const [el] = turn([
-      { entryId: 'gone', kind: 'shell' },
-      { entryId: 'cmd-2', kind: 'shell' },
+      { entryId: 'gone', kind: 'shell', source: 'user' },
+      { entryId: 'cmd-2', kind: 'shell', source: 'user' },
     ])
     const box = el.querySelector(':scope > .cmd-children')!
     expect(Array.from(box.querySelectorAll('.cmd-header-text')).map((h) => h.textContent)).toEqual([
@@ -304,7 +304,10 @@ describe('a block built from the store', () => {
     // Retention takes bodies and leaves entries (ADR-0019 §7). The blocks a
     // turn caused are entries of their own and survive the loss of the
     // prose; the run's loss is the turn's sentence, said ONCE.
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }], { body: null, proseEvicted: true })
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
+      body: null,
+      proseEvicted: true,
+    })
     const notices = el.querySelectorAll('[data-prose-evicted="true"]')
     expect(notices).toHaveLength(1)
     expect(notices[0].textContent).toBe('Output is no longer kept')
@@ -318,7 +321,9 @@ describe('a block built from the store', () => {
   it('a turn whose prose is intact says nothing of the sort', () => {
     // The paired positive: without it, the sentence above could be one that
     // is always shown. A whole turn carries its prose and no notice.
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }], { proseEvicted: false })
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }], {
+      proseEvicted: false,
+    })
     expect(el.querySelector('[data-prose-evicted="true"]')).toBeNull()
     expect(el.textContent).not.toContain('Output is no longer kept')
     const box = el.querySelector(':scope > .cmd-children')!
@@ -340,7 +345,7 @@ describe('a block built from the store', () => {
   // The chip is the KIND's now: an ask block reads its terminal word from the
   // block's status, which is what a turn's outcome actually is.
   it('a restored turn says it completed, from its status and never from an exit code', () => {
-    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell' }])
+    const [el] = turn([{ entryId: 'cmd-1', kind: 'shell', source: 'user' }])
     expect(el.querySelector('.cmd-header-exit')?.textContent).toBe('completed')
     expect(el.querySelector('.cmd-header-exit')?.className).toBe(
       'nocx-chip nocx-chip-ok cmd-header-exit cmd-header-exit-ok',

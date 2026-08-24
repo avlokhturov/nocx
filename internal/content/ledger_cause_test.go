@@ -27,7 +27,7 @@ func submitTurn(t *testing.T, led content.LedgerRepository, id, question string)
 	t.Helper()
 	res, err := led.Submit(context.Background(), content.SubmitEntry{
 		ID: id, Client: "test-client", EnvironmentID: "local",
-		Cwd: "/repo", Kind: content.EntryAgent, Intent: question,
+		Cwd: "/repo", Kind: content.EntryAsk, Intent: question,
 	})
 	if err != nil {
 		t.Fatalf("Submit turn: %v", err)

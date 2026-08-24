@@ -48,13 +48,13 @@ type historyRecordParams struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd"`
 	Host    string `json:"host"`
-	// Author is who submitted the command, in the ledger's own vocabulary
-	// (entries.kind): 'shell' is the human, 'agent' is the assistant's
+	// Source is who submitted the command, in the ledger's own vocabulary
+	// (entries.source): 'user' is the human, 'assistant' is the assistant's
 	// lane. Minted at submit by the submitting InputTarget on the renderer
 	// (design §3.1, nocx-iadtt) and carried verbatim — the store side
 	// never derives it from a lane or a run state, or a human command
-	// typed while an agent works would be attributed to the agent.
-	Author    string `json:"author"`
+	// typed while an agent works would be attributed to the assistant.
+	Source    string `json:"source"`
 	Status    string `json:"status"`
 	ExitCode  *int   `json:"exitCode"`
 	StartedAt *int64 `json:"startedAt"`
@@ -93,16 +93,15 @@ type captureWire struct {
 // null (no redaction is []). Captures is the offer list — one entry per
 // detected credential, empty when there is nothing to offer. The ack never
 // carries secret material.
-//
-// Author is the author the record was accepted under — the request's own
+// Source is the source the record was accepted under — the request's own
 // minted fact, echoed (like MaskedCommand) so the renderer can verify the
-// backend kept the author it sent, and the schema can require it: the two
+// backend kept the source it sent, and the schema can require it: the two
 // sides never derive the same thing twice.
 type historyRecordResponse struct {
 	MaskedCount int             `json:"maskedCount"`
 	MaskedKinds []string        `json:"maskedKinds"`
 	EntryID     string          `json:"entryId"`
-	Author      string          `json:"author"`
+	Source      string          `json:"source"`
 	Redactions  []redactionWire `json:"redactions"`
 	// MaskedCommand is the command exactly as the store keeps it — every
 	// secret replaced by its mask, every already-saved value by its
@@ -257,7 +256,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	ack := historyRecordResponse{
 		MaskedCount:   len(findings),
 		MaskedKinds:   maskedKindsOf(findings),
-		Author:        p.Author,
+		Source:        p.Source,
 		MaskedCommand: rowCommand,
 		Redactions:    []redactionWire{},
 		Captures:      []captureWire{},
@@ -313,11 +312,11 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		Intent:  rowCommand,
 		Payload: payload,
 		Status:  content.EntryStatus(p.Status),
-		// The author the renderer minted, carried verbatim onto the entry's
-		// kind (design §3.1, nocx-iadtt): the store side never derives it
-		// from a lane or a run state, or a human command typed while an
-		// agent works would be attributed to the agent.
-		Author:            content.EntryKind(p.Author),
+		// The source the renderer minted, carried verbatim onto the
+		// entry's source column (design §3.1, nocx-iadtt): the store side
+		// never derives it from a lane or a run state, or a human command
+		// typed while an agent works would be attributed to the assistant.
+		Source:            content.Source(p.Source),
 		StartedAt:         p.StartedAt,
 		EndedAt:           p.EndedAt,
 		TerminationReason: terminationForStatus(content.EntryStatus(p.Status)),
@@ -494,13 +493,12 @@ func validateHistoryRecord(p historyRecordParams) string {
 	default:
 		return "status must be one of running, success, failure, interrupted, unknown"
 	}
-	// The author is the entries.kind vocabulary, restricted to the two
-	// command-bearing kinds: 'action' is a no-block effect and can never be
-	// a command's author. A missing or unknown author is refused at the
-	// wire — the renderer mints it at submit, so a request without one is
-	// malformed, never a silent default.
-	if p.Author != string(content.EntryShell) && p.Author != string(content.EntryAgent) {
-		return "author must be one of shell, agent"
+	// The source is the entries.source vocabulary: 'user' is the person at
+	// the keyboard, 'assistant' the assistant's lane. A missing or unknown
+	// source is refused at the wire — the renderer mints it at submit, so
+	// a request without one is malformed, never a silent default.
+	if p.Source != string(content.SourceUser) && p.Source != string(content.SourceAssistant) {
+		return "source must be one of user, assistant"
 	}
 	// Each timestamp is checked independently; a null field stays valid
 	// (the ledger only stamps what it observed). The message names the

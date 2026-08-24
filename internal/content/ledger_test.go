@@ -179,9 +179,9 @@ func TestStrictRejectsStringInDurationMs(t *testing.T) {
 
 	err = rawLedger(t, path, keyHex,
 		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
 			phase, status, submitted_at, duration_ms)
-		VALUES ('bad', 1, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1, 'not-a-number')`,
+		VALUES ('bad', 1, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1, 'not-a-number')`,
 	)
 	if err == nil {
 		t.Fatal("a string in duration_ms was accepted — STRICT is not in force")
@@ -1073,7 +1073,7 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	entryID := "00000000-0000-7000-8000-000000000100"
 	if _, err := led.Submit(ctx, content.SubmitEntry{
 		ID: entryID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
-		Kind: content.EntryAgent, Intent: "fix the deploy",
+		Kind: content.EntryAsk, Intent: "fix the deploy",
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
@@ -1373,10 +1373,10 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
 		`INSERT INTO environment_observations (environment_id, version, observed_at, criticality)
 			VALUES ('env', 1, 1, 'routine')`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('a', 1, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1)`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('b', 2, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('a', 1, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('b', 2, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
 		`INSERT INTO executions (entry_id, environment_obs_id) VALUES ('a', 1)`,
 	); err != nil {
 		t.Fatalf("seed rows: %v", err)
@@ -1386,14 +1386,14 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"entries.kind", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('k1', 3, 'c', 'd', 'env', '/', 'banana', 'x', 'open', 'pending', 1)`},
-		{"entries.phase", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('p1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'weird', 'pending', 1)`},
-		{"entries.status", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('s1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'done', 1)`},
-		{"entries.sensitivity", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at, sensitivity) VALUES ('se1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1, 'secret')`},
+		{"entries.kind", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('k1', 3, 'c', 'd', 'env', '/', 'banana', 'user', 'x', 'open', 'pending', 1)`},
+		{"entries.phase", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('p1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'weird', 'pending', 1)`},
+		{"entries.status", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('s1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'done', 1)`},
+		{"entries.sensitivity", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at, sensitivity) VALUES ('se1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1, 'secret')`},
 		{"edges.rel", `INSERT INTO edges (from_id, to_id, rel) VALUES ('a', 'b', 'related-to')`},
 		{"environments.kind", `INSERT INTO environments (id, kind, first_seen) VALUES ('e2', 'docker', 1)`},
 		{"environment_observations.criticality", `INSERT INTO environment_observations
@@ -1415,6 +1415,59 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 		if err := rawLedger(t, path, keyHex, c.sql); err == nil {
 			t.Errorf("%s: an unknown value was accepted", c.name)
 		}
+	}
+}
+
+// ── the source and the seat are the database's (criteria 4, 7) ───────────
+
+// The two CHECKs this task added are the schema's, and a raw statement is
+// the only way to test them: a Go-typed caller cannot express an unknown
+// source, and Submit refuses to write a seatless root before the engine
+// ever sees it. Each refusal gets its paired success on an ordinary row.
+func TestSchemaRefusesBadSourceAndSeatlessRoots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	db, err := content.Open(context.Background(), content.Config{
+		Path: path, Key: testKey(), Budget: testBudget,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	keyHex := hex.EncodeToString(testKey())
+	if err := rawLedger(t, path, keyHex,
+		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
+	); err != nil {
+		t.Fatalf("seed environment: %v", err)
+	}
+
+	refused := []struct {
+		name string
+		sql  string
+	}{
+		{"a source outside the enum", `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			 phase, status, submitted_at) VALUES ('s1', 1, 'c', 'd', 'env', '/', 'shell', 'robot', 'x', 'open', 'pending', 1)`},
+		{"a root that holds a seat", `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			 phase, status, submitted_at) VALUES ('s2', 2, 'c', 'd', 'env', NULL, 5, '/', 'shell', 'user', 'x', 'open', 'pending', 1)`},
+	}
+	for _, c := range refused {
+		if err := rawLedger(t, path, keyHex, c.sql); err == nil {
+			t.Errorf("%s: the schema accepted it", c.name)
+		}
+	}
+
+	// THE PAIRED SUCCESSES (criterion 7): an ordinary row with a valid
+	// source, and a child that legitimately holds a seat — both land.
+	if err := rawLedger(t, path, keyHex,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok1', 3, 'c', 'd', 'env', '/', 'shell', 'assistant', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok2', 4, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok3', 5, 'c', 'd', 'env', 'ok2', 0, '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+	); err != nil {
+		t.Fatalf("the paired successes were refused: %v", err)
 	}
 }
 

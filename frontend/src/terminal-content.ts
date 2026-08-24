@@ -3263,9 +3263,10 @@ export class TerminalContent extends BasePaneContent {
       body: bodies.get(b.entryId)?.body ?? null,
       kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
       entryId: b.entryId,
-      // Who ran it, carried from the entry's own kind (nocx-4em1z). The
-      // block's badge is painted from this, so a command the assistant ran
-      // still says so after a restart.
+      // Who ran it, carried from the entry's OWN source column
+      // (nocx-dc2fr; restore-client maps entries.source to the display
+      // author). The block's badge is painted from this, so a command the
+      // assistant ran still says so after a restart.
       author: b.author,
     })
     // A block a TURN placed is not also drawn at its own row: the turn
@@ -3328,9 +3329,10 @@ export class TerminalContent extends BasePaneContent {
                   cwd: '',
                   location: '',
                   kind: 'text',
-                  entryId: cause.entryId,
                   body: childBody.get(cause.entryId) ?? null,
-                  author: 'agent',
+                  // A run of the assistant's prose is the assistant's —
+                  // the child's own source says so (nocx-dc2fr).
+                  author: cause.source === 'assistant' ? 'agent' : 'shell',
                   status: 'success',
                   durationMs: null,
                   exitCode: null,
@@ -3361,10 +3363,11 @@ export class TerminalContent extends BasePaneContent {
                     { sessionName: this.hooks.sessionName },
                   ),
                   cwd: '',
-                  location: '',
                   kind: 'tool',
                   body: null,
-                  author: 'agent',
+                  // The assistant's call is the assistant's — the child's
+                  // own source says so (nocx-dc2fr).
+                  author: cause.source === 'assistant' ? 'agent' : 'shell',
                   status: 'success',
                   durationMs: null,
                   exitCode: null,

@@ -258,6 +258,16 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	if e.Status != content.EntrySuccess {
 		t.Fatalf("thread status = %q, want success", e.Status)
 	}
+	// CRITERION 3 — the proposal the assistant made, and the call a person
+	// approved, BOTH stay `assistant`: a person who allows the call
+	// authorised somebody else's intent, they did not submit it
+	// (schemaV1's source comment). policy.go writes the ACTION row with
+	// SourceAssistant; the approved call runs as attempt 2 of the SAME
+	// entry (ADR-0020 decision 4), so no second submit exists to convert,
+	// and the store never rewrites source on approval (no update path).
+	if e.Source != content.SourceAssistant {
+		t.Fatalf("the approved action entry carries source %q, want assistant — approval must not become the person's submission", e.Source)
+	}
 }
 
 // ── the egress gate's approved resume: retained bytes, never a re-run ─────

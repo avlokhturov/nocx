@@ -36,6 +36,10 @@ func aCompletedCommand(intent string) content.CompletedCommand {
 		Env:    content.Environment{ID: "local", Kind: content.EnvLocal},
 		Cwd:    "/repo",
 		Intent: intent,
+		// The factory stands in for a person's command: RecordCompleted
+		// refuses an empty source (provenance never silently becomes the
+		// person), and a caller names the assistant's explicitly.
+		Source: content.SourceUser,
 		Status: content.EntrySuccess,
 	}
 }

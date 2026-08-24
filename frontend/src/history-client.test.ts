@@ -12,9 +12,9 @@ import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
 import type { WSClient } from './ipc'
 import { log } from './log'
 function fakeClient(): { call: ReturnType<typeof vi.fn> } {
-  // The ack confirms the minted author (a schema-valid minimal shape); a
+  // The ack confirms the minted source (a schema-valid minimal shape); a
   // test that exercises the mismatch path overrides it.
-  return { call: vi.fn().mockResolvedValue({ author: 'shell' }) }
+  return { call: vi.fn().mockResolvedValue({ source: 'user' }) }
 }
 
 // The authority: an authenticated attempt. Its domain is branded (only the
@@ -67,7 +67,7 @@ describe('recordCommand', () => {
       command: 'make deploy',
       cwd: '/repo',
       host: '',
-      author: 'shell',
+      source: 'user',
       status: 'success',
       exitCode: 0,
       // performance.now() floats are rounded at the wire boundary — the
@@ -78,16 +78,19 @@ describe('recordCommand', () => {
     })
   })
 
-  it("the record's author crosses verbatim — minted at submit, never re-derived (nocx-iadtt)", () => {
+  it("the record's author crosses as the ledger's source — one mapping, never re-derived (nocx-iadtt)", () => {
     // An agent-submitted command's record carries author 'agent'; the wire
-    // fact carries the same value, so the backend never has to derive the
-    // author from a lane or a run state.
+    // fact is the ledger's entries.source vocabulary — 'assistant' — and
+    // the mapping lives HERE, at the wire: the display vocabulary and the
+    // store's source is one fact in two words, and deriving the wire value
+    // from the kind again would repaint the defect the source column
+    // exists to remove (nocx-dc2fr).
     const client = fakeClient()
-    client.call.mockResolvedValue({ author: 'agent' })
+    client.call.mockResolvedValue({ source: 'assistant' })
     const rec = completedRecord({ author: 'agent' })
     void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
-    expect(params.author).toBe('agent')
+    expect(params.source).toBe('assistant')
   })
 
   it('never sends the session-owned fields (id, lineOf, disposed) or output', () => {
@@ -104,13 +107,13 @@ describe('recordCommand', () => {
     expect(params).not.toHaveProperty('disposed')
     expect(params).not.toHaveProperty('output')
     expect(Object.keys(params as object).sort()).toEqual([
-      'author',
       'command',
       'cwd',
       'endedAt',
       'exitCode',
       'host',
       'paneId',
+      'source',
       'startedAt',
       'status',
     ])
@@ -166,10 +169,10 @@ describe('recordCommand', () => {
     expect(params.command).toBe('make deploy {{secret:ci-token}}')
   })
 
-  it('returns the ack when it confirms the minted author — the echo is the verification (nocx-iadtt)', async () => {
+  it('returns the ack when it confirms the minted source — the echo is the verification (nocx-iadtt)', async () => {
     const client = fakeClient()
     const ack = {
-      author: 'shell',
+      source: 'user',
       maskedCount: 0,
       maskedKinds: [],
       entryId: '',
@@ -183,9 +186,9 @@ describe('recordCommand', () => {
     ).resolves.toEqual(ack)
   })
 
-  it('refuses an ack whose author contradicts the minted record — a wire-integrity failure, not a recoverable difference (nocx-iadtt)', async () => {
+  it('refuses an ack whose source contradicts the minted record — a wire-integrity failure, not a recoverable difference (nocx-iadtt)', async () => {
     const client = fakeClient()
-    client.call.mockResolvedValue({ author: 'shell' })
+    client.call.mockResolvedValue({ source: 'user' })
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
     try {
       await expect(
@@ -197,7 +200,7 @@ describe('recordCommand', () => {
         ),
       ).resolves.toBeNull()
       expect(warn).toHaveBeenCalledTimes(1)
-      expect(warn.mock.calls[0]?.[0]).toContain('ack author mismatch')
+      expect(warn.mock.calls[0]?.[0]).toContain('ack source mismatch')
     } finally {
       warn.mockRestore()
     }

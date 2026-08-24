@@ -1030,8 +1030,14 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 		EnvironmentID: envID,
 		Cwd:           "/",
 		Kind:          content.EntryAction,
-		Intent:        decl.Name,
-		Payload:       string(payload),
+		// The assistant's call was submitted by the assistant, and approval
+		// does not change that: a person who allows the call authorised
+		// somebody else's intent, they did not submit it (schemaV1's
+		// source comment). Naming it here is what keeps the store's
+		// empty→user default — the ordinary shell path — off agent rows.
+		Source:  content.SourceAssistant,
+		Intent:  decl.Name,
+		Payload: string(payload),
 	})
 	if err != nil {
 		return "", fmt.Errorf("proposal submit: %w", err)
@@ -1146,6 +1152,7 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 			EnvironmentID: envID,
 			Cwd:           "/",
 			Kind:          content.EntryAction,
+			Source:        content.SourceAssistant,
 			Intent:        decl.Name,
 			Payload:       string(payload),
 		})

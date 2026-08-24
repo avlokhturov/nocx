@@ -80,6 +80,7 @@ func recordBlockWithBody(t *testing.T, db content.ContentDB, paneID, intent, art
 		Cwd:    "/repo",
 		Intent: intent,
 		Status: content.EntrySuccess,
+		Source: content.SourceUser,
 	})
 	if err != nil {
 		t.Fatalf("RecordCompleted(%q): %v", intent, err)
@@ -299,6 +300,7 @@ func TestBlocks_ABlockWithNoBodyIsStatedNotEmpty(t *testing.T) {
 		Cwd:    "/repo",
 		Intent: "ssh prod",
 		Status: content.EntryUnknown,
+		Source: content.SourceUser,
 	})
 	if err != nil {
 		t.Fatalf("RecordCompleted: %v", err)
@@ -345,6 +347,7 @@ func TestListBlocks_AnOpenEntryIsNotOffered(t *testing.T) {
 		Cwd:    "/repo",
 		Intent: "make ci",
 		Status: content.EntrySuccess,
+		Source: content.SourceUser,
 	}); err != nil {
 		t.Fatalf("RecordCompleted: %v", err)
 	}
@@ -354,7 +357,7 @@ func TestListBlocks_AnOpenEntryIsNotOffered(t *testing.T) {
 		EnvironmentID: "local",
 		PaneID:        &pane,
 		Cwd:           "/repo",
-		Kind:          content.EntryAgent,
+		Kind:          content.EntryAsk,
 		Intent:        "why did the build fail?",
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)

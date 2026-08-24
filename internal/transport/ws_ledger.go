@@ -630,9 +630,9 @@ func validateLedgerEnvelope(e ledgerEnvelopeWire) string {
 		return "envelope.cwd is required and bounded"
 	}
 	switch content.EntryKind(e.Kind) {
-	case content.EntryShell, content.EntryAgent, content.EntryAction:
+	case content.EntryShell, content.EntryAsk, content.EntryAction, content.EntryText, content.EntryFrame:
 	default:
-		return "envelope.kind must be one of shell, agent, action"
+		return "envelope.kind must be one of shell, ask, action, text, frame"
 	}
 	// Intent may be EMPTY and that is a product state, not a defect: an
 	// orphan OSC 133 C is an entry with no intent (design §4.4), and refusing

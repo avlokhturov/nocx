@@ -236,7 +236,7 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	openEntryIn(t, conn, sid, "decoy-shell", "/repo", "shell", "1000-and-done", 21)
 	openEntryIn(t, conn, sid, "here-shell", "/repo", "shell", "make test", 2)
 	openEntryIn(t, conn, sid, "there-shell", "/other", "shell", "make lint", 3)
-	openEntryIn(t, conn, sid, "here-agent", "/repo", "agent", "why did it fail", 4)
+	openEntryIn(t, conn, sid, "here-ask", "/repo", "ask", "why did it fail", 4)
 	closeEntryOverWire(t, conn, sid, "here-shell", "failure", 2, 5)
 
 	t.Run("directory excludes another directory", func(t *testing.T) {
@@ -246,8 +246,8 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 		wantQueried(t, page, "there-shell")
 	})
 	t.Run("kind excludes another kind", func(t *testing.T) {
-		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "kind": "agent"}, 11)
-		wantQueried(t, page, "here-agent")
+		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "kind": "ask"}, 11)
+		wantQueried(t, page, "here-ask")
 	})
 	t.Run("status excludes another status", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "status": "failure"}, 12)
@@ -265,7 +265,7 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	})
 	t.Run("limit bounds the page and says it is not exhausted", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "limit": 1}, 13)
-		wantQueried(t, page, "here-agent")
+		wantQueried(t, page, "here-ask")
 		if page.Exhausted {
 			t.Fatal("a page with two further entries behind it says it is exhausted")
 		}
@@ -597,7 +597,7 @@ func TestLedgerGet_ProseEvictedOverTheWire(t *testing.T) {
 	makeTurn := func(id, artifactID string, pinned bool) {
 		if _, err := led.Submit(ctx, content.SubmitEntry{
 			ID: id, Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
-			Kind: content.EntryAgent, Intent: "how big is it?", Payload: "{}",
+			Kind: content.EntryAsk, Intent: "how big is it?", Payload: "{}",
 		}); err != nil {
 			t.Fatalf("submit the turn: %v", err)
 		}
@@ -710,7 +710,7 @@ func TestLedgerGet_AProseBodyAndACommandBodyBothReachTheWire(t *testing.T) {
 	// no execution, because nothing was attempted.
 	if _, err := led.Submit(ctx, content.SubmitEntry{
 		ID: "wire-turn", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
-		Kind: content.EntryAgent, Intent: "what went wrong?", Payload: "{}",
+		Kind: content.EntryAsk, Intent: "what went wrong?", Payload: "{}",
 	}); err != nil {
 		t.Fatalf("submit the turn: %v", err)
 	}
@@ -953,6 +953,7 @@ func recordInPane(t *testing.T, db content.ContentDB, paneID, intent string) {
 		Cwd:    "/repo",
 		Intent: intent,
 		Status: content.EntrySuccess,
+		Source: content.SourceUser,
 	}); err != nil {
 		t.Fatalf("RecordCompleted(%q): %v", intent, err)
 	}

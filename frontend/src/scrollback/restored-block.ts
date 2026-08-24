@@ -190,7 +190,13 @@ export function restoredBlock(
  *  fields are what a child's own block is built from. */
 export interface RestoredCause {
   entryId: string
-  kind: 'shell' | 'agent' | 'action' | 'text'
+  /** What the child row IS — the ledger's own vocabulary ('ask' is a TURN,
+   *  never a child of a turn, and the member is here because the enum
+   *  mirrors the store; 'text' is a run of the assistant's prose). */
+  kind: 'shell' | 'ask' | 'action' | 'text'
+  /** Who submitted the child's content, in the ledger's entries.source
+   *  vocabulary — the badge of a child never guesses it from the kind. */
+  source: 'user' | 'assistant'
   intent?: string
   args?: Record<string, unknown> | null
   effect?: string | null

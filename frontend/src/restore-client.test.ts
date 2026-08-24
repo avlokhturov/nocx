@@ -103,10 +103,35 @@ describe('restore-client — a block says what it is by what its body is', () =>
   })
 
   it('no terminal body makes it an assistant turn, drawn from its text', async () => {
-    const { client } = fakeLedger([BOTH[1]], 'agent')
+    const { client } = fakeLedger([BOTH[1]], 'ask')
     expect(await restoredBody(client, 'entry-1')).toEqual({
       kind: 'ask',
       body: ANSWER_TEXT,
+      caused: [],
+      proseEvicted: false,
+    })
+  })
+
+  // THE DEFECT THIS EPIC'S END-TO-END CHECK FOUND (nocx-dc2fr.8).
+  //
+  // A command the assistant ran used to be recorded as `kind=agent`, because
+  // that column carried WHO submitted it as well as WHAT the row is. Once
+  // ADR-0037 took the turn's own artifact away and the grammar started being
+  // read from the kind, that command came back drawn as PROSE: reflowing
+  // text where a terminal grid belongs, with the grid's alignment gone.
+  //
+  // So: `shell` decides the grammar and `assistant` says nothing about it.
+  // The two columns are read independently or this comes straight back.
+  //
+  // Asserted HERE rather than through a rendered block, because this is the
+  // seam that decides. A test that hands a builder `kind: 'command'` and then
+  // reads the kind back off the DOM asserts what the test itself supplied —
+  // and mutation-checking is what tells the two apart (AGENTS.md rule 1).
+  it('a command the ASSISTANT ran is a command, not prose — the kind decides, never the source', async () => {
+    const { client } = fakeLedger([BOTH[0]], 'shell')
+    expect(await restoredBody(client, 'entry-1')).toEqual({
+      kind: 'command',
+      body: SGR_BODY,
       caused: [],
       proseEvicted: false,
     })
@@ -116,7 +141,7 @@ describe('restore-client — a block says what it is by what its body is', () =>
     // Since ADR-0037 a turn carries no artifact of its own: its prose is
     // `text` children. So an empty artifact list is the ORDINARY shape of
     // a turn, never evidence it was a command — the kind is the entry's.
-    const { client } = fakeLedger([], 'agent')
+    const { client } = fakeLedger([], 'ask')
     expect(await restoredBody(client, 'entry-1')).toEqual({
       kind: 'ask',
       body: null,
@@ -128,7 +153,7 @@ describe('restore-client — a block says what it is by what its body is', () =>
     // Retention takes bodies and leaves entries (ADR-0019 §7). A turn that
     // lost its prose says "no longer kept" through its own notice, and the
     // kind comes from the entry, never from what artifact survived.
-    const { client } = fakeLedger([], 'agent', true)
+    const { client } = fakeLedger([], 'ask', true)
     expect(await restoredBody(client, 'entry-1')).toEqual({
       kind: 'ask',
       body: null,
@@ -166,14 +191,19 @@ describe('restore-client — the pane read', () => {
     cwd: '/repo',
     host: null,
     kind: 'shell',
+    source: 'user' as const,
     status: 'success',
     durationMs: 10,
     exitCode: 0,
     ...over,
   })
-
-  it("carries the entry's author, so a command the assistant ran keeps its badge", async () => {
-    const client = fakeQuery([entry({ id: 'agent-cmd', kind: 'agent', intent: 'go test ./...' })])
+  it("carries the entry's source, so a command the assistant ran keeps its badge", async () => {
+    // The defect this split exists to remove: an agent-run command is
+    // kind='shell' AND source='assistant', and the badge must read the
+    // second half — never be derived from the kind again.
+    const client = fakeQuery([
+      entry({ id: 'agent-cmd', kind: 'shell', source: 'assistant', intent: 'go test ./...' }),
+    ])
     const [block] = await blocksForPane(client, 'pane-1')
     expect(block.author).toBe('agent')
     expect(block.command).toBe('go test ./...')
@@ -224,7 +254,7 @@ describe('restore-client — the causal flow of a restored turn', () => {
       call: vi.fn((method: string) => {
         if (method === 'ledger.get')
           return Promise.resolve({
-            entry: { kind: 'agent' },
+            entry: { kind: 'ask' },
             artifacts,
             caused,
             proseEvicted: false,
@@ -314,6 +344,9 @@ describe('restore-client — blocks arranged by the relation', () => {
     // module places a caused block next to its turn.
     position,
     kind: 'shell' as const,
+    // A page row here is a command a person ran; the source column is what
+    // the fixture must carry now (nocx-dc2fr).
+    source: 'user' as const,
     intent: entryId,
     // An ACTION's facts, and null on a shell child: a command a turn ran is
     // not a tool call and asked for nothing.

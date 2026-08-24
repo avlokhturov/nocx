@@ -126,6 +126,16 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 	if in.Sensitivity == "" {
 		in.Sensitivity = SensitivityNormal
 	}
+	// Empty Source is the ordinary shell path — every caller before the
+	// source split named no source, and a person at the keyboard is what
+	// those rows are. Normalized HERE, before the digest below, so a
+	// legacy empty-source replay hashes identically to the normalized row
+	// it created: replay of the same id must not see a different digest
+	// and refuse the very row it wrote. The assistant's callers name
+	// SourceAssistant explicitly; nothing in this store guesses it.
+	if in.Source == "" {
+		in.Source = SourceUser
+	}
 	digest := entryDigest(in)
 	var out SubmitResult
 	err := s.run(ctx, func(ctx context.Context) error {
@@ -191,12 +201,13 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
 			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, parent_id, pos,
-			 cwd, kind, intent, phase, status, submitted_at, started_at, ended_at, duration_ms,
-			 sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 cwd, kind, source, intent, phase, status, submitted_at, started_at, ended_at,
+			 duration_ms, sensitivity, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			in.ID, next, in.Client, digest, in.EnvironmentID, in.PaneID, in.SessionID,
-			in.ParentID, in.Pos, in.Cwd, string(in.Kind), in.Intent, string(phase), string(status),
-			submittedAt, in.StartedAt, in.EndedAt, in.DurationMs, string(in.Sensitivity), in.Payload,
+			in.ParentID, in.Pos, in.Cwd, string(in.Kind), string(in.Source), in.Intent,
+			string(phase), string(status), submittedAt, in.StartedAt, in.EndedAt, in.DurationMs,
+			string(in.Sensitivity), in.Payload,
 		); err != nil {
 			return err
 		}
@@ -225,12 +236,12 @@ func entryDigest(in SubmitEntry) string {
 	enc := json.NewEncoder(h)
 	_ = enc.Encode(struct {
 		Client, EnvironmentID, Cwd, Intent, Payload string
-		Kind, Sensitivity                           string
+		Kind, Source, Sensitivity                   string
 		PaneID, SessionID, ParentID                 *string
 		Pos                                         *int
 	}{
 		Client: in.Client, EnvironmentID: in.EnvironmentID, Cwd: in.Cwd, Intent: in.Intent,
-		Payload: in.Payload, Kind: string(in.Kind), Sensitivity: string(in.Sensitivity),
+		Payload: in.Payload, Kind: string(in.Kind), Source: string(in.Source), Sensitivity: string(in.Sensitivity),
 		PaneID: in.PaneID, SessionID: in.SessionID, ParentID: in.ParentID, Pos: in.Pos,
 	})
 	return hex.EncodeToString(h.Sum(nil))
@@ -295,7 +306,7 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	dest := []any{
 		&e.ID, &e.IngestSeq, &e.Client, &e.Digest, &e.EnvironmentID, &e.PaneID, &e.SessionID,
 		&e.ParentID, &e.Pos, &e.Cwd,
-		&e.Kind, &e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
+		&e.Kind, &e.Source, &e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
 		&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Sensitivity, &e.Payload, &e.ProseEvicted,
 	}
 	// ProseEvicted is asked of the RUN and answered ONCE, whatever the run
@@ -305,8 +316,8 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 	// the body — and a second copy of it on the turn would be a second
 	// answer to drift from the first.
 	err := s.db.QueryRowContext(ctx, `SELECT e.id, e.ingest_seq, e.client, e.digest,
-		e.environment_id, e.pane_id, e.session_id, e.parent_id, e.pos, e.cwd, e.kind, e.intent,
-		e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
+		e.environment_id, e.pane_id, e.session_id, e.parent_id, e.pos, e.cwd, e.kind, e.source,
+		e.intent, e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms,
 		e.sensitivity, e.payload,
 		EXISTS (SELECT 1 FROM entries c JOIN artifacts a ON a.entry_id = c.id
 		         WHERE c.parent_id = e.id AND c.kind = 'text'
@@ -376,7 +387,7 @@ func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]
 // entryPageColumns is the timeline row: the entry's own facts plus the
 // environment half of the join. One const, so ListEntries and QueryEntries
 // cannot drift into two row shapes.
-const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.intent,
+const entryPageColumns = `e.id, e.ingest_seq, e.environment_id, e.cwd, e.kind, e.source, e.intent,
 	e.phase, e.status, e.submitted_at, e.started_at, e.ended_at, e.duration_ms, e.payload, ` +
 	environmentColumns
 
@@ -411,7 +422,7 @@ func entryPage(ctx context.Context, q rowQuerier, cond string, args []any, limit
 		var e LedgerEntrySummary
 		var env environmentScan
 		dest := []any{
-			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind,
+			&e.ID, &e.IngestSeq, &e.EnvironmentID, &e.Cwd, &e.Kind, &e.Source,
 			&e.Intent, &e.Phase, &e.Status, &e.SubmittedAt,
 			&e.StartedAt, &e.EndedAt, &e.DurationMs, &e.Payload,
 		}
@@ -500,7 +511,7 @@ func validateLedgerQuery(q LedgerQuery) error {
 		return fmt.Errorf("content: query: unknown scope %q", q.Scope)
 	}
 	switch q.Kind {
-	case "", EntryShell, EntryAgent, EntryAction:
+	case "", EntryShell, EntryAsk, EntryAction, EntryFrame, EntryText:
 	default:
 		return fmt.Errorf("content: query: unknown kind %q", q.Kind)
 	}
@@ -693,6 +704,14 @@ func (s *sqliteContent) RewriteRedaction(ctx context.Context, entryID string, sp
 // background eviction, never against this explicit deletion.
 func (s *sqliteContent) DeleteEntry(ctx context.Context, id string) error {
 	return s.run(ctx, func(ctx context.Context) error {
+		// THE SEAT GOES WITH THE PARENT, exactly as eviction does
+		// (retention.go): ON DELETE SET NULL nulls the children's
+		// parent_id, and the schema's CHECK (parent_id IS NOT NULL OR
+		// pos IS NULL) would then refuse surviving children that still
+		// hold a seat. Detach them first, in the same transaction.
+		if _, err := s.db.ExecContext(ctx, `UPDATE entries SET pos = NULL WHERE parent_id = ?`, id); err != nil {
+			return err
+		}
 		_, err := s.db.ExecContext(ctx, `DELETE FROM entries WHERE id = ?`, id)
 		return err
 	})
@@ -1314,7 +1333,7 @@ func (s *sqliteContent) AddCause(ctx context.Context, turnID, causedID string) (
 // UNIQUE (parent_id, pos) is there to make impossible through this seam.
 func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEntry, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT n.id, COALESCE(n.pos, 0), n.kind, n.intent, n.payload
+		`SELECT n.id, COALESCE(n.pos, 0), n.kind, n.source, n.intent, n.payload
 		 FROM entries n
 		 WHERE n.parent_id = ?
 		 ORDER BY n.pos, n.id`,
@@ -1327,7 +1346,7 @@ func (s *sqliteContent) Caused(ctx context.Context, entryID string) ([]CausedEnt
 	for rows.Next() {
 		var c CausedEntry
 		var payload string
-		if err := rows.Scan(&c.EntryID, &c.Position, &c.Kind, &c.Intent, &payload); err != nil {
+		if err := rows.Scan(&c.EntryID, &c.Position, &c.Kind, &c.Source, &c.Intent, &payload); err != nil {
 			return nil, err
 		}
 		// The tool facts belong to an ACTION row and are read from nowhere

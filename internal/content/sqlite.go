@@ -321,7 +321,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 
 	res, err := tx.ExecContext(ctx,
 		`UPDATE entries SET phase = 'closed', status =
-		   CASE WHEN kind = 'agent' THEN 'interrupted' ELSE 'unknown' END
+		   CASE WHEN kind = 'ask' THEN 'interrupted' ELSE 'unknown' END
 		 WHERE phase != 'closed'`)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
@@ -385,7 +385,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 13
+const schemaVersion = 14
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -767,7 +767,17 @@ CREATE TABLE IF NOT EXISTS entries (
   -- prose living in a table built around intent → attempt → outcome is real.
   -- Left implicit it becomes "for text this column is NULL and that one does
   -- not apply", which is how a table rots.
-  kind            TEXT NOT NULL CHECK (kind IN ('shell','agent','action','text')),
+  kind            TEXT NOT NULL CHECK (kind IN ('shell','ask','action','text','frame')),
+  -- source is the IMMEDIATE subject that submitted the content or the
+  -- intent this entry represents. Initiation is NOT transitive: the
+  -- assistant was set going by a person, and the command the assistant ran
+  -- was submitted by the assistant — if initiation chained, every row in
+  -- the tree would be 'user' and the column would say nothing. Approval
+  -- does not change it: a call the assistant proposed stays 'assistant'
+  -- after a person allows it, because the person authorised somebody
+  -- else's intent, they did not submit it. (No backticks in here: this DDL
+  -- is a Go raw string literal, and one would end it.)
+  source          TEXT NOT NULL CHECK (source IN ('user','assistant')),
   intent          TEXT NOT NULL,
   phase           TEXT NOT NULL CHECK (phase IN ('open','bound','closed')),
   status          TEXT NOT NULL CHECK (status IN ('pending','running','success','failure','interrupted','unknown')),
@@ -786,6 +796,15 @@ CREATE TABLE IF NOT EXISTS entries (
   capture_key     TEXT,
   payload         TEXT NOT NULL DEFAULT '{}', -- kind payload, sparse extension only
   UNIQUE (parent_id, pos),
+  -- The seat is the database's. SQLite counts NULLs as distinct in a unique
+  -- index, so UNIQUE(parent_id, pos) constrains SIBLINGS only — a top-level
+  -- block (parent_id NULL, pos NULL) never collides with another root. But
+  -- it also does NOT constrain a root that holds a seat: SQLite counts
+  -- (NULL, n) as distinct from every other row, so a root with a pos slips
+  -- past the unique index and claims a seat nothing is ordered by (top-level
+  -- order is ingest_seq, and roots hold no seat). That is a drawing order
+  -- with a dead seat — the store refuses it.
+  CHECK (parent_id IS NOT NULL OR pos IS NULL),
   -- The text shape, stated once and enforced by the engine: a run of prose
   -- sits INSIDE a block (parent_id, pos), says nothing about an intent
   -- (intent = ''), and has no execution to wait for or judge — it was

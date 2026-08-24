@@ -1749,7 +1749,15 @@ func validateCaptureFrame(p captureFrameParams) (content.CaptureFrame, string) {
 		SessionID: new(p.SessionID),
 		Cwd:       p.Cwd,
 		Source:    source,
-		Cursor:    wireCursor(p.Cursor),
+		// A capture arrives from the renderer's ask gesture — a person
+		// selected blocks and asked — so the frame is the person's
+		// capture, in the entries.source vocabulary. The readScreen pull is
+		// a different producer with its own path (agent.readScreenResolved
+		// never reaches this seam) and will stamp assistant when it ever
+		// persists a frame; this is the honest value for what this wire
+		// method creates.
+		Subject: content.SourceUser,
+		Cursor:  wireCursor(p.Cursor),
 	}
 
 	bodyChars := 0

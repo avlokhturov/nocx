@@ -74,10 +74,11 @@ func (f *fakeRecordHistoryDB) RecordCompleted(_ context.Context, in content.Comp
 		EnvironmentID: env.ID,
 		Environment:   &env,
 		Cwd:           in.Cwd,
-		// The AUTHOR the handler was handed, not a constant: the entry's kind
-		// is where the author lives (design §3.1, nocx-iadtt), so a fake that
-		// hardcoded `shell` here could not report the author being dropped.
-		Kind:       in.Author,
+		// The SOURCE the handler was handed, not a constant: the entry's
+		// entries.source is where who-submitted lives (design §3.1,
+		// nocx-iadtt), so a fake that hardcoded `user` here could not report
+		// the source being dropped.
+		Source:     in.Source,
 		Intent:     in.Intent,
 		Phase:      content.PhaseClosed,
 		Status:     in.Status,
@@ -159,7 +160,7 @@ func recordParams(overrides map[string]any) map[string]any {
 		"command":   "ls -la",
 		"cwd":       "/srv/api",
 		"host":      "",
-		"author":    "shell",
+		"source":    "user",
 		"status":    "success",
 		"exitCode":  0,
 		"startedAt": int64(1_750_000_000_000),
@@ -292,57 +293,57 @@ func TestHistoryRecord_RejectsUnknownStatus(t *testing.T) {
 // author is malformed — the renderer mints it at submit (design §3.1,
 // nocx-iadtt) — and 'action' (the ledger's third kind) can never be a
 // command's author: an action has no block and no command line.
-func TestHistoryRecord_RejectsMissingOrUnknownAuthor(t *testing.T) {
+func TestHistoryRecord_RejectsMissingOrUnknownSource(t *testing.T) {
 	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
 	defer stop()
 	conn := connectWS(t, ws)
 
 	missing := recordParams(nil)
-	delete(missing, "author")
+	delete(missing, "source")
 	resp := vaultCall(t, conn, "history.record", missing, 1)
 	if resp.Error == nil || resp.Error.Code != -32602 {
-		t.Fatalf("missing author: error = %+v, want -32602", resp.Error)
+		t.Fatalf("missing source: error = %+v, want -32602", resp.Error)
 	}
 
-	for _, author := range []string{"robot", "action", ""} {
-		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"author": author}), 1)
+	for _, src := range []string{"robot", "action", ""} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"source": src}), 1)
 		if resp.Error == nil || resp.Error.Code != -32602 {
-			t.Fatalf("author %q: error = %+v, want -32602", author, resp.Error)
+			t.Fatalf("source %q: error = %+v, want -32602", src, resp.Error)
 		}
 	}
 }
 
-// The ack carries the author the record was accepted under, over the real
+// The ack carries the source the record was accepted under, over the real
 // socket: the renderer minted it at submit, and the ack's echo is how it
 // verifies the backend kept the fact — the two sides never derive the same
 // thing twice (design §3.1, nocx-iadtt).
-func TestHistoryRecord_AckCarriesTheAuthor(t *testing.T) {
+func TestHistoryRecord_AckCarriesTheSource(t *testing.T) {
 	db := newFakeRecordHistoryDB()
 	ws, stop := newHistoryWSServer(t, db)
 	defer stop()
 	conn := connectWS(t, ws)
 
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
-		"author": "agent",
+		"source": "assistant",
 	}), 1)
 	if resp.Error != nil {
 		t.Fatalf("record error: %+v", resp.Error)
 	}
 	var ack struct {
-		Author string `json:"author"`
+		Source string `json:"source"`
 	}
 	if err := json.Unmarshal(resp.Result, &ack); err != nil {
 		t.Fatalf("decode ack: %v", err)
 	}
-	if ack.Author != "agent" {
-		t.Fatalf("ack author = %q, want agent", ack.Author)
+	if ack.Source != "assistant" {
+		t.Fatalf("ack source = %q, want assistant", ack.Source)
 	}
 }
 
 // The handler writes the author into durable history, and a restart still
 // sees it through both the ledger projection (entries.kind) and the
 // command-history read model. That proves the wire has not outrun the store.
-func TestHistoryRecord_PersistsAuthorThroughRestart(t *testing.T) {
+func TestHistoryRecord_PersistsSourceThroughRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := content.Config{
 		Path: filepath.Join(dir, "content.db"),
@@ -362,18 +363,18 @@ func TestHistoryRecord_PersistsAuthorThroughRestart(t *testing.T) {
 	conn := connectWS(t, ws)
 
 	for _, tc := range []struct {
-		author  string
+		source  string
 		command string
 	}{
-		{author: "shell", command: "shell-cmd"},
-		{author: "agent", command: "agent-cmd"},
+		{source: "user", command: "shell-cmd"},
+		{source: "assistant", command: "agent-cmd"},
 	} {
 		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
-			"author":  tc.author,
+			"source":  tc.source,
 			"command": tc.command,
 		}), 1)
 		if resp.Error != nil {
-			t.Fatalf("%s record error: %+v", tc.author, resp.Error)
+			t.Fatalf("%s record error: %+v", tc.source, resp.Error)
 		}
 	}
 
@@ -395,11 +396,11 @@ func TestHistoryRecord_PersistsAuthorThroughRestart(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("ledger entries = %d, want 2", len(entries))
 	}
-	if entries[0].Kind != content.EntryAgent || entries[0].Intent != "agent-cmd" {
-		t.Fatalf("newest ledger entry = %+v, want agent-cmd/agent", entries[0])
+	if entries[0].Kind != content.EntryShell || entries[0].Intent != "agent-cmd" || entries[0].Source != content.SourceAssistant {
+		t.Fatalf("newest ledger entry = %+v, want agent-cmd under the assistant source", entries[0])
 	}
-	if entries[1].Kind != content.EntryShell || entries[1].Intent != "shell-cmd" {
-		t.Fatalf("older ledger entry = %+v, want shell-cmd/shell", entries[1])
+	if entries[1].Kind != content.EntryShell || entries[1].Intent != "shell-cmd" || entries[1].Source != content.SourceUser {
+		t.Fatalf("older ledger entry = %+v, want shell-cmd under the user source", entries[1])
 	}
 }
 
@@ -413,7 +414,7 @@ func TestHistoryRecord_SurfacesStoreAddError(t *testing.T) {
 	conn := connectWS(t, ws)
 
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
-		"author":  "agent",
+		"source":  "assistant",
 		"command": "agent-cmd",
 	}), 1)
 	if resp.Error == nil || resp.Error.Code != -32603 || !strings.Contains(resp.Error.Message, "boom") {
@@ -617,7 +618,7 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 		"nothing masked": {
 			MaskedCount:   0,
 			MaskedKinds:   []string{},
-			Author:        "shell",
+			Source:        "user",
 			Redactions:    []redactionWire{},
 			Captures:      []captureWire{},
 			MaskedCommand: "echo hi",
@@ -625,7 +626,7 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 		"two kinds": {
 			MaskedCount:   2,
 			MaskedKinds:   []string{"openai"},
-			Author:        "agent",
+			Source:        "assistant",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions: []redactionWire{
 				{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
@@ -636,7 +637,7 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 			MaskedCount:   1,
 			MaskedKinds:   []string{"openai"},
 			EntryID:       "0192f0aa-0000-7000-8000-000000000007",
-			Author:        "shell",
+			Source:        "user",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions:    []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
 			Captures: []captureWire{{
@@ -671,7 +672,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
 		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`,
-		"author":  "agent",
+		"source":  "assistant",
 	}), 1)
 	if resp.Error != nil {
 		t.Fatalf("record error: %+v", resp.Error)
@@ -679,7 +680,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
 
 	var got struct {
-		Author        string   `json:"author"`
+		Source        string   `json:"source"`
 		MaskedCount   int      `json:"maskedCount"`
 		MaskedKinds   []string `json:"maskedKinds"`
 		MaskedCommand string   `json:"maskedCommand"`
@@ -694,8 +695,8 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	if got.MaskedCount != 1 || len(got.MaskedKinds) != 1 || got.MaskedKinds[0] != "openai" {
 		t.Errorf("ack facts = %d %v, want 1 [openai]", got.MaskedCount, got.MaskedKinds)
 	}
-	if got.Author != "agent" {
-		t.Errorf("ack author = %q, want agent — the minted fact rides the wire both ways", got.Author)
+	if got.Source != "assistant" {
+		t.Errorf("ack source = %q, want assistant — the minted fact rides the wire both ways", got.Source)
 	}
 	if got.MaskedCommand != `curl -H "Authorization: Bearer sk-p...7890" https://api` {
 		t.Errorf("maskedCommand = %q, want the masked command the row keeps", got.MaskedCommand)

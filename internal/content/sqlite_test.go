@@ -145,12 +145,12 @@ func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
 		{
 			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
 			Cwd: "/srv/api", Intent: "agent-cmd", Status: content.EntrySuccess,
-			Author: content.EntryAgent,
+			Source: content.SourceAssistant,
 		},
 		{
 			Client: "test-client", Env: content.Environment{ID: "local", Kind: content.EnvLocal},
 			Cwd: "/srv/api", Intent: "shell-cmd", Status: content.EntrySuccess,
-			Author: content.EntryShell,
+			Source: content.SourceUser,
 		},
 	} {
 		if _, err := db.Ledger().RecordCompleted(ctx, rec); err != nil {
@@ -179,45 +179,54 @@ func TestHistoryRecordAuthorSurvivesRestartInLedger(t *testing.T) {
 	if len(entries) != 2 {
 		t.Fatalf("entries after reopen = %+v, want 2 durable rows", entries)
 	}
-	if entries[0].Kind != content.EntryShell || entries[0].Intent != "shell-cmd" {
-		t.Fatalf("newest ledger entry = %+v, want shell-cmd under the shell author", entries[0])
+	if entries[0].Kind != content.EntryShell || entries[0].Intent != "shell-cmd" || entries[0].Source != content.SourceUser {
+		t.Fatalf("newest ledger entry = %+v, want shell-cmd under the user source", entries[0])
 	}
-	if entries[1].Kind != content.EntryAgent || entries[1].Intent != "agent-cmd" {
-		t.Fatalf("older ledger entry = %+v, want agent-cmd under the agent author", entries[1])
+	if entries[1].Kind != content.EntryShell || entries[1].Intent != "agent-cmd" || entries[1].Source != content.SourceAssistant {
+		t.Fatalf("older ledger entry = %+v, want agent-cmd under the assistant source", entries[1])
 	}
 }
 
-// An author outside the two command-bearing kinds is refused rather than
-// written: `action` is a no-block effect and can never be a command's author,
-// and an unknown kind would meet the CHECK constraint halfway through the
-// transaction instead of at the seam that can name the vocabulary.
-func TestRecordCompleted_RefusesAnAuthorThatIsNotACommandKind(t *testing.T) {
+// A source outside the two command-bearing subjects is refused rather than
+// written: `action` and `text` are kinds, never subjects, and an unknown
+// source would meet the CHECK constraint halfway through the transaction
+// instead of at the seam that can name the vocabulary.
+func TestRecordCompleted_RefusesASourceThatIsNotACommandSubject(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	for _, author := range []content.EntryKind{content.EntryAction, "robot"} {
+	for _, src := range []content.Source{"", "system", "action", "robot"} {
 		rec := aCompletedCommand("x")
-		rec.Author = author
+		rec.Source = src
 		if _, err := db.Ledger().RecordCompleted(ctx, rec); err == nil {
-			t.Fatalf("author %q was accepted; want a refusal naming shell or agent", author)
+			t.Fatalf("source %q was accepted; want a refusal naming user or assistant", src)
 		}
 	}
 }
 
-// And the ordinary caller that names no author is the shell path — which is
-// what every caller was before the author existed, so the default must not
-// leave a row with an empty kind.
-func TestRecordCompleted_DefaultsAnUnnamedAuthorToTheShell(t *testing.T) {
+// The paired success (criterion 7 — for every refusal there is an ordinary
+// row that succeeds): each of the two sources records, and the row carries
+// exactly the source the caller named. There is no third value: "nobody
+// said who submitted this" is refused above, never quietly written.
+func TestRecordCompleted_RecordsTheSourceItWasGiven(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
-	if _, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("unnamed")); err != nil {
-		t.Fatalf("RecordCompleted: %v", err)
+	for _, src := range []content.Source{content.SourceUser, content.SourceAssistant} {
+		rec := aCompletedCommand(string(src))
+		rec.Source = src
+		if _, err := db.Ledger().RecordCompleted(ctx, rec); err != nil {
+			t.Fatalf("RecordCompleted(source=%q): %v", src, err)
+		}
 	}
 	entries, err := db.Ledger().ListEntries(ctx, 10)
 	if err != nil {
 		t.Fatalf("ListEntries: %v", err)
 	}
-	if len(entries) != 1 || entries[0].Kind != content.EntryShell {
-		t.Fatalf("entries = %+v, want one row under the shell author", entries)
+	if len(entries) != 2 {
+		t.Fatalf("entries = %+v, want the two sourced rows", entries)
+	}
+	// Newest first: the assistant's row, then the person's.
+	if entries[0].Source != content.SourceAssistant || entries[1].Source != content.SourceUser {
+		t.Fatalf("sources = %q/%q, want the assistant's then the person's", entries[0].Source, entries[1].Source)
 	}
 }
 

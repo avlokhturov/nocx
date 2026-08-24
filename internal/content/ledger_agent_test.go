@@ -160,8 +160,8 @@ func TestCaptureFrame_LandsAsEntryWithArtifactAndProvenance(t *testing.T) {
 	if e == nil {
 		t.Fatal("the frame entry does not exist")
 	}
-	if e.Kind != content.EntryAgent {
-		t.Errorf("frame entry kind = %q, want %q", e.Kind, content.EntryAgent)
+	if e.Kind != content.EntryFrame {
+		t.Errorf("frame entry kind = %q, want %q", e.Kind, content.EntryFrame)
 	}
 	if e.Intent != content.FrameIntent {
 		t.Errorf("frame entry intent = %q, want %q", e.Intent, content.FrameIntent)
@@ -172,6 +172,14 @@ func TestCaptureFrame_LandsAsEntryWithArtifactAndProvenance(t *testing.T) {
 	}
 	if e.SessionID == nil || *e.SessionID != "session-a" {
 		t.Errorf("frame entry session = %v, want session-a", e.SessionID)
+	}
+	// CRITERION 5 — a captured frame is kind='frame' AND its source is the
+	// immediate subject that asked for it: the renderer's captureFrame is a
+	// person selecting blocks, so a live frame lands as the person's
+	// capture (SourceUser), never conflated into "author". The kind says
+	// WHAT the row is; the source says WHO asked.
+	if e.Source != content.SourceUser {
+		t.Errorf("frame entry source = %q, want user (the ask gesture), not conflated into an author", e.Source)
 	}
 
 	if len(e.Executions) != 1 {
@@ -298,6 +306,40 @@ func TestCaptureFrame_FrozenSourceRecordsItsOwnProvenance(t *testing.T) {
 	}
 }
 
+// CRITERION 5 — the frame's source is the immediate asker: a person's
+// capture is user; a readScreen capture is assistant (the renderer's read
+// tool is a different producer whose durable frames stamp SourceAssistant).
+// The two must never conflate into one "author".
+func TestLedgerFrame_ReadScreenSourceIsTheAssistant(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	// The readScreen tool's frame: the same frozen shape (rows, no cursor)
+	id, err := led.CaptureFrame(ctx, content.CaptureFrame{
+		CaptureID:         "readScreen-1",
+		Client:            "test-client",
+		Env:               content.Environment{ID: "local", Kind: content.EnvLocal},
+		SessionID:         new("session-a"),
+		Cwd:               "/repo",
+		Source:            content.FrameFrozen,
+		Subject:           content.SourceAssistant, // the read tool's answers stamp assistant
+		Rows:              []content.FrameRow{{Kind: "text", Text: "line one"}},
+		SerializerVersion: new(1),
+	})
+	if err != nil {
+		t.Fatalf("CaptureFrame: %v", err)
+	}
+	e, err := led.Entry(ctx, id.FrameID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry: %v (nil=%v)", err, e == nil)
+	}
+	if e.Kind != content.EntryFrame {
+		t.Fatalf("kind = %q, want frame", e.Kind)
+	}
+	if e.Source != content.SourceAssistant {
+		t.Fatalf("source = %q, want assistant — readScreen's capture is the assistant's, never the person's", e.Source)
+	}
+}
+
 // ── captureFrame idempotency ─────────────────────────────────────────────
 
 // A replay of the same capture returns the original backend-minted id and
@@ -362,8 +404,8 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if q == nil {
 		t.Fatal("the question entry does not exist")
 	}
-	if q.Kind != content.EntryAgent {
-		t.Errorf("question kind = %q, want agent", q.Kind)
+	if q.Kind != content.EntryAsk {
+		t.Errorf("question kind = %q, want ask", q.Kind)
 	}
 	if q.Intent != "what does this screen mean?" {
 		t.Errorf("question intent = %q, want the question text", q.Intent)

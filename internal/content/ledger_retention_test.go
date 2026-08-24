@@ -573,7 +573,7 @@ func bodyFor(t *testing.T, led content.LedgerRepository, entry string, exec *int
 func closedTurn(t *testing.T, led content.LedgerRepository, id, question string, endedAt int64) string {
 	t.Helper()
 	envReady(t, led, "local")
-	submitAt(t, led, id, "local", "/repo", content.EntryAgent, question)
+	submitAt(t, led, id, "local", "/repo", content.EntryAsk, question)
 	closeEntryAt(t, led, id, endedAt)
 	return id
 }
@@ -1028,7 +1028,7 @@ func TestABudgetSweepLeavesTheProseOfARunThatHasNotFinished(t *testing.T) {
 	envReady(t, led, "local")
 	// Still streaming: submitted, never closed.
 	live := entryID(100)
-	submitAt(t, led, live, "local", "/repo", content.EntryAgent, "still thinking")
+	submitAt(t, led, live, "local", "/repo", content.EntryAsk, "still thinking")
 	if err := submitChild(t, led, entryID(101), live, 0, content.EntryText, ""); err != nil {
 		t.Fatalf("seating prose: %v", err)
 	}

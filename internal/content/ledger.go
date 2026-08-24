@@ -74,7 +74,7 @@ type EntryKind string
 
 const (
 	EntryShell  EntryKind = "shell"
-	EntryAgent  EntryKind = "agent"
+	EntryAsk    EntryKind = "ask"
 	EntryAction EntryKind = "action"
 	// EntryText is one run of assistant prose (ADR-0037): a thing that was
 	// PRINTED, not attempted. It has no intent, no execution and no outcome
@@ -83,6 +83,28 @@ const (
 	// drawn in the scrollback is an entry, and this is the kind that makes
 	// that true of what the model writes between its calls.
 	EntryText EntryKind = "text"
+	// EntryFrame is a captured frame (design §2.2): a row the ledger owns —
+	// it has no output and no outcome (a capture is a fact, complete at
+	// ingest), but it is a row, and giving it a kind is what lets the ask's
+	// reference check tell a frame from a turn by the discriminated column
+	// rather than by comparing intent against a magic string. It is never
+	// drawn as a block of its own — a frame is a reference into an ask.
+	EntryFrame EntryKind = "frame"
+)
+
+// Source is the IMMEDIATE subject that submitted the content or the intent
+// this entry represents (schemaV1's column, in the brief's words, verbatim
+// for the boundary cases): initiation is NOT transitive — the assistant was
+// set going by a person, and the command the assistant ran was submitted by
+// the assistant, so if initiation chained every row would be `user` and the
+// column would say nothing. Approval does not change it: a call the
+// assistant proposed stays `assistant` after a person allows it, because the
+// person authorised somebody else's intent, they did not submit it.
+type Source string
+
+const (
+	SourceUser      Source = "user"
+	SourceAssistant Source = "assistant"
 )
 
 // Phase is the entry lifecycle (design §3.7): open until execution is
@@ -369,10 +391,22 @@ type SubmitEntry struct {
 	// only the caller knows where in what it is writing this belongs. A
 	// second child at a position already taken is refused by the database,
 	// never silently reordered.
-	ParentID    *string
-	Pos         *int
-	Cwd         string
-	Kind        EntryKind
+	ParentID *string
+	Pos      *int
+	Cwd      string
+	Kind     EntryKind
+	// Source is the IMMEDIATE subject that submitted the content or the
+	// intent this entry represents (schemaV1's column, in the brief's own
+	// words): initiation is NOT transitive — the assistant was set going by
+	// a person, and the command the assistant ran was submitted by the
+	// assistant, so if initiation chained every row would be `user` and the
+	// column would say nothing. Approval does not change it: a call the
+	// assistant proposed stays `assistant` after a person allows it,
+	// because the person authorised somebody else's intent, they did not
+	// submit it. Empty defaults to SourceUser at the writer, never here —
+	// the stores that cannot mean it refuse it (RecordCompleted) or the
+	// caller names it (Submit's assistant callers).
+	Source      Source
 	Intent      string
 	StartedAt   *int64 // frontend monotonic clock — durations only
 	EndedAt     *int64
@@ -578,9 +612,11 @@ func (s RunState) IsTerminal() bool {
 	return false
 }
 
-// FrameIntent marks a frame entry (kind=agent): the capture is a fact,
-// complete at ingest, closed at capture time. The ask's reference check
-// recognises frames by kind+intent — an id that is not a frame is refused.
+// FrameIntent is the intent value a frame row carries (kind=frame): the
+// capture is a fact, complete at ingest, closed at capture time. The ask's
+// reference check recognises a frame by its KIND — the discriminated column,
+// never this string (the magic-string comparison is what the kind exists to
+// retire).
 const FrameIntent = "frame-capture"
 
 // FrameSource is which capture path a frame came from (design §2.2). The
@@ -685,9 +721,17 @@ type CaptureFrame struct {
 	// session is rejected", design §5).
 	SessionID *string
 	// Cwd is where the capture happened (the renderer's OSC 7 fact).
-	Cwd    string
-	Source FrameSource
-	Rows   []FrameRow
+	Cwd string
+	// Source is the CAPTURE PATH (design §2.2): live cells versus
+	// serialized text. Subject is WHO asked for the capture — the
+	// immediate subject, in the entries.source vocabulary — and the two
+	// are deliberately different fields: a live frame is a person's
+	// capture today and can equally be the readScreen tool's pull
+	// tomorrow, so the path must never be read as authorship (the
+	// brief's transitivity trap in miniature).
+	Source  FrameSource
+	Subject Source
+	Rows    []FrameRow
 	// Cursor is the live cursor; null for a frozen frame.
 	Cursor *FrameCursor
 	// Identity is the live capture identity — required for source=live.
@@ -1095,6 +1139,10 @@ type CausedEntry struct {
 	// Position is the child's seat among its siblings (entries.pos).
 	Position int
 	Kind     EntryKind
+	// Source is who submitted the child's content or intent — the same
+	// entries.source fact a page row carries, so a restored turn's badge
+	// never guesses it from the child's kind.
+	Source Source
 	// Intent is the child row's own intent: the command line for a shell
 	// entry, the tool name for an action, and EMPTY for a `text` child —
 	// prose has no intent, which is a clause of its CHECK rather than a
@@ -1148,6 +1196,9 @@ type LedgerEntrySummary struct {
 	StartedAt  *int64
 	EndedAt    *int64
 	DurationMs *int64
+	// Source is who submitted the content or intent this entry represents
+	// (entries.source) — the fact the restore badge is painted from.
+	Source Source
 	// Payload is the entry's kind payload column, raw. Two readers own its
 	// keys and neither is the store: ShellExitCodeOf for the shell arm and
 	// EntryMaskingOf for the redaction receipt (nocx-rtg0.24). The store
@@ -1166,6 +1217,7 @@ func (e LedgerEntry) Summary() LedgerEntrySummary {
 		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
 		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
 		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
+		Source:  e.Source,
 		Payload: e.Payload,
 	}
 }
@@ -1295,6 +1347,10 @@ type LedgerEntry struct {
 	StartedAt   *int64
 	EndedAt     *int64
 	DurationMs  *int64
+	// Source is who submitted the content or intent this entry represents
+	// (entries.source) — carried on the detail read for the same reason it
+	// is on the summary: the restore badge is painted from it.
+	Source      Source
 	Sensitivity Sensitivity
 	Payload     string
 	// Artifacts are the entry's OWN bodies — the ones no execution produced

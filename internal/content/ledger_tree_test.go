@@ -148,9 +148,9 @@ func TestTwoParentsEachHaveTheirOwnSeatZero(t *testing.T) {
 // must hold against any writer, not only against the one that is careful.
 func textRow(id, parent, pos, intent, phase, status string) string {
 	return fmt.Sprintf(`INSERT INTO entries
-		(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, intent,
+		(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
 		 phase, status, submitted_at)
-		VALUES ('%s', %s, 'c', 'd', 'local', %s, %s, '/repo', 'text', '%s', '%s', '%s', 1)`,
+		VALUES ('%s', %s, 'c', 'd', 'local', %s, %s, '/repo', 'text', 'assistant', '%s', '%s', '%s', 1)`,
 		id, id[len(id)-3:], parent, pos, intent, phase, status)
 }
 
