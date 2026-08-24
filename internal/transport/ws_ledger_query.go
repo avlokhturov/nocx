@@ -351,10 +351,31 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 				From: e.From, To: e.To, Rel: string(e.Rel), Payload: payload,
 			})
 		}
-		// The artifacts of every execution of this entry, flattened: they
-		// attach to the run, and the run's id rides each one, so a caller
-		// that cares which attempt produced what still can tell.
+		// EVERY body this entry has, from BOTH places one can hang
+		// (ADR-0037 decision 3): the entry's own, and each execution's.
+		//
+		// The own ones come first and they were missing entirely until
+		// nocx-dc2fr.7's end-to-end check found it. An artifact belongs to
+		// its BLOCK now and names an execution only when an attempt produced
+		// it — a run of assistant prose was printed, not attempted, so its
+		// body has no execution to hang on. This loop flattened
+		// `row.Executions` alone, so every prose body was stored, read back
+		// by the ledger into `row.Artifacts`, and then silently dropped at
+		// the wire: the live turn was right, and the restored one drew every
+		// sentence of it blank. Both unit suites were green, because the
+		// store's test asked the store and the renderer's test supplied the
+		// facts itself — the hole was exactly the seam neither crossed.
 		artifacts := []ledgerArtifactWire{}
+		for _, a := range row.Artifacts {
+			wire, err := ledgerArtifactWireOf(a)
+			if err != nil {
+				return err
+			}
+			artifacts = append(artifacts, wire)
+		}
+		// An execution's artifacts attach to the run, and the run's id rides
+		// each one, so a caller that cares which attempt produced what still
+		// can tell.
 		for _, ex := range row.Executions {
 			for _, a := range ex.Artifacts {
 				wire, err := ledgerArtifactWireOf(a)

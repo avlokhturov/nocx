@@ -669,6 +669,129 @@ func TestLedgerGet_ProseEvictedOverTheWire(t *testing.T) {
 	}
 }
 
+// A PROSE BLOCK'S BODY REACHES THE RENDERER (nocx-dc2fr.7, and it did not).
+//
+// An artifact belongs to its BLOCK and names an execution only when an
+// attempt produced it (ADR-0037 decision 3). A run of assistant prose was
+// printed, not attempted, so its body hangs on the entry alone — and
+// handleGet flattened `row.Executions` only. Every prose body was therefore
+// stored, read back by the ledger, and dropped at the wire: the live turn was
+// right and the restored one drew every sentence of it BLANK.
+//
+// Both unit suites were green while that was true, which is the part worth
+// remembering. The store's test asked the store, and the renderer's test
+// supplied the facts itself, so the defect sat in the one seam neither
+// crossed — the socket. That is why this test is over the real wire and why
+// AGENTS.md rule 5 insists on the difference: it took the epic's end-to-end
+// check to find it at all.
+//
+// Both halves are asserted together, because the pair is the point: an
+// entry's OWN body and an execution's body must both come back, and a fix
+// that swapped one loop for the other would pass half of this.
+func TestLedgerGet_AProseBodyAndACommandBodyBothReachTheWire(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	openLocalSession(t, conn)
+	ctx := context.Background()
+	led := db.Ledger()
+	envID := localEnvironmentID()
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID, Criticality: content.CriticalityRoutine,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	// The turn, one run of prose seated under it, and the prose's own body:
+	// no execution, because nothing was attempted.
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-turn", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryAgent, Intent: "what went wrong?", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("submit the turn: %v", err)
+	}
+	pos := 0
+	turnID := "wire-turn"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-prose", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		ParentID: &turnID, Pos: &pos, Kind: content.EntryText, Intent: "", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("seat the prose block: %v", err)
+	}
+	proseArtifact, err := led.AppendArtifact(ctx, content.AppendArtifact{
+		ID: "art-prose", EntryID: "wire-prose", MediaType: content.MediaText,
+	})
+	if err != nil {
+		t.Fatalf("append the prose artifact: %v", err)
+	}
+	if err = led.AppendChunk(ctx, proseArtifact, 1, []byte("line 3 is wrong")); err != nil {
+		t.Fatalf("append the prose body: %v", err)
+	}
+
+	got := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-prose"}, 30)
+	if got.Error != nil {
+		t.Fatalf("ledger.get on the prose block: %+v", got.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.get.schema.json"), got.Result, "ledger.get result (prose block)")
+	var body struct {
+		Artifacts []struct {
+			ID          string `json:"id"`
+			MediaType   string `json:"mediaType"`
+			ExecutionID *int64 `json:"executionId"`
+		} `json:"artifacts"`
+	}
+	if err = json.Unmarshal(got.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Artifacts) != 1 || body.Artifacts[0].ID != "art-prose" {
+		t.Fatalf("the prose block's artifacts off the socket = %+v, want the one body it owns", body.Artifacts)
+	}
+	if body.Artifacts[0].MediaType != string(content.MediaText) {
+		t.Fatalf("the prose body's media type = %q, want %q",
+			body.Artifacts[0].MediaType, content.MediaText)
+	}
+
+	// The paired half: a command's body hangs on the ATTEMPT that produced
+	// it, and still comes back. Without this the fix could have moved the
+	// loop rather than added one.
+	if _, err = led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-cmd", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "cat -n a.txt", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("submit the command: %v", err)
+	}
+	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: "wire-cmd"})
+	if err != nil {
+		t.Fatalf("start the command's execution: %v", err)
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		ID: "art-cmd", EntryID: "wire-cmd", ExecutionID: &execID,
+		MediaType: content.MediaVT,
+	}); err != nil {
+		t.Fatalf("append the command artifact: %v", err)
+	}
+	cmd := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-cmd"}, 31)
+	if cmd.Error != nil {
+		t.Fatalf("ledger.get on the command: %+v", cmd.Error)
+	}
+	var cmdBody struct {
+		Artifacts []struct {
+			ID string `json:"id"`
+		} `json:"artifacts"`
+	}
+	if err = json.Unmarshal(cmd.Result, &cmdBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(cmdBody.Artifacts) != 1 || cmdBody.Artifacts[0].ID != "art-cmd" {
+		t.Fatalf("the command's artifacts off the socket = %+v, want the body its attempt produced",
+			cmdBody.Artifacts)
+	}
+}
+
 // ── the store's failures reach the caller ────────────────────────────────
 
 // Every external call this path makes has a test where it fails. The store

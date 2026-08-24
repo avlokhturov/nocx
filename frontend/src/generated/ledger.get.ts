@@ -56,9 +56,9 @@ export interface Entry {
    */
   cwd: string
   /**
-   * What kind of intent this was. Closed set, mirroring the store's CHECK constraint.
+   * What this block IS. Closed set, mirroring the store's CHECK constraint. `text` is one run of assistant prose (ADR-0037) — the only member that is not an intent, because it was PRINTED rather than attempted, and the reason this field is no longer described as 'what kind of intent this was'. It was missing here until nocx-dc2fr.7: the store gained the kind and this shared definition did not, so ledger.get on a prose block — which is exactly what the restore reads, per entry — answered a payload that violated its own contract.
    */
-  kind: 'shell' | 'agent' | 'action'
+  kind: 'shell' | 'agent' | 'action' | 'text'
   /**
    * The intent as recorded — for a shell entry, the command line. Secrets are masked before the row is written: the durable text is always the masked one, and maskedCount/maskedKinds say what was removed. Never truncated here.
    */
