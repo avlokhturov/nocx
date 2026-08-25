@@ -28,12 +28,11 @@ import { AgentReadiness, modelChipState } from './agent-readiness'
 import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
-  attachRegion,
-  chipFromSelection,
-  chipFingerprint,
-  type ReferenceChip,
+  grantBlockFromElement,
+  grantBlockFromSelection,
+  type GrantBlock,
 } from './ask-entry'
-import { createAttachAffordance, type AnchorRect, type AttachAffordance } from './attach-affordance'
+import { GrantController } from './grant'
 import {
   submitCommand,
   planSubmit,
@@ -217,17 +216,6 @@ function isTextEntry(el: Element | null): boolean {
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
-}
-
-/** The selection's LAST client rect — the end the Attach affordance anchors
- *  near (nocx-a7mw7.1). A multi-line selection has one rect per covered
- *  row fragment; the last is where the selection ends. */
-function lastRectOfSelection(sel: Selection): AnchorRect | null {
-  if (sel.rangeCount === 0) return null
-  const rects = sel.getRangeAt(0).getClientRects()
-  if (rects.length === 0) return null
-  const last = rects[rects.length - 1]
-  return { left: last.left, top: last.top, right: last.right, bottom: last.bottom }
 }
 
 /**
@@ -532,46 +520,21 @@ export class TerminalContent extends BasePaneContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  /** The reference chips in the input line (nocx-4wtlh): the frozen
-   *  regions a question carries. Pressing Attach raises one; a question
-   *  sent to Ask consumes them all; a cleared scrollback takes their
-   *  blocks. The chips ARE the ask's payload — never re-derived from DOM
-   *  selection at submit time (AD-8: selection is copy; the chip is the
-   *  record). Every chip here was minted by the ONE seam,
-   *  ask-entry.attachRegion. */
-  private referenceChips: ReferenceChip[] = []
-  /** The floating Attach button (nocx-a7mw7.1): a selection inside a
-   *  finished block's output OFFERS to be attached; the button is the only
-   *  thing that attaches. Created at mount, disposed with the pane. */
-  private attachAffordance: AttachAffordance | null = null
-  /** The region the affordance currently offers — captured when the
-   *  selection lands and NEVER re-read from the DOM when the button is
-   *  pressed, so a drag still in flight cannot change what one press
-   *  attaches. */
-  private offeredRegion: { blockEl: HTMLElement; rowStart: number; rowEnd: number } | null = null
-  /** The caret indicator (ADR-0004 §3's UI chip): renders the active
-   *  input target beside the caret and is the person's one explicit
-   *  switch. Its label is pushed from the registry's change
-   *  notification — nothing else may repaint it. */
-  private indicator: TargetIndicator | null = null
-  /** The document selectionchange listener: a selection inside a finished
-   *  block's output OFFERS a reference chip — the floating Attach button
-   *  appears; nothing attaches until it is pressed. Removed on dispose. */
-  private readonly onSelectionChange = (): void => this.offerChipFromSelection()
-  /** The scrollback scrolled under a live selection: the affordance
-   *  re-anchors to the selection's CURRENT client rects so a scroll does
-   *  not strand it. The offered region stays the one captured at selection
-   *  time — only the position follows the scroll. */
-  private readonly onScrollbackScroll = (): void => {
-    if (!this.offeredRegion) return
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
-    const last = lastRectOfSelection(sel)
-    if (last) this.attachAffordance?.show(last)
+  /** Whole blocks granted to the next question. Selection is a quote and also
+   * marks its containing block; no row coordinates or copied frame live here. */
+  private grantedBlocks: GrantBlock[] = []
+  private grantController: GrantController | null = null
+  private readonly onSelectionChange = (): void => {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return
+    const block = grantBlockFromSelection(selection)
+    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return
+    this.ensureGrant(block.blockEl)
   }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
+  private indicator: TargetIndicator | null = null
   /** Re-pushes the composed title after the projections have reconciled
    *  the ledger from a kernel change (a completion ends the running
    *  command; the ledger must already reflect it). Registered AFTER the
@@ -1284,43 +1247,20 @@ export class TerminalContent extends BasePaneContent {
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
         snapshotStore: renderer.snapshotStore,
-        // A `clear` took every block: the reference chips die with their
-        // blocks — a chip whose block is gone would point at nothing
+        // A `clear` took every block: the grants die with their blocks — a
+        // grant whose block is gone would point at nothing
         // (AGENTS.md: a soft degrade the UI contradicts is how a feature
         // that does not exist survives a release).
-        onClear: () => this.clearReferenceChips(),
-        // A frozen block's output rows are fixed in the DOM: resolve any
-        // pending agent-run completion waits (nocx-tjppv — the run tool
-        // reads the output window from the frozen block).
+        onClear: () => this.clearGrants(),
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
-        // A tool call that names a session gets the session's NAME, not its
-        // id (nocx-vnzek). Passed as the hook itself, read at paint time:
-        // a pane's title changes as it works, and the line must say what the
-        // pane was called when the call happened.
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
-        // Copying an ANSWER reads what was recorded, never what was painted
-        // (nocx-v13pd): the answer flow consumes the markdown markers it
-        // renders, so the DOM is a rendering and no longer the answer. The
-        // same two round trips a restored block's body takes, asking for the
-        // text/plain artifact instead of the SGR one — one fetch path, two
-        // media types.
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
-        // The two things a person can do ABOUT a running command, made
-        // visible on the block that is running it (nocx-92gfl, nocx-23rph).
-        // The menu is a second DOOR to the handlers the keystrokes reach —
-        // never a second implementation — so the chord and the item cannot
-        // drift apart.
         runningActions: {
-          // The lifecycle kernel is the liveness owner, but the block identity
-          // is part of the predicate: frozen history must never signal a newer
-          // command. The DOM class is only a visual transition and can lag the
-          // authenticated completion.
           isActive: (blockEl) =>
             this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
-          ask: () => void this.summonEditor(),
+          isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+          toggleGrant: (blockEl) => this.toggleGrant(blockEl),
           stop: () => this.signalActiveCommand('stop'),
-          attachOutput: (blockEl, rowStart, rowEnd) =>
-            this.applyAttachedRegion(blockEl, rowStart, rowEnd),
         },
       })
 
@@ -1483,10 +1423,10 @@ export class TerminalContent extends BasePaneContent {
         cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
-        // The ask's payload is the reference chips in the input line —
-        // never re-derived from DOM selection at submit time (AD-8:
-        // selection is copy; the chip is the record).
-        chips: () => this.referenceChips,
+        // The ask's payload is the whole-block grants, never re-derived from
+        // DOM selection at submit time (AD-8: selection is copy; the grant is
+        // the record).
+        grants: () => this.grantedBlocks,
         // A new answer block, kept at the bottom of the view — the same
         // rule a command's output lives by, which the ask path never had:
         // nothing scrolled when a block was ADDED, so a question landed
@@ -1631,12 +1571,10 @@ export class TerminalContent extends BasePaneContent {
               // The target surfaces its own refusal (onRefusal → the
               // toast); the rethrow is for programmatic callers, so the
               // fire-and-forget path swallows it.
-              void active.submit(doc, { targetId: active.id }).catch(() => {})
-              // The chips in the line are consumed: they rode this
-              // question. The target reads them SYNCHRONOUSLY at the top of
-              // submit (before its first await), so the clear after the
-              // call can never eat them.
-              this.clearReferenceChips()
+              void active
+                .submit(doc, { targetId: active.id })
+                .then(() => this.clearGrants())
+                .catch(() => {})
               return
             }
             // The atomic handoff transfers input ownership to the grid at
@@ -1771,9 +1709,6 @@ export class TerminalContent extends BasePaneContent {
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
           onToggleTarget: () => this.toggleInputTarget(),
-          onDismissChip: (id) => this.dismissReferenceChip(id),
-          onDismissAllChips: () => this.clearReferenceChips(),
-          onRevealChip: (id) => this.revealReferenceChip(id),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -2296,7 +2231,7 @@ export class TerminalContent extends BasePaneContent {
           e.shiftKey &&
           !e.altKey &&
           e.key.toLowerCase() === 'a' &&
-          this.attachCurrentSelection()
+          this.grantCurrentSelection()
         ) {
           e.preventDefault()
           e.stopPropagation()
@@ -2937,20 +2872,18 @@ export class TerminalContent extends BasePaneContent {
         true,
       )
 
-      this._mounted = true
-      // The attach affordance (nocx-a7mw7.1): a document selection inside
-      // a finished block's output OFFERS to be attached — the floating
-      // Attach button appears, and nothing attaches until it is pressed.
-      // The affordance and the listeners are registered at the end of
-      // mount so the editor and the scrollback exist; the affordance is
-      // disposed with the pane. The scroll listener re-anchors the button
-      // to the selection's current client rects, so a scroll does not
-      // strand the offer.
-      this.attachAffordance = createAttachAffordance(() => this.attachOfferedRegion())
-      document.addEventListener('selectionchange', this.onSelectionChange)
-      this.scrollback?.scrollbackArea.addEventListener('scroll', this.onScrollbackScroll, {
-        passive: true,
+      this.grantController = new GrantController({
+        chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
+        onChange: (blocks) => {
+          this.grantedBlocks = [...blocks]
+        },
       })
+      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      if (chipRow) this.grantController.mount(chipRow)
+      this.editor.onGrantChipClick(() => this.grantController?.toggle())
+      this.grantController.setBlocks(this.grantedBlocks)
+      document.addEventListener('selectionchange', this.onSelectionChange)
+      this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
@@ -3789,9 +3722,9 @@ export class TerminalContent extends BasePaneContent {
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
    *  Two gestures land here and nowhere else: ⌘/Ctrl+Enter from the grid,
-   *  and "Ask about this command" on the running block's ⋮ menu. The menu
-   *  item exists because a chord nobody can see is a gesture nobody uses;
-   *  it is a second DOOR, never a second implementation.
+   *  and "ask about this block" on the block's ⋮ menu. The menu item exists
+   *  because a chord nobody can see is a gesture nobody uses; it is a second
+   *  DOOR, never a second implementation.
    *
    *  Refused unless there is something to ask about and the pane is in a
    *  state where an editor belongs: no running command (the editor is
@@ -4188,150 +4121,55 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  /** A document selection landed (or moved): if it is a real selection
-   *  inside one FINISHED block's output of THIS pane, OFFER it for
-   *  attaching — the floating Attach button appears near the selection's
-   *  end, and NO chip exists until the button is pressed (nocx-a7mw7.1).
-   *  The old behaviour — a selection freezing itself into a chip — is what
-   *  the bead ends: copying output is the commonest thing anyone does with
-   *  output, so copying must attach nothing. Nothing else happens: the
-   *  active target does not move, the shell is not armed, the selection
-   *  itself is untouched (copy keeps working). The offer is cleared when
-   *  the selection collapses, when it stops satisfying chipFromSelection
-   *  (crosses two blocks, lands in a running block, lands in the editor),
-   *  or once the button has been pressed. selectionchange fires on every
-   *  caret move, so the guard is the chipFromSelection predicate, not the
-   *  event. */
-  private offerChipFromSelection(): void {
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return this.hideAttachOffer()
-    const anchor = sel.anchorNode
-    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return this.hideAttachOffer()
-    const chip = chipFromSelection(sel)
-    // The offer is pane-scoped: the affordance floats over THIS pane's
-    // scrollback, so a selection in another pane offers nothing here.
-    if (!chip || !this.scrollback?.scrollbackInner.contains(chip.blockEl))
-      return this.hideAttachOffer()
-    const last = lastRectOfSelection(sel)
-    if (!last) return this.hideAttachOffer()
-    // The offer is captured NOW. The press attaches exactly this region —
-    // never a re-read of a selection that may still be moving.
-    this.offeredRegion = { blockEl: chip.blockEl, rowStart: chip.rowStart, rowEnd: chip.rowEnd }
-    this.attachAffordance?.show(last)
-  }
-
-  /** Attach the current finished-block selection for Ctrl/Cmd+Shift+A. */
-  private attachCurrentSelection(): boolean {
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return false
-    const anchor = sel.anchorNode
-    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return false
-    const chip = chipFromSelection(sel)
-    if (!chip || !this.scrollback?.scrollbackInner.contains(chip.blockEl)) return false
-    this.applyAttachedRegion(chip.blockEl, chip.rowStart, chip.rowEnd)
-    this.hideAttachOffer()
+  /** A selection is a quote and a whole-block grant. The grant is idempotent:
+   * repeated quotes from one block keep one mark, while the menu remains the
+   * explicit toggle for removing it. */
+  private grantCurrentSelection(): boolean {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return false
+    const block = grantBlockFromSelection(selection)
+    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return false
+    this.ensureGrant(block.blockEl)
     return true
   }
 
-  /** Put the affordance away and forget the offer — a collapse, a
-   *  non-satisfying selection, or a press. */
-  private hideAttachOffer(): void {
-    this.offeredRegion = null
-    this.attachAffordance?.hide()
+  private ensureGrant(blockEl: HTMLElement): void {
+    const grant = grantBlockFromElement(blockEl)
+    if (!grant || this.grantedBlocks.some((item) => item.itemId === grant.itemId)) return
+    this.grantedBlocks = [...this.grantedBlocks, grant]
+    this.grantController?.setBlocks(this.grantedBlocks)
   }
 
-  /** The button was pressed: freeze the OFFERED region into a reference
-   *  chip and put the affordance away. The offer was captured when the
-   *  selection landed, so one press attaches exactly the region the person
-   *  pointed at — a drag that is still in flight cannot change what a
-   *  press attaches. */
-  private attachOfferedRegion(): void {
-    const offer = this.offeredRegion
-    if (!offer) return
-    this.applyAttachedRegion(offer.blockEl, offer.rowStart, offer.rowEnd)
-    this.hideAttachOffer()
+  private toggleGrant(blockEl: HTMLElement): void {
+    const grant = grantBlockFromElement(blockEl)
+    if (!grant) return
+    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
+    this.grantedBlocks =
+      index < 0
+        ? [...this.grantedBlocks, grant]
+        : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
+    this.grantController?.setBlocks(this.grantedBlocks)
   }
 
-  /** Mint a reference chip through the ONE seam (ask-entry.attachRegion)
-   *  and add it to the line. The exact-duplicate fingerprint is the no-op
-   *  guard (design §4): attaching a region already attached stacks nothing.
-   *  Every chip in the product reaches the line through this method — the
-   *  block menu's Attach output and the attach chord arrive in later beads
-   *  and call the same seam. */
-  /** Repaint the block marks from the chip list — the one owner of attachment
-   *  presentation. A block may be rebuilt for a wrap or restore event, so
-   *  marks are always derived from the frozen regions, never toggled by a
-   *  caller-side DOM mutation. */
-  private repaintAttachmentMarks(): void {
-    const inner = this.scrollback?.scrollbackInner
-    if (!inner) return
-    inner.querySelectorAll<HTMLElement>('.term-line').forEach((line) => {
-      delete line.dataset.attached
-      line.querySelectorAll('.term-line-attachment-mark').forEach((mark) => mark.remove())
-    })
-    for (const chip of this.referenceChips) {
-      const lines = Array.from(chip.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
-        chip.rowStart,
-        chip.rowEnd,
-      )
-      for (const line of lines) {
-        line.dataset.attached = 'true'
-        const mark = document.createElement('button')
-        mark.type = 'button'
-        mark.className = 'term-line-attachment-mark'
-        mark.dataset.chipId = chip.id
-        mark.setAttribute('aria-label', 'remove attached output')
-        mark.addEventListener('click', (event) => {
-          event.stopPropagation()
-          this.dismissReferenceChip(chip.id)
-        })
-        mark.addEventListener('keydown', (event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return
-          event.preventDefault()
-          event.stopPropagation()
-          this.dismissReferenceChip(chip.id)
-        })
-        line.appendChild(mark)
-      }
-    }
+  private refreshGrant(blockEl: HTMLElement): void {
+    const refreshed = grantBlockFromElement(blockEl)
+    if (!refreshed) return
+    const index = this.grantedBlocks.findIndex((grant) => grant.itemId === refreshed.itemId)
+    if (index < 0) return
+    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) =>
+      candidateIndex === index ? refreshed : grant,
+    )
+    this.grantController?.setBlocks(this.grantedBlocks)
   }
 
-  private dismissReferenceChip(id: string): void {
-    this.referenceChips = this.referenceChips.filter((chip) => chip.id !== id)
-    this.editor?.setReferenceChips(this.referenceChips)
-    this.repaintAttachmentMarks()
-  }
-
-  private revealReferenceChip(id: string): void {
-    const chip = this.referenceChips.find((candidate) => candidate.id === id)
-    if (!chip) return
-    const line = chip.blockEl.querySelectorAll<HTMLElement>('.term-line')[chip.rowStart]
-    if (!line) return
-    line.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
-    line.classList.remove('term-line-attachment-flash')
-    void line.offsetWidth
-    line.classList.add('term-line-attachment-flash')
-  }
-
-  private applyAttachedRegion(blockEl: HTMLElement, rowStart: number, rowEnd: number): void {
-    const chip = attachRegion(blockEl, rowStart, rowEnd)
-    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
-    if (existing) return
-    this.referenceChips = [...this.referenceChips, chip]
-    this.editor?.setReferenceChips(this.referenceChips)
-    this.repaintAttachmentMarks()
-  }
-
-  /** Drop every reference chip: a question sent to Ask consumed them, or
-   *  a `clear` took their blocks. The block marks and counter follow it. */
-  private clearReferenceChips(): void {
-    this.referenceChips = []
-    this.editor?.clearReferenceChips()
-    this.repaintAttachmentMarks()
+  private clearGrants(): void {
+    this.grantedBlocks = []
+    this.grantController?.setBlocks([])
   }
 
   dispose(): void {
     this._disposed = true
+    this._mounted = false
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)
     this._settleTimer = undefined
@@ -4365,14 +4203,12 @@ export class TerminalContent extends BasePaneContent {
     this.editor?.dispose()
     this.recall?.destroy()
     this.recall = null
-    this.scrollback?.scrollbackArea.removeEventListener('scroll', this.onScrollbackScroll)
     this.scrollback?.dispose()
     this.destroyReceipt()
-    this.clearReferenceChips()
+    this.clearGrants()
+    this.grantController?.destroy()
+    this.grantController = null
     document.removeEventListener('selectionchange', this.onSelectionChange)
-    this.attachAffordance?.dispose()
-    this.attachAffordance = null
-    this.offeredRegion = null
     this.indicator = null
     this.promptVault?.destroy()
     this.promptVault = null
@@ -4608,6 +4444,8 @@ export class TerminalContent extends BasePaneContent {
    *  renderer clamps the text to the wire bound and states how much more
    *  the block holds — never a silent truncation. */
   private _onBlockFrozen(rec: BlockRecord): void {
+    this.refreshGrant(rec.el)
+
     const waiter = this.agentRuns.get(rec)
     if (!waiter) return
     this.agentRuns.delete(rec)
@@ -4622,28 +4460,12 @@ export class TerminalContent extends BasePaneContent {
     }
     const body = {
       exitCode: rec.exitCode,
-      // The hook fires on the visual freeze, when the block is logically
-      // frozen too — the type union still admits 'running', which a frozen
-      // block can never be; the honest mapping is 'unknown'.
       status: rec.status === 'running' ? ('unknown' as const) : rec.status,
       total: lines.length,
       start: 0,
       end,
       text: lines.slice(0, end).join('\n'),
     }
-    // THE ENTRY ID IS THE STORE'S (nocx-9sqii). Everything outside this tab
-    // that can do anything with it — the backend joining the command to the
-    // turn that ran it, the model naming the block later — resolves it
-    // against the ledger, and the renderer's own record number is not an
-    // entry there. So the resolution waits for the id the store minted,
-    // which arrives with the history.record ack a completion sends.
-    //
-    // A freeze with nothing to record answers immediately and honestly with
-    // no id: an ABANDONED block never persists (LifecycleProjections only
-    // persists a completed attempt), and an ENTERED one has not completed
-    // yet — the far session is still alive. Waiting on either would hang the
-    // model's tool call until the broker's timeout for a row that is not
-    // coming.
     if (rec.status !== 'success' && rec.status !== 'failure') {
       this.runEntryIds.delete(waiter.ledgerId)
       waiter.resolve({ entryId: '', ...body })
@@ -4758,6 +4580,7 @@ export class TerminalContent extends BasePaneContent {
     }
     if (ack.redactions.length > 0) {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+      this.refreshGrant(blockEl)
     }
     if (ack.captures.length === 0) return
     // One receipt per block: a re-recorded block replaces its own, never

@@ -1086,3 +1086,28 @@ describe('the model chip (nocx-rikz5)', () => {
     }
   })
 })
+describe('the grant chip (nocx-wcswn)', () => {
+  it('is always present, carries typed default/chosen states, and follows model chips', () => {
+    const { ed } = setup()
+    const left = ed.root.querySelector('.nocx-editor-chrome-left')!
+    const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+    expect(grant.classList.contains('nocx-chip')).toBe(true)
+    expect(grant.dataset.state).toBe('default')
+    expect(grant.textContent).toContain('отмечено для вопроса')
+    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
+
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setGrantCount(2)
+    expect(grant.dataset.state).toBe('chosen')
+    expect(grant.textContent).toContain('2')
+    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
+  })
+
+  it('clicking the chip reaches the host without changing the input target', () => {
+    const { ed } = setup()
+    const opened = vi.fn()
+    ed.onGrantChipClick(opened)
+    ed.root.querySelector<HTMLElement>('.nocx-editor-grant')!.click()
+    expect(opened).toHaveBeenCalledTimes(1)
+  })
+})

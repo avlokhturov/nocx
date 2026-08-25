@@ -1,116 +1,51 @@
 // The ask entry gesture (nocx-4wtlh): the caret indicator that renders
-// InputTargetRegistry.active(), and the reference chips a selection raises.
-//
-// The rule the whole gesture stands on: NOTHING but the person changes where
-// Enter goes. The indicator is the ADR-0004 §3 "UI chip" — the active
-// target, rendered in the input line immediately left of the cursor. It is
-// operable (click, and the ⌘/Ctrl+Enter chord) because the ADR requires an
-// explicit switch, but in ordinary use nobody operates it: it is the
-// confirmation that Enter goes to the shell.
-//
-// A selection inside a finished block's output OFFERS to become a
-// reference chip — the floating Attach button appears (nocx-a7mw7.1), and
-// NOTHING attaches until it is pressed. The chip itself is minted by ONE
-// function, attachRegion (below); the button, the block menu and the
-// keyboard chord all raise their chip through it. Attaching never arms ask
-// — the active target does not move (the owner's Warp complaint: a
-// selection that armed ask would send the next typed command to the model).
+// InputTargetRegistry.active(), and the whole blocks a person grants to a
+// question. Selection is a quote; the grant is the permission to read the
+// surrounding block through session.read.
 
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
 import type { BadgeTone } from './ui/badge'
 import { createModeIndicator } from './ui/mode-indicator'
 
-// ── Reference chips ────────────────────────────────────────────────────────
-
-export interface ReferenceChip {
-  /** Stable identity for dismissal and exact-duplicate dedupe. */
-  readonly id: string
-  /** The finished block the selection landed in — the frame source and the
-   *  chip's scope. Never re-derived from DOM selection at submit time
-   *  (AD-8: selection is copy; the chip is the mode's record). */
+export interface GrantBlock {
+  readonly itemId: string
   readonly blockEl: HTMLElement
-  /** First covered term-line index, inclusive, 0-based. */
-  readonly rowStart: number
-  /** One past the last covered term-line index, exclusive. */
-  readonly rowEnd: number
+  readonly command: string
+  readonly state: 'running' | 'exited'
 }
 
-/** The block output whose term-line indices a chip's rows refer to. A chip
- *  may only point into ONE finished block's output: a running block's rows
- *  move, and a selection crossing two blocks has no single frame. */
-function chipSourceOf(node: Node | null): HTMLElement | null {
-  const el = node instanceof Element ? node : (node?.parentElement ?? null)
-  const output = el?.closest<HTMLElement>('.cmd-output')
-  if (!output) return null
-  const block = output.closest<HTMLElement>('.cmd-block')
-  if (!block || block.classList.contains('cmd-block-running')) return null
-  return output
+function blockOf(node: Node | null): HTMLElement | null {
+  const element = node instanceof Element ? node : (node?.parentElement ?? null)
+  return element?.closest<HTMLElement>('.cmd-block') ?? null
 }
 
-/** Map a live DOM selection to a frozen-region chip, or null when the
- *  selection cannot be one: collapsed, spanning two blocks, or anchored
- *  outside a finished block's output. Both ends must land inside the SAME
- *  output's term-lines; the covered rows are the inclusive span between
- *  them. */
-export function chipFromSelection(sel: Selection | null): Omit<ReferenceChip, 'id'> | null {
+/** Derive one whole-block grant from the block's durable `data-entry-id`.
+ *  Commands receive the lifecycle attempt id when they bind; restored and
+ *  answer blocks carry their ledger entry id. Renderer selection counters
+ *  are deliberately not grant identities. */
+export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
+  const itemId = blockEl.dataset.entryId
+  if (!itemId) return null
+  return {
+    itemId,
+    blockEl,
+    command:
+      blockEl.dataset.recordedCommand ??
+      blockEl.querySelector('.cmd-header-text')?.textContent ??
+      '',
+    state: blockEl.classList.contains('cmd-block-running') ? 'running' : 'exited',
+  }
+}
+
+/** A selection grants its containing block, never a row range. */
+export function grantBlockFromSelection(sel: Selection | null): GrantBlock | null {
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
   const range = sel.getRangeAt(0)
-  const startOutput = chipSourceOf(range.startContainer)
-  const endOutput = chipSourceOf(range.endContainer)
-  if (!startOutput || startOutput !== endOutput) return null
-  const lines = Array.from(startOutput.querySelectorAll<HTMLElement>('.term-line'))
-  if (lines.length === 0) return null
-  const startLine =
-    range.startContainer instanceof Element
-      ? range.startContainer.closest<HTMLElement>('.term-line')
-      : range.startContainer.parentElement?.closest<HTMLElement>('.term-line')
-  const endLine =
-    range.endContainer instanceof Element
-      ? range.endContainer.closest<HTMLElement>('.term-line')
-      : range.endContainer.parentElement?.closest<HTMLElement>('.term-line')
-  if (!startLine || !endLine) return null
-  const rowStart = lines.indexOf(startLine)
-  const rowEnd = lines.indexOf(endLine)
-  if (rowStart === -1 || rowEnd === -1) return null
-  const first = Math.min(rowStart, rowEnd)
-  const last = Math.max(rowStart, rowEnd)
-  return {
-    blockEl: startOutput.closest<HTMLElement>('.cmd-block')!,
-    rowStart: first,
-    rowEnd: last + 1,
-  }
-}
-
-/** The exact-duplicate fingerprint: same block, same rows. Reselecting the
- *  identical region must not stack a second chip. */
-export function chipFingerprint(
-  chip: Pick<ReferenceChip, 'blockEl' | 'rowStart' | 'rowEnd'>,
-): string {
-  return `${chip.blockEl.dataset.blockId ?? 'block'}:${chip.rowStart}:${chip.rowEnd}`
-}
-
-/** Monotonic chip id source — ids are for dismissal and dedupe, never for
- *  anything the backend sees. Owned here so attachRegion can mint the whole
- *  chip: a caller-side counter would be a second minting path. */
-let chipSeq = 0
-
-/** Mint a reference chip for a region of a finished block — the ONE seam
- *  every chip in the product goes through (nocx-a7mw7.1, design Risks):
- *  the selection affordance, the block menu's Attach output and the attach
- *  chord all call this, and no other path mints a chip. The caller supplies
- *  only the frozen region; the block marks and counter provide presentation. */
-export function attachRegion(
-  blockEl: HTMLElement,
-  rowStart: number,
-  rowEnd: number,
-): ReferenceChip {
-  return {
-    id: `ref-${(chipSeq += 1)}`,
-    blockEl,
-    rowStart,
-    rowEnd,
-  }
+  const start = blockOf(range.startContainer)
+  const end = blockOf(range.endContainer)
+  if (!start || start !== end) return null
+  return grantBlockFromElement(start)
 }
 
 // ── The line-start indicator (ADR-0004 §3's UI chip) ───────────────────────

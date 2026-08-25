@@ -158,8 +158,10 @@ describe('a turn draws the blocks it caused, in order', () => {
 
     const box = turn.el.querySelector(':scope > .cmd-children')!
     expect(box.contains(rec.el)).toBe(true)
-    // Its own id, distinct from the turn's — selection addresses blocks by it.
-    expect(rec.el.getAttribute('data-block-id')).toBe(String(rec.id))
+    // Selection keeps its renderer-local numeric id internally; no such
+    // counter is a backend identity.
+    expect(rec.el.dataset.blockId).toBeUndefined()
+    expect(rec.el.dataset.entryId).toBeUndefined()
     expect(rec.id).not.toBe(turn.id)
     // Who ran it: the assistant, said out loud.
     expect(rec.el.querySelector('.ui-badge[data-author="agent"]')?.textContent).toBe('agent')
@@ -192,9 +194,9 @@ describe('a turn draws the blocks it caused, in order', () => {
       turn.el.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="text"]'),
     )
     expect(prose).toHaveLength(2)
-    const ids = prose.map((p) => p.getAttribute('data-block-id'))
-    expect(ids.every((id) => id !== null)).toBe(true)
-    expect(new Set(ids).size).toBe(2)
+    const ids = prose.map((p) => p.dataset.entryId)
+    expect(ids).toEqual(['text-1', 'text-2'])
+    expect(prose.every((p) => p.dataset.blockId === undefined)).toBe(true)
     // No header, and therefore no ⋮ and no chips of its own.
     for (const p of prose) expect(p.querySelector('.cmd-header')).toBeNull()
     // And it selects, on its own, like any other block.

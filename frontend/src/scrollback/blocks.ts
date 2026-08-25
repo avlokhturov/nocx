@@ -829,17 +829,14 @@ export type AnswerTextSource = (entryId: string) => Promise<string | null>
  *  a gesture nobody uses, and two implementations of one action are two
  *  behaviours waiting to diverge. */
 export interface RunningBlockActions {
-  /** Summon the editor to ask about this command — what ⌘/Ctrl+Enter does.
-   *  A turn has no second question action, so this is optional there. */
-  ask?(): void
-  /** Stop it, through the backend's escalation ladder. */
+  /** Stop a live command through the backend's escalation ladder. */
   stop(): void
-  /** Whether time-limited actions still belong to this specific block.
-   *  The host owns this identity-aware derivation; the DOM class is only a
-   *  visual transition and may lag a logical completion. */
+  /** Whether time-limited actions still belong to this specific block. */
   isActive(blockEl: HTMLElement): boolean
-  /** Attach all output rows through the host's single chip seam. */
-  attachOutput?(blockEl: HTMLElement, rowStart: number, rowEnd: number): void
+  /** Whether this block is currently granted to the next question. */
+  isGranted?(blockEl: HTMLElement): boolean
+  /** Toggle this whole block's grant, independent of liveness. */
+  toggleGrant?(blockEl: HTMLElement): void
 }
 
 function buildOverflowMenu(
@@ -998,24 +995,19 @@ function buildOverflowMenu(
         else clipboardFallback(`${intent()}\n${stored}`)
       })
     })
-    const isActive = running?.isActive(blockEl) ?? false
 
-    if (!isActive && running?.attachOutput) {
-      const attach = document.createElement('button')
-      attach.className = 'cmd-overflow-menu-item'
-      attach.dataset.action = 'attach-output'
-      attach.textContent = 'Attach output'
-      attach.addEventListener('click', (ev) => {
+    const isActive = running?.isActive(blockEl) ?? false
+    if (running?.toggleGrant) {
+      const grant = document.createElement('button')
+      grant.className = 'cmd-overflow-menu-item'
+      grant.dataset.action = 'grant'
+      grant.textContent = running.isGranted?.(blockEl) ? 'unmark' : 'ask about this block'
+      grant.addEventListener('click', (ev) => {
         ev.stopPropagation()
-        if (running.isActive(blockEl)) {
-          closeMenu()
-          return
-        }
-        const rowEnd = blockEl.querySelectorAll('.cmd-output .term-line').length
-        if (rowEnd > 0) running.attachOutput?.(blockEl, 0, rowEnd)
+        running.toggleGrant?.(blockEl)
         closeMenu()
       })
-      menu.appendChild(attach)
+      menu.appendChild(grant)
     }
     // Wrap is a per-block override of the kind's default, and it lives here
     // rather than as a control on the block because it is rare: the kind is
@@ -1049,29 +1041,9 @@ function buildOverflowMenu(
       closeMenu()
     })
 
-    // THE TWO THINGS A PERSON CAN DO ABOUT A COMMAND THAT IS STILL RUNNING
-    // (nocx-92gfl, nocx-23rph). Present only while it runs, and only when
-    // the host supplied the handlers: a finished block has nothing to ask
+    // Stopping remains time-limited; granting the whole block does not.
+    // Stopping is the only liveness-bound action; granting is not.
     if (running && isActive) {
-      const timeLimited: HTMLElement[] = []
-      if (running.ask) {
-        const ask = document.createElement('button')
-        ask.className = 'cmd-overflow-menu-item'
-        // The identity is the attribute, not the word: the word can be
-        // translated and the CSS and the tests read this.
-        ask.dataset.action = 'ask'
-        ask.textContent = 'Ask about this command'
-        ask.addEventListener('click', (ev) => {
-          ev.stopPropagation()
-          if (!running.isActive(blockEl)) {
-            closeMenu()
-            return
-          }
-          closeMenu()
-          running.ask?.()
-        })
-        timeLimited.push(ask)
-      }
       const stop = document.createElement('button')
       stop.className = 'cmd-overflow-menu-item'
       stop.dataset.action = 'stop'
@@ -1085,8 +1057,7 @@ function buildOverflowMenu(
         closeMenu()
         running.stop()
       })
-      timeLimited.push(stop)
-      menu.append(...timeLimited)
+      menu.append(stop)
     }
     menu.append(copyCmd, copyOut, copyAll, wrapItem)
     // Render at body level so it floats above all scroll containers (P1-6).
@@ -1113,6 +1084,11 @@ function buildOverflowMenu(
     menu.style.position = 'fixed'
     const btnRect = btn.getBoundingClientRect()
     const menuRect = menu.getBoundingClientRect()
+    // Freeze the measured shell dimensions before assigning its final
+    // coordinates. This keeps the clamp calculation stable in browsers whose
+    // fixed-position box reports a different static rect after placement.
+    menu.style.width = `${menuRect.width}px`
+    menu.style.height = `${menuRect.height}px`
     // Right-aligned to the button, exactly where the fixed `right` it
     // replaces put it.
     const { left, top } = clampMenuPosition(
@@ -1255,6 +1231,9 @@ export function createCommandBlock(
   author: CommandAuthor,
   answerText?: AnswerTextSource,
   menuActions?: RunningBlockActions,
+  /** Durable ledger identity, when this block already has one. Renderer
+   *  selection ids remain internal and never cross this DOM seam. */
+  entryId?: string,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -1274,7 +1253,7 @@ export function createCommandBlock(
   // machine. renderRecordedCommand overwrites it with the masked text when
   // the ack lands, which is the same rule one step later.
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
-  wrapper.setAttribute('data-block-id', String(id))
+  if (entryId) wrapper.dataset.entryId = entryId
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -1397,7 +1376,6 @@ export function createRunningBlock(
   // like the block it will freeze into (nocx-ex636).
   wrapper.dataset.blockKind = 'command'
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
-  wrapper.setAttribute('data-block-id', String(id))
 
   const header = createHeader(
     'command',
@@ -1448,6 +1426,7 @@ export function freezeBlock(
   status: 'success' | 'failure' | 'entered' | 'unknown',
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
+  entryId?: string,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -1465,6 +1444,7 @@ export function freezeBlock(
     author,
     undefined,
     menuActions,
+    entryId,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -1772,10 +1752,10 @@ export class BlockManager {
   /** An id for a block this manager did not create: a RESTORED one, built
    *  from the store and handed back to `restorePast` (nocx-m3fqk).
    *
-   *  From the same counter as every other block, because the id space is what
-   *  selection and the DOM address blocks by — two spaces would let a
-   *  restored block and a live one answer to the same number, and the
-   *  selection would follow whichever the query found first. */
+   *  The number is renderer-internal selection state. Restored blocks expose
+   *  their durable ledger entry id separately as `data-entry-id`; keeping the
+   *  same counter here only prevents selection collisions inside the renderer.
+   */
   nextRestoredId(): number {
     return this._nextId++
   }
@@ -1866,7 +1846,10 @@ export class BlockManager {
    */
   bindAttempt(attemptId: string): void {
     this._attemptId = attemptId
-    if (this._runningBlock) this._runningBlock.attemptId = attemptId
+    if (this._runningBlock) {
+      this._runningBlock.attemptId = attemptId
+      this._runningBlock.el.dataset.entryId = attemptId
+    }
   }
 
   /** The block bound to an attempt id — running or frozen. */
@@ -2070,6 +2053,7 @@ export class BlockManager {
       status,
       rec.author,
       this._runningActions,
+      rec.attemptId,
     )
 
     this._reown(rec.el, newEl)
@@ -2429,6 +2413,7 @@ export class BlockManager {
         store,
         'shell',
       )
+      if (blockId) pel.dataset.entryId = blockId
       const outputEl = document.createElement('div')
       // The class comes from the kind's rules — the wrap policy is owned
       // there, never a second copy (nocx-ex636).

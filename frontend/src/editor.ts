@@ -161,13 +161,6 @@ export interface EditorActions {
    *  untouched, and the next plain Enter goes wherever the person just
    *  put it. */
   onToggleTarget?: () => void
-  /** A reference chip's drop control: the host removes that chip (the
-   *  chip is data the host owns; this only reports the dismissal). */
-  onDismissChip?: (id: string) => void
-  /** The counter's close control removes every attached region. */
-  onDismissAllChips?: () => void
-  /** The counter's main control reveals the first attached region. */
-  onRevealChip?: (id: string) => void
 }
 
 export class CommandEditor {
@@ -175,8 +168,9 @@ export class CommandEditor {
   private chrome: HTMLElement
   private view: EditorView
 
-  /** The single attachment counter in the chrome row. */
-  private referenceCount: HTMLElement
+  /** The permanent grant chip in the chrome row. */
+  private grantChip: HTMLButtonElement
+  private _onGrantChipClick: (() => void) | null = null
   /** Left chip group: the location + cwd chips sit together, the clock
    *  keeps the right edge of the chrome row. */
   private chromeLeft: HTMLElement
@@ -343,31 +337,14 @@ export class CommandEditor {
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
-    this.referenceCount = document.createElement('span')
-    this.referenceCount.className = 'nocx-editor-reference-count'
-    this.referenceCount.style.display = 'none'
-    this.referenceCount.setAttribute('role', 'group')
-    const revealFirst = () => {
-      const first = this.referenceCount.dataset.firstChipId
-      if (first) this.actions.onRevealChip?.(first)
-    }
-    this.referenceCount.addEventListener('click', (event) => {
-      if (event.target === this.referenceCount) revealFirst()
-    })
-    const referenceCountValue = document.createElement('button')
-    referenceCountValue.type = 'button'
-    referenceCountValue.className = 'nocx-editor-reference-count__value'
-    referenceCountValue.addEventListener('click', revealFirst)
-    const referenceCountDrop = document.createElement('button')
-    referenceCountDrop.type = 'button'
-    referenceCountDrop.className = 'nocx-editor-reference-count__drop'
-    referenceCountDrop.textContent = '×'
-    referenceCountDrop.setAttribute('aria-label', 'remove all attachments')
-    referenceCountDrop.addEventListener('click', (event) => {
-      event.stopPropagation()
-      this.actions.onDismissAllChips?.()
-    })
-    this.referenceCount.append(referenceCountValue, referenceCountDrop)
+    this.grantChip = document.createElement('button')
+    this.grantChip.type = 'button'
+    this.grantChip.className = 'nocx-chip nocx-editor-grant'
+    this.grantChip.dataset.state = 'default'
+    this.grantChip.textContent = 'отмечено для вопроса · 0'
+    this.grantChip.title = 'Открыть отмеченные блоки'
+    this.grantChip.setAttribute('aria-label', 'отмечено для вопроса · 0')
+    this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
 
@@ -403,9 +380,9 @@ export class CommandEditor {
       this.recoveryChip,
       this.locationChip,
       this.cwdChip,
-      this.referenceCount,
       this.modelEndpointChip,
       this.modelChip,
+      this.grantChip,
     )
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
@@ -1164,27 +1141,16 @@ export class CommandEditor {
     return this.root.contains(el)
   }
 
-  /** Render the one attachment counter in the chrome row. The blocks carry
-   *  the marks; this row carries only how many references are pending and
-   *  where to reveal the first one. */
-  setReferenceChips(chips: ReadonlyArray<{ id: string }>): void {
-    if (chips.length === 0) {
-      this.referenceCount.style.display = 'none'
-      delete this.referenceCount.dataset.firstChipId
-      return
-    }
-    this.referenceCount.style.display = ''
-    this.referenceCount.dataset.firstChipId = chips[0].id
-    const value = this.referenceCount.querySelector<HTMLButtonElement>(
-      '.nocx-editor-reference-count__value',
-    )
-    if (value) value.textContent = `${chips.length} attachment${chips.length === 1 ? '' : 's'}`
+  /** Install the host's grant-popover opener once. */
+  onGrantChipClick(handler: () => void): void {
+    this._onGrantChipClick = handler
   }
 
-  /** Drop every reference chip (the host consumed them — a question
-   *  carried them, or a cleared scrollback took their blocks). */
-  clearReferenceChips(): void {
-    this.setReferenceChips([])
+  /** Render the permanent grant chip; its state is a typed data attribute. */
+  setGrantCount(count: number): void {
+    this.grantChip.dataset.state = count === 0 ? 'default' : 'chosen'
+    this.grantChip.textContent = `отмечено для вопроса · ${count}`
+    this.grantChip.setAttribute('aria-label', `отмечено для вопроса · ${count}`)
   }
 
   dispose(): void {
@@ -1195,6 +1161,7 @@ export class CommandEditor {
     // The arbiter outlives the overlay it points at otherwise; a closed tab
     // must not keep consuming keys through a dead closure.
     this.keyArbiter = null
+    this._onGrantChipClick = null
     this.root.removeEventListener('keydown', this.onKeydown, true)
     this.view.destroy()
     this.root.remove()
