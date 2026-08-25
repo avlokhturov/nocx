@@ -2797,6 +2797,12 @@ describe('the projections consume the kernel through the composition root (ADR-0
       )
       expect(attemptCall).toBeTruthy()
       expect((attemptCall![1] as { command: string }).command).toBe('make')
+      // AND IT CARRIES WHO SUBMITTED IT. The durable row is opened by this
+      // very call (nocx-kpqr3), so this is the only place the author reaches
+      // the store — history.record's close moves the status and leaves the
+      // column alone. An attempt submitted without it came back from a
+      // restart as the person's command (nocx-1druc, agent-restore.spec.ts).
+      expect((attemptCall![1] as { source: string }).source).toBe('assistant')
 
       // The attempt attaches and completes: the block freezes with the exit
       // status, exactly as a human command's does.
@@ -3998,11 +4004,16 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       // The ordering is asserted, not assumed: the backend emits the
       // running fact INSIDE SubmitAttempt, so the bytes must wait for the
       // answer or the shell's start could open a second attempt first.
+      // The source is the OTHER half of nocx-iadtt's rule, stated here as
+      // the person's end of the interval: this line was typed, so the row
+      // this call opens is the person's, whatever the assistant is doing in
+      // the same pane at the same moment.
       expect(submitAttempt).toHaveBeenCalledWith('lifecycle.submitAttempt', {
         domain: 'd1',
         command: 'make deploy',
         cwd: FIXTURE_CWD,
         host: '',
+        source: 'user',
       })
       expect(session.send).not.toHaveBeenCalled()
       // The running block opened at submit, before any fact could arrive —
@@ -4079,6 +4090,7 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
           command: 'make --token={{secret:TOKEN}}',
           cwd: FIXTURE_CWD,
           host: '',
+          source: 'user',
         }),
       )
       expect(session.send).not.toHaveBeenCalled()

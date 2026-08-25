@@ -75,6 +75,12 @@ func validateLifecycleSubmitAttemptRaw(raw json.RawMessage) string {
 	if utf8.RuneCountInString(p.Host) > maxDestinationRunes {
 		return "host exceeds the length bound"
 	}
+	// Refused HERE rather than at the store write: an attempt opened and
+	// then refused would hold the domain and poison the next attach, and a
+	// submit whose provenance is unknown must not open one at all.
+	if p.Source != string(content.SourceUser) && p.Source != string(content.SourceAssistant) {
+		return "source must be one of user, assistant"
+	}
 	return ""
 }
 
@@ -428,6 +434,19 @@ type submitAttemptParams struct {
 	Command string `json:"command"`
 	Cwd     string `json:"cwd"`
 	Host    string `json:"host"`
+	// Source is WHO submitted this command, in the ledger's own vocabulary
+	// ('user' is the person at the keyboard, 'assistant' is the agent's
+	// lane) — minted by the submitting target at submit and carried
+	// verbatim onto the row this call opens (design §3.1, nocx-iadtt).
+	//
+	// REQUIRED, WITH NO DEFAULT, and that is the whole point: since the
+	// entry is opened HERE (nocx-kpqr3) this is the only write that decides
+	// the author — history.record's close moves phase, status and times and
+	// leaves the column alone. A default would let a submit path forget it
+	// and silently attribute the assistant's command to the person, which
+	// is what nocx-1druc found: a hard-coded 'user' here, and a restored
+	// pane that no longer knew the assistant had run the command.
+	Source string `json:"source"`
 }
 
 // lifecycleSubmitAttemptResult is the result of lifecycle.submitAttempt:
@@ -452,7 +471,7 @@ type lifecycleSubmitAttemptResult struct {
 // domain at a ready prompt, synchronously, before the renderer writes the
 // command bytes to the pty.
 //
-//	--> {"jsonrpc":"2.0","id":1,"method":"lifecycle.submitAttempt","params":{"domain":"dom-1","command":"make","cwd":"/srv/app","host":"build.example.com"}}
+//	--> {"jsonrpc":"2.0","id":1,"method":"lifecycle.submitAttempt","params":{"domain":"dom-1","command":"make","cwd":"/srv/app","host":"build.example.com","source":"user"}}
 //	<-- {"jsonrpc":"2.0","id":1,"result":{"id":"att-…","domain":"dom-1","state":"open","command":"make","cwd":"/srv/app","host":"build.example.com","origin":"app","startedAt":"2026-08-08T12:00:00.123456Z"}}
 //
 // Ownership is enforced exactly like the git/files bindings: the domain's
@@ -465,11 +484,12 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		return
 	}
 	var params submitAttemptParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Domain == "" || params.Command == "" {
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.Domain == "" || params.Command == "" ||
+		(params.Source != string(content.SourceUser) && params.Source != string(content.SourceAssistant)) {
 		// An empty command is a bare newline, not an execution: it never
 		// opens an attempt (an unstarted attempt would hold the domain
 		// and poison the next attach).
-		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain, command and source (user|assistant) required"})
 		return
 	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
@@ -519,11 +539,17 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 					PaneID:        panePtr(sess.PaneID()),
 					Cwd:           att.Cwd,
 					Kind:          content.EntryShell,
-					Source:        content.SourceUser,
-					Intent:        masked.text,
-					StartedAt:     &startedAt,
-					Sensitivity:   content.SensitivityNormal,
-					Payload:       payload,
+					// The submitting target's own word, never derived here
+					// from the lane or the run state (design §3.1): a person
+					// typing while the assistant works is the person's
+					// command, and the assistant's is the assistant's. This
+					// row is the only place the fact is written, so a
+					// derivation here is one nothing downstream can repair.
+					Source:      content.Source(params.Source),
+					Intent:      masked.text,
+					StartedAt:   &startedAt,
+					Sensitivity: content.SensitivityNormal,
+					Payload:     payload,
 				}); submitErr != nil {
 					s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", att.ID, "error", submitErr)
 				}

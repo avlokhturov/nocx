@@ -4498,7 +4498,7 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
-		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
 	}, 41)
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`

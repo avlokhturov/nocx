@@ -78,12 +78,17 @@ func openLifecycleLedgerSession(t *testing.T, e *lifecycleTestEnv, paneID string
 	return result.SessionID
 }
 
+// lifecycleSubmitParams is a PERSON's submit — the ordinary case, named
+// rather than defaulted: `source` is required on this wire (nocx-iadtt), and
+// a helper that omitted it would let a handler regress to a default nobody
+// notices. lifecycleSubmitParamsFrom names the other target.
 func lifecycleSubmitParams(domain, command string) map[string]string {
 	return map[string]string{
 		"domain":  domain,
 		"command": command,
 		"cwd":     "/repo",
 		"host":    "",
+		"source":  "user",
 	}
 }
 
@@ -575,4 +580,77 @@ func lifecycleBlockReadPromptID(body string) string {
 		}
 	}
 	return ""
+}
+
+// lifecycleSubmitParamsFrom is lifecycleSubmitParams with the submitting
+// target named: `source` is required on this wire and has no default, for the
+// reason nocx-iadtt gave it no default on history.record's — a submit path
+// that could forget it would silently attribute a command to the person.
+func lifecycleSubmitParamsFrom(domain, command, source string) map[string]string {
+	p := lifecycleSubmitParams(domain, command)
+	p["source"] = source
+	return p
+}
+
+// THE ROW IS BORN WITH THE AUTHOR THAT SUBMITTED IT (nocx-1druc, nocx-iadtt).
+// Since nocx-kpqr3 the entry opens HERE, at submit, under the attempt id, and
+// this call stamped every one of them 'user'. So the assistant's own `run`
+// landed as the person's: history.record carries the renderer's minted source
+// and its close leaves the column alone, which means nothing downstream could
+// ever repair it, and a restored pane forgot that the assistant had run the
+// command (agent-restore.spec.ts — the restore badge is painted from this
+// column). Both submitting targets are driven here, because a fix that
+// stamped everything 'assistant' would pass a one-sided test.
+func TestLifecycleSubmitAttempt_StampsTheAuthorThatSubmitted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		command string
+		source  string
+		want    content.Source
+	}{
+		{"a person's own line", "echo typed-by-a-person", "user", content.SourceUser},
+		{"the assistant's run", "echo ran-by-the-assistant", "assistant", content.SourceAssistant},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// One env per case: a domain holds ONE open attempt, so two
+			// submits in one env is a test about prompt readiness rather
+			// than about provenance.
+			e, _, _, h, _, db := newLifecycleLedgerEnv(t, true)
+			got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+				lifecycleSubmitParamsFrom(string(h.Domain), tc.command, tc.source), 41))
+			if row := mustEntry(t, db, got.ID); row.Source != tc.want {
+				t.Fatalf("submit stored source=%q, want %q", row.Source, tc.want)
+			}
+		})
+	}
+}
+
+// A source outside the ledger's vocabulary is refused before an attempt is
+// opened, and an ABSENT one is refused too: this is the field a submit path
+// must not be able to forget (nocx-iadtt: required on the wire, no default).
+// An attempt opened and then refused would hold the domain and poison the
+// next attach, which is why the refusal is in the validator rather than at
+// the store write.
+func TestLifecycleSubmitAttempt_RefusesASourceOutsideTheVocabulary(t *testing.T) {
+	e, _, _, h, _, _ := newLifecycleLedgerEnv(t, true)
+	for _, tc := range []struct{ name, source string }{
+		{"absent", ""},
+		{"not a subject", "agent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			params := lifecycleSubmitParams(string(h.Domain), "echo hi")
+			if tc.source == "" {
+				delete(params, "source")
+			} else {
+				params["source"] = tc.source
+			}
+			errObj := submitAttemptErr(t, e.conn, params, 61)
+			if errObj.Code != -32602 {
+				t.Fatalf("error code = %d, want -32602", errObj.Code)
+			}
+			if !strings.Contains(errObj.Message, "source") {
+				t.Fatalf("error message = %q, want it to name source", errObj.Message)
+			}
+		})
+	}
 }

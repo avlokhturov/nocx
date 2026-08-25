@@ -335,3 +335,81 @@ func TestQueryEntries_RefusesBothCursorsAtOnce(t *testing.T) {
 		t.Fatal("QueryEntries accepted both a seq cursor and an id cursor")
 	}
 }
+
+// THE ROW KEEPS THE AUTHOR IT WAS OPENED WITH, across the transition from
+// open to closed (nocx-iadtt, design §3.1). Since the row is opened at submit
+// under the attempt id (nocx-kpqr3), the OPEN is the only write that decides
+// the author — the close moves phase, status, times and payload and must
+// leave `source` alone. That makes the open the one place the submitting
+// target's author has to arrive, which is what nocx-1druc found missing:
+// lifecycle.submitAttempt stamped every row 'user', so a command the
+// assistant ran came back from a restart as the person's (the restore badge
+// is painted from this column). The interval is stated at both ends:
+// assistant at the open, assistant after the close.
+func TestRecordCompleted_KeepsTheAuthorOfTheAttemptItCloses(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	const id = "att-0000000000000009"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "test-client", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceAssistant, Intent: "echo ran-by-the-assistant", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	open, openErr := led.Entry(ctx, id)
+	if openErr != nil || open == nil {
+		t.Fatalf("Entry(%q) while open = %+v, %v", id, open, openErr)
+	}
+	if open.Source != content.SourceAssistant {
+		t.Fatalf("open row source = %q, want %q", open.Source, content.SourceAssistant)
+	}
+	if _, startErr := led.StartExecution(ctx, content.StartExecution{EntryID: id}); startErr != nil {
+		t.Fatalf("StartExecution: %v", startErr)
+	}
+	in := aCompletedCommand("echo ran-by-the-assistant")
+	in.AttemptID = id
+	in.Source = content.SourceAssistant
+	if _, recordErr := led.RecordCompleted(ctx, in); recordErr != nil {
+		t.Fatalf("RecordCompleted: %v", recordErr)
+	}
+	got, getErr := led.Entry(ctx, id)
+	if getErr != nil || got == nil {
+		t.Fatalf("Entry(%q) after close = %+v, %v", id, got, getErr)
+	}
+	if got.Source != content.SourceAssistant {
+		t.Fatalf("closed row source = %q, want %q — the author the renderer minted", got.Source, content.SourceAssistant)
+	}
+}
+
+// The other end of the same rule: a close may not RE-AUTHOR a row. The open
+// said the person and the close says the person; a close whose source
+// disagreed with the open would be a second owner of the fact, and the
+// store's answer is the one the submitting target minted at submit.
+func TestRecordCompleted_DoesNotReauthorAPersonsAttempt(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	const id = "att-000000000000000a"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "test-client", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "echo typed-by-a-person", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	if _, startErr := led.StartExecution(ctx, content.StartExecution{EntryID: id}); startErr != nil {
+		t.Fatalf("StartExecution: %v", startErr)
+	}
+	in := aCompletedCommand("echo typed-by-a-person")
+	in.AttemptID = id
+	if _, recordErr := led.RecordCompleted(ctx, in); recordErr != nil {
+		t.Fatalf("RecordCompleted: %v", recordErr)
+	}
+	got, getErr := led.Entry(ctx, id)
+	if getErr != nil || got == nil {
+		t.Fatalf("Entry(%q) after close = %+v, %v", id, got, getErr)
+	}
+	if got.Source != content.SourceUser {
+		t.Fatalf("closed row source = %q, want %q", got.Source, content.SourceUser)
+	}
+}

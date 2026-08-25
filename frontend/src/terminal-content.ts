@@ -4562,6 +4562,10 @@ export class TerminalContent extends BasePaneContent {
         command: recordLine,
         cwd: submitCwd,
         host: this._host,
+        // The submitting target's own author, in the ledger's words — the
+        // same mapping history-client.ts makes, because both calls write
+        // one column (design §3.1, nocx-iadtt).
+        source: author === 'agent' ? 'assistant' : 'user',
       })
       .then(write, write)
     return { block, ledgerId }
