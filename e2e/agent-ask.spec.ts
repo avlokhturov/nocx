@@ -839,7 +839,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     })
   })
 
-  test('cancelling an ask unlock cancels its durable run without calling the model', async ({
+  test('cancelling an ask unlock stops its durable run without calling the model', async ({
     page,
   }) => {
     endpoint = await backend.restart()
@@ -857,7 +857,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(unlock).not.toBeVisible({ timeout: 10_000 })
 
     const answer = answerBlockOf(page, question)
-    await expect(answer.locator('.cmd-header-exit')).toHaveText('cancelled', {
+    await expect(answer.locator('.cmd-header-exit')).toHaveText('stopped', {
       timeout: 15_000,
     })
     expect(fake.requests()).toHaveLength(base)
