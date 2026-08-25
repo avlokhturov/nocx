@@ -36,8 +36,9 @@ type Declaration struct {
 	// (validateDeclaration), so a tool cannot be offered as a name and a
 	// schema with nothing to say what it is for.
 	Description string
-	// Effect is the tool's class on the ADR-0020 lattice (the ledger's
-	// vocabulary — content.Effect).
+	// Effect is the tool's declared worst-case class on the ADR-0020 lattice
+	// (the ledger's vocabulary — content.Effect). A validated command carrier
+	// may lower the proposal's effective class in the backend policy gate.
 	Effect content.Effect
 	// Resources are the resource kinds the tool touches, from the ledger's
 	// closed set. A tool declaring none is offered whenever its effect is
@@ -49,6 +50,10 @@ type Declaration struct {
 	// parameters: its scope is the grant's own scope for the kinds it
 	// declares (git.status's repository is the grant's path scope itself).
 	ResourceArg string
+	// CommandArg names the argument carrying a shell command whose call effect
+	// may be lowered from the declaration's worst case by the backend parser.
+	// Empty for tools with no command carrier.
+	CommandArg string
 	// Executes says where the tool's work happens: InGo or InRenderer.
 	Executes Executes
 	// Params is the tool's params schema path, relative to the ROOT of the
@@ -154,6 +159,7 @@ var declarations = []Declaration{
 		Effect:      content.EffectMutateDestructive,
 		Resources:   []content.ResourceKind{content.ResourceSession},
 		ResourceArg: "sessionId",
+		CommandArg:  "command",
 		Executes:    InRenderer,
 		Params:      "run.schema.json",
 		Narrow:      narrowRun,

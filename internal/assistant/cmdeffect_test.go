@@ -96,6 +96,7 @@ func TestCommandEffect_EveryReadAllowlistEntryLowers(t *testing.T) {
 		})
 	}
 }
+
 func TestCommandEffect_SortOutputFormsKeepWorstCase(t *testing.T) {
 	for _, command := range []string{
 		"sort -o /etc/passwd file",

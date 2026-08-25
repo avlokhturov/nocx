@@ -364,6 +364,11 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		if err != nil {
 			return "", fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
 		}
+		// The mechanical call classifier is deliberately after validation and
+		// before every policy/approval/ledger path. Unlike the model classifier
+		// below, it may lower a declared worst case: CommandEffect retains that
+		// worst case for every disqualified command.
+		decl = classifyCall(decl, args)
 
 		// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
 		//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
@@ -618,6 +623,22 @@ func (m *policyMiddleware) validate(decl agenttools.Tool, raw string) (map[strin
 		return nil, errors.New("arguments are not an object")
 	}
 	return obj, nil
+}
+
+// classifyCall is the one proposal-to-effect conversion. A declaration may
+// name the validated argument carrying a shell command; every other tool keeps
+// its declared effect. The registry owns which tools carry commands, so this
+// path does not grow a second tool-name table.
+func classifyCall(decl agenttools.Tool, args map[string]any) agenttools.Tool {
+	if decl.CommandArg == "" {
+		return decl
+	}
+	command, ok := args[decl.CommandArg].(string)
+	if !ok {
+		return decl
+	}
+	decl.Effect = CommandEffect(command, decl.Effect)
+	return decl
 }
 
 // ── policy ────────────────────────────────────────────────────────────────

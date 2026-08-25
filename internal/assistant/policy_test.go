@@ -1186,6 +1186,55 @@ func TestAsk_PolicyEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	}
 }
 
+func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
+	grant := sessionGrant("session-a", askEveryTimeMatrix())
+	tests := []struct {
+		name    string
+		command string
+		effect  content.Effect
+	}{
+		{name: "ordinary read", command: "df -h", effect: content.EffectObserve},
+		{name: "destructive command", command: "rm -rf /", effect: content.EffectMutateDestructive},
+		{name: "mixed command", command: "ls && rm -rf /tmp/x", effect: content.EffectMutateDestructive},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ledger := &fakeLedger{}
+			_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
+				name: "run",
+				args: `{"sessionId":"session-a","command":"` + tc.command + `"}`,
+			}))
+			defer srv.Close()
+			cl, err := newClient(nil, os.DirFS(realToolsFS))
+			if err != nil {
+				t.Fatalf("newClient: %v", err)
+			}
+			err = cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, NewApprovalStore()), func(AskEvent) error {
+				return nil
+			})
+			var asked *ApprovalRequestedError
+			if !errors.As(err, &asked) || asked.Request == nil {
+				t.Fatalf("run %q error = %v, want approval request", tc.command, err)
+			}
+			if asked.Request.Effect != tc.effect {
+				t.Fatalf("run %q effect = %q, want %q", tc.command, asked.Request.Effect, tc.effect)
+			}
+			if len(ledger.submissions) != 1 {
+				t.Fatalf("proposal submissions = %d, want 1", len(ledger.submissions))
+			}
+			var payload struct {
+				Effect content.Effect `json:"effect"`
+			}
+			if err := json.Unmarshal([]byte(ledger.submissions[0].payload), &payload); err != nil {
+				t.Fatalf("proposal payload: %v", err)
+			}
+			if payload.Effect != tc.effect {
+				t.Fatalf("stored proposal effect = %q, want %q", payload.Effect, tc.effect)
+			}
+		})
+	}
+}
+
 // TestAsk_EscalationWithoutAResourceArgCarriesNoResource is the null half:
 // a tool that names no resource in its parameters (git.status's repository
 // IS the grant's path scope) escalates with an effect and NO resource. Null
