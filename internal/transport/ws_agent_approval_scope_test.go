@@ -14,8 +14,11 @@ package transport
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -487,5 +490,116 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesTheObserveRow(t *te
 	}
 	if d := policy.Policy().DecisionFor(content.EffectMutateDestructive); d != content.DecisionAsk {
 		t.Fatalf("mutate-destructive = %q, want untouched ask — df must not grant destructive calls", d)
+	}
+}
+
+// TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBeforeDestructiveEscalation
+// holds the READ half of the standing answer. It uses the same run tool twice:
+// after "allow always" for `df -h`, the next destructive proposal must reach
+// the wire as approvalRequested instead of executing. The row assertion above
+// proves only the WRITE landed in the observe row; it does not prove that the
+// policy read consults that row without widening the answer.
+func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBeforeDestructiveEscalation(t *testing.T) {
+	var sid string
+	var requests atomic.Int64
+	argsFor := func(command string) string {
+		raw, err := json.Marshal(map[string]string{"sessionId": sid, "command": command})
+		if err != nil {
+			t.Fatalf("marshal run args: %v", err)
+		}
+		return string(raw)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch requests.Add(1) {
+		case 1:
+			streamToolCallChunk(w, "run", argsFor("df -h"))
+		case 2:
+			streamToolCallChunk(w, "run", argsFor("rm -rf /"))
+		default:
+			streamOKChunks(w)
+		}
+	}))
+	defer srv.Close()
+
+	client, err := assistant.NewClient(nil)
+	if err != nil {
+		t.Fatalf("assistant.NewClient: %v", err)
+	}
+	policy := askObserveStore(t)
+	initial := policy.Policy()
+	initial.MutateDestructive = content.EffectRow{Decision: content.DecisionAsk}
+	if err := policy.SetPolicy(initial); err != nil {
+		t.Fatalf("seed destructive ask row: %v", err)
+	}
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
+	h.createEndpointAt(srv.URL)
+
+	sid = openLocalSession(t, h.conn)
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-read-half", "sessionId": sid, "question": "how much disk is free?", "cwd": "/repo",
+	}, 2); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
+	var first agentApprovalRequested
+	if err := json.Unmarshal(raw, &first); err != nil {
+		t.Fatalf("first approvalRequested unmarshal: %v\nraw: %s", err, raw)
+	}
+	if first.Tool != "run" || first.Effect != string(content.EffectObserve) {
+		t.Fatalf("first proposal = tool %q effect %q, want run/observe", first.Tool, first.Effect)
+	}
+
+	got, errObj := approveOverWire(t, h.conn, map[string]any{
+		"runId": first.RunID, "attempt": first.Attempt, "tool": first.Tool,
+		"callId": first.CallID, "argHash": first.ArgHash, "approved": true, "scope": "always",
+	}, 3)
+	if errObj != nil {
+		t.Fatalf("first agent.approve: %+v", errObj)
+	}
+	if got.Warning != "" {
+		t.Fatalf("first approval warning = %q, want none", got.Warning)
+	}
+
+	runRaw := readNotification(t, h.conn, "agent.runRequest", 15*time.Second)
+	var runReq struct {
+		RequestID string `json:"requestId"`
+		SessionID string `json:"sessionId"`
+		Command   string `json:"command"`
+	}
+	if err := json.Unmarshal(runRaw, &runReq); err != nil {
+		t.Fatalf("first runRequest unmarshal: %v\nraw: %s", err, runRaw)
+	}
+	if runReq.SessionID != sid || runReq.Command != "df -h" {
+		t.Fatalf("first runRequest = session %q command %q, want session %q command %q",
+			runReq.SessionID, runReq.Command, sid, "df -h")
+	}
+	reply := jsonrpcCall(t, h.conn, "agent.runResolved",
+		runResolvedWire(runReq.RequestID, "entry-read-half", 0, "success", 1, 0, 1, "free"))
+	var rerr struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &rerr); err != nil {
+		t.Fatalf("runResolved response unmarshal: %v", err)
+	}
+	if rerr.Error != nil {
+		t.Fatalf("runResolved refused: %+v", rerr.Error)
+	}
+
+	secondRaw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
+	var second agentApprovalRequested
+	if err := json.Unmarshal(secondRaw, &second); err != nil {
+		t.Fatalf("second approvalRequested unmarshal: %v\nraw: %s", err, secondRaw)
+	}
+	if second.Tool != "run" {
+		t.Fatalf("second proposal tool = %q, want run", second.Tool)
+	}
+	if second.RunID != first.RunID {
+		t.Fatalf("second proposal runId = %q, want the first run %q", second.RunID, first.RunID)
+	}
+	if second.Effect != string(content.EffectMutateDestructive) {
+		t.Fatalf("second proposal effect = %q, want mutate-destructive — the READ must escalate it", second.Effect)
+	}
+	if !strings.Contains(second.Arguments, `"command":"rm -rf /"`) {
+		t.Fatalf("second proposal arguments = %s, want the destructive run call", second.Arguments)
 	}
 }
