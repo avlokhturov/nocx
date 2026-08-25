@@ -3,6 +3,15 @@
 // stage/unstage, stage-all/unstage-all and the commit form. The store owns
 // every call; the panel renders state and routes user intent into it.
 //
+// THE BODY, and that is why nothing here mentions `SidebarView`. The frame —
+// header, header actions, pinned filter row, the one scrolling body — is the
+// kit's, and it is reached through the DESCRIPTOR in git-view.tsx, which the
+// shell renders inside `SidebarView` for every panel alike (sidebar.tsx
+// builds it once). A panel body that imported the frame would be the second
+// owner of a layout the shell already owns; what a body may say about the
+// frame is which of its children is the filter, and it says that in the
+// descriptor beside `actions`. Same for notes-panel.tsx (nocx-708q.3).
+//
 // The render rules that make it correct:
 //
 // 1. state() IS THE DISCRIMINATOR, SWITCHED ON FIRST — exactly one of the
@@ -48,7 +57,6 @@ import { Section } from '../ui/section'
 import { Spinner } from '../ui/spinner'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
-import { SearchField } from '../ui/search-field'
 import { matchesPathFilter } from './git-filter'
 import { showToast } from '../ui/toast'
 import type { FileStatus } from '../ui/file-status-row'
@@ -108,6 +116,56 @@ function diffSideFor(letter: FileStatus): GitDiffSide {
   return letter === '?' ? 'untracked' : 'unstaged'
 }
 
+/** Turn one rejected mutation's reason into the sentence a person reads in
+ *  the toast (nocx-8sudy — the git panel's tenth site of the error-home
+ *  sweep). The wire carries the backend's own words: the git domain errors
+ *  from internal/git/errors.go ride the JSON-RPC message verbatim
+ *  (gitErrorCode only picks the code), an invocation failure is a fmt error
+ *  carrying git's own output, and a dropped socket rejects with the
+ *  transport's plain words ("closed", "ws closed", "not connected"). The
+ *  mapped sentence stays a person's while the reason survives, exactly like
+ *  ports.tsx's listingFailureMessage.
+ *
+ *  Returns null when the panel must not toast: a control-plane saturation
+ *  refusal arrives with the fixed message "Control plane busy", and the
+ *  dispatcher already raised its own deduplicated danger toast for it — a
+ *  second toast would be the same news twice.
+ *  Not mapped here: "git: unknown binding" (the store re-resolves that ONE
+ *  refusal — reason "unknown-binding" on the wire, nocx-bpqil — through
+ *  git.open before the error is stored; every other -32602 refusal reaches
+ *  this mapper as itself) and a failed commit's OUTPUT (that is the commit
+ *  state, shown in the panel, D11 — never a rejection).
+ */
+function mutationFailureMessage(reason: string): string | null {
+  if (reason === 'Control plane busy') return null
+  const r = reason.toLowerCase()
+  if (
+    /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
+    r.includes('disconnected')
+  ) {
+    return 'The change could not be made — the connection was lost.'
+  }
+  if (r.includes('nothing is staged')) {
+    return 'Nothing is staged to commit — stage a file first.'
+  }
+  if (r.includes('cannot amend')) {
+    return 'This branch has no commit to amend yet.'
+  }
+  if (r.includes('belongs to session') || r.includes('handle released')) {
+    return "The change could not be made — this view's repository is no longer available."
+  }
+  if (r.includes('conflicted')) {
+    return 'The change could not be made while a merge conflict is unresolved.'
+  }
+  if (r.includes('not available')) {
+    return 'The change could not be made — git is not available.'
+  }
+  // The open set: never pretend to a completeness we cannot have. The
+  // sentence stays a person's; the reason is appended so the diagnostic
+  // survives (AGENTS.md: a soft degrade must be visible in the product).
+  return `The change could not be made (${reason}).`
+}
+
 type RowList = 'staged' | 'unstaged' | 'conflicted'
 
 interface GitRow {
@@ -134,6 +192,27 @@ export function GitPanel(props: GitPanelProps) {
     on(
       () => props.visible(),
       (v) => props.store.setVisible(v),
+    ),
+  )
+
+  // The outcome of a pressed mutation action is a Toast, raised once at
+  // the moment it happens (ui/README.md: "a message about an action does
+  // not live in the document flow"). The store keeps the account — it is
+  // cleared by the NEXT mutation (beginMutation) — so this effect is
+  // edge-triggered on the signal's VALUE, the ports pattern: `on()` fires
+  // only when the value changes, so a persisted failure raises once, a
+  // recovery (null, at the next mutation's start) followed by another
+  // failure raises again, and a panel remount never re-toasts the same
+  // failure. `null` means the failure is already visible (the dispatcher's
+  // own saturation toast — mutationFailureMessage's contract).
+  createEffect(
+    on(
+      () => props.store.mutationError(),
+      (err) => {
+        if (err === null) return
+        const message = mutationFailureMessage(err.message)
+        if (message !== null) showToast({ level: 'danger', message })
+      },
     ),
   )
   onCleanup(() => props.store.setVisible(false))
@@ -638,11 +717,6 @@ export function GitPanel(props: GitPanelProps) {
               </Button>
             </div>
           </Show>
-          <Show when={props.store.mutationError() !== null}>
-            <div class="git-mutation-error" data-testid="git-mutation-error">
-              {props.store.mutationError()!.message}
-            </div>
-          </Show>
           {/* ── Whole-index controls. Refused, visibly, while any entry is
                conflicted (D19) — absent entirely on SSH (D14, the remote
                state never reaches this branch). ──────────────────────── */}
@@ -677,28 +751,17 @@ export function GitPanel(props: GitPanelProps) {
               is resolved.
             </p>
           </Show>
-          {/* ── The filter (nocx-52by): the kit's SearchField, placed and
-               never repainted (ADR-0014). Renderer-side: typing narrows the
-               rows already in the store and issues no request. A collapsed
-               section stays collapsed — the filter narrows lists, the
-               disclosure hides them, and the two compose independently; a
-               filter never silently expands a section the user folded
-               (nocx-nak2). Escape drops the filter and keeps focus, the
-               settings search's pattern. */}
-          <div class="git-filter" data-testid="git-filter">
-            <SearchField
-              value={filter()}
-              onInput={(v) => props.store.setFilter(v)}
-              placeholder="Filter files…"
-              ariaLabel="Filter changed files"
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && filter() !== '') {
-                  e.stopPropagation()
-                  props.store.setFilter('')
-                }
-              }}
-            />
-          </div>
+          {/* THE FILTER IS NOT HERE. It stood exactly at this point, above
+               the two lists it narrows, and it went up and off the panel
+               with them the moment anybody scrolled — the whole reason a
+               filter exists is to be reachable while you scroll a long list
+               (owner, 2026-08-22). It is `GitFilter` in git-view.tsx now,
+               declared on the descriptor and pinned by the shell, reading
+               the same `store.filter()` this panel narrows by. Nothing else
+               about it moved: typing still narrows rows already in the store
+               and issues no request, and a collapsed section stays collapsed
+               because the filter narrows lists while the disclosure hides
+               them (nocx-nak2). */}
           {/* ── The two lists ─────────────────────────────────────────── */}
           <Section
             title={`Staged (${filteredStaged().length})`}

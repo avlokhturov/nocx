@@ -9,7 +9,7 @@ import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
-import { installBrowserTransport } from './wails-runtime'
+import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
@@ -27,6 +27,7 @@ import type { ConnectionsPasswordRequest } from './generated/connections.passwor
 import { AgentApprovalPrompt } from './agent-approval-prompt'
 import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
+import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
@@ -37,10 +38,12 @@ import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import { apiSidebarAction, registerApiSurface } from './api'
+import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon, TextQuoteIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountRunCommandHandler } from './run-command'
@@ -56,12 +59,24 @@ import {
   type DrillCommand,
   type QuickConnectProvider,
 } from './quick-connect'
-import { PortsPanel, createPortsPanelServices, createPortsPauseControl } from './ports'
+import {
+  PortsPanel,
+  createPortsFilter,
+  createPortsFilterControl,
+  createPortsPanelServices,
+  createPortsPauseControl,
+} from './ports'
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { uploadSurfaceFor } from './files/upload-surface'
+import { uploadOperations } from './files/upload-operations'
+import { downloadSurfaceFor } from './files/download-surface'
+import { downloadOperations } from './files/download-operations'
+import { createOperationsModel } from './operations/operations'
+import { createOperationsView } from './operations/operations-view'
 import { createGitView } from './git/git-view'
 import { createGitPanelServices, type GitPanelServices } from './git/git-client'
 import { createGitStore } from './git/git-store'
@@ -88,7 +103,7 @@ import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
 import { mountSnippetAskDialog } from './snippets/snippet-ask-dialog'
 import { NotesClient } from './notes/notes-client'
 import { NotesStore } from './notes/notes-store'
-import { NotesPanel } from './notes/notes-panel'
+import { createNotesView } from './notes/notes-view'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
 import { createOverviewController } from './overview/overview-controller'
@@ -561,12 +576,131 @@ async function main() {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
+  // The upload surface (design §5.5), resolved from the dispatcher — the
+  // SAME instance the terminal panes resolve, because a transfer has one
+  // state and two stores would each mint a row for every transfer the other
+  // started. Without this the panel's Upload action would be dead code.
+  const uploadSurface = uploadSurfaceFor(dispatcher)
+  // The download surface (nocx-9le.8.3), resolved the same way and for the
+  // same reason: one store per dispatcher, because a transfer has one state.
+  // Without this the panel's Download item would be dead code.
+  const downloadSurface = downloadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
     clipboard,
     activeOrigin,
+    upload: uploadSurface,
+    download: downloadSurface,
   })
+
+  // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
+  // store is read as operations rather than being the list itself, which is
+  // what made download a one-line ADDITION here: it has no panel of its own,
+  // it joins as a second source, and nothing in the model, the indicator or
+  // the row changed to receive it.
+  const operations = createOperationsModel([
+    uploadOperations(uploadSurface.store),
+    downloadOperations(downloadSurface.store),
+  ])
+  const operationsView = createOperationsView(operations)
+
+  // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
+  // collection tree, the request form and the runs. Registered through its
+  // own module rather than inline here, because the singleton key and the
+  // activity-bar entry are the surface's decisions and not the shell's — the
+  // file viewer and the notes surface are wired the same way.
+  //
+  // Two capabilities are handed in, and BOTH may be absent — absence is the
+  // capability, never a stub that fails when pressed.
+  //
+  // The two pickers come off the ONE dialog client (AD-8): `dialog.*` needs
+  // a Wails runtime and the `make dev-web` harness has none, so the workbench
+  // draws a Browse control only where the picker is real.
+  //
+  // The collection watch comes off the ONE files client, for the same reason
+  // and with a second condition. A collection is a folder on disk that a
+  // `git pull` rewrites underneath the panel, and the product already answers
+  // "how does a surface learn a directory changed" — `files.watch` plus
+  // `files.changed`, which the Files panel above uses. So the workbench is
+  // given that answer rather than a second one (nocx-19rcp). It is wired here
+  // rather than inside the api client because `files.*` is another module's
+  // method: the workbench declares the slice it needs, and the composition
+  // root is what may know both halves.
+  //
+  // It is registered after the files wrapper deliberately — the wrapper is
+  // the composition root's binding-liveness bookkeeping and every binding
+  // this window opens goes through it.
+  //
+  // THIS IS THE ONE READING OF `hasWailsWebview()` ON THIS PATH, and every
+  // capability below that turns on "can this build reach the Wails runtime"
+  // is derived from it rather than asking again. Both pickers were asking a
+  // DIFFERENT question until nocx-h9f8y — whether the client object carries
+  // the method, which a class instance always does — and so were handed in
+  // on builds where `dialog.*` answers -32601.
+  const nativeRuntime = hasWailsWebview()
+  const pickers = nativePickers(dialogClient, nativeRuntime)
+  registerApiSurface(
+    registry,
+    tm,
+    createApiWorkbenchServices(
+      dispatcher,
+      pickers.directory,
+      {
+        // Which local session this window can address, asked at call time —
+        // PaneManager.anyLocalSession() walks the open panes, so a tab that
+        // has been closed cannot be named. A latch here held the first local
+        // session ever seen and outlived its tab, and `files.open` refuses a
+        // session the registry no longer has open.
+        localSession: () => tm.anyLocalSession(),
+        open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+        watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
+        close: (bindingId) => filesServicesTracked.close(bindingId),
+        subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
+        onConnect: (handler) => filesServicesTracked.onConnect(handler),
+      },
+      // The connections an environment may route through (§6.5). Bound HERE
+      // because only the composition root may know both halves: `profiles.list`
+      // is ProfileClient's, and the API workbench names a connection without
+      // learning to speak that domain (AD-8). Narrowed to the two fields the
+      // route needs — an id to store and a name to show.
+      () =>
+        profileClient
+          .listProfiles()
+          .then((profiles) => profiles.map((p) => ({ id: p.id, name: p.name }))),
+      // And the FILE picker, off the same dialog client, for the one path
+      // this surface reads rather than writes: a Postman export. It comes
+      // out of the same call as the directory one because there is one
+      // reason for neither to exist — no runtime to serve `dialog.*` — and
+      // they still retire independently once there is one (api-client.ts).
+      pickers.file,
+      // The native drop, and BOTH halves of "is there one" are decided here
+      // because only the composition root knows both: the Wails runtime is a
+      // property of this build (wails-runtime.ts), and the open local session
+      // is the pane manager's to answer.
+      //
+      // It reads the ONE answer taken above rather than asking again, and the
+      // workbench derives the rest from what it was handed (api-pane.tsx,
+      // `nativeWindow`). Handed nothing, the ask is not without a drop:
+      // outside the webview a drop is a DOM event carrying the BYTES, and
+      // `api.import.postman` takes the document as well as a path (spec §1a).
+      // What this port selects is which of the two routes a gesture travels,
+      // never whether the ask has one.
+      //
+      // Bound off the ONE upload surface's services rather than a second
+      // subscription to files.dropped: two subscribers to one notification
+      // is two owners of when it has been handled, and the terminal pane's
+      // subscriber is already the other one. They do not collide because
+      // each filters on its own `target` (files.dropped's contract).
+      nativeRuntime
+        ? {
+            session: () => tm.anyLocalSession(),
+            subscribe: (handler: (p: FilesDropped) => void) =>
+              uploadSurface.services.subscribeDropped(handler),
+          }
+        : undefined,
+    ),
+  )
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -786,10 +920,16 @@ async function main() {
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
   const portsPause = createPortsPauseControl()
+  // The filter is a HEADER-LEVEL slot too (nocx-708q.3), for the same
+  // reason Pause is: one control shared between the shell's pinned row and
+  // the panel, so the field and the rows read one signal. In the body it
+  // scrolled away with the list it narrows.
+  const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
     title: 'Ports',
     icon: PlugIcon,
+    filter: createPortsFilter(portsFilter),
     // Refresh, not Pause (nocx-wzc4.11). One sample costs ~12ms, so there is
     // nothing to protect a host from; what a user actually wants is to ask
     // again after starting something.
@@ -815,6 +955,7 @@ async function main() {
         services={portsServices}
         visible={props.visible}
         pause={portsPause}
+        filter={portsFilter}
       />
     ),
     order: 0,
@@ -825,22 +966,17 @@ async function main() {
   // point of the feature (design §6.3).
   const notesStore = new NotesStore(new NotesClient(dispatcher))
   registerNotesSurface(tm, notesStore)
-  const NOTES_VIEW: SidebarViewDescriptor = {
-    id: 'notes',
-    title: 'Notes',
-    icon: TextQuoteIcon,
-    view: (props) => (
-      <NotesPanel
-        store={notesStore}
-        visible={props.visible()}
-        onOpen={(id) => openNote(id, '')}
-        onCreate={() => void createAndOpenNote()}
-      />
-    ),
-    order: 1,
-  }
+  // The descriptor is `createNotesView`, beside the Files, Git and
+  // Operations ones, rather than a literal here (nocx-708q.3): the header
+  // action, the pinned filter and the body all read one store, and a
+  // descriptor that lives with its panel is a descriptor a test can mount.
+  const notesView = createNotesView({
+    store: notesStore,
+    onOpen: (id) => openNote(id, ''),
+    onCreate: () => void createAndOpenNote(),
+  })
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, NOTES_VIEW].sort(
+  const sidebarViews = [filesView, PORTS_VIEW, gitView, notesView, operationsView].sort(
     (a, b) => a.order - b.order,
   )
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
@@ -856,6 +992,11 @@ async function main() {
     sidebarPanel,
     sidebarViews,
     /* actions */ [
+      // The bottom zone: an action opens a tab and never touches the panel.
+      // The API workbench belongs here rather than in the view zone for the
+      // reason design §9.2 gives — the tree lives IN the workbench, and a
+      // second tree in the panel would be a second owner of one selection.
+      apiSidebarAction(),
       {
         id: 'settings',
         title: 'Settings',

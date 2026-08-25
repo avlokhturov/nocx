@@ -12,20 +12,33 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, render, screen, fireEvent, waitFor } from '@solidjs/testing-library'
 import { createSignal } from 'solid-js'
-
-afterEach(cleanup)
+import { clearToasts } from './ui/toast'
+import type { TunnelOpenResult } from './generated/tunnel.open'
+import { LOCAL_TARGET_ID } from './ports-client'
+import type { PortsStatusResult } from './generated/ports.status'
 import {
   PortsPanel,
   POLL_INTERVAL_MS,
+  createPortsFilter,
+  createPortsFilterControl,
   createPortsPauseControl,
   type PortsPanelProps,
   type PortsPanelServices,
 } from './ports'
-import type { PortsStatusResult } from './generated/ports.status'
-import type { TunnelOpenResult } from './generated/tunnel.open'
-import { LOCAL_TARGET_ID } from './ports-client'
-
-// ── Fixtures ──────────────────────────────────────────────────────────────
+const listingToasts: { level?: string; message: string }[] = []
+vi.mock('./ui/toast', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./ui/toast')>()
+  return {
+    ...actual,
+    showToast: (t: { level?: string; message: string }) => {
+      listingToasts.push(t)
+    },
+  }
+})
+afterEach(cleanup)
+afterEach(() => {
+  listingToasts.length = 0
+})
 
 const discoveryFixture = (
   over: Partial<PortsStatusResult['discovery']> = {},
@@ -93,23 +106,37 @@ function fakeServices(over: Partial<PortsPanelServices> = {}): PortsPanelService
   }
 }
 
-/** The panel plus its shared Pause control — the seam the header action and
- *  the panel share in main.tsx (nocx-wzc4.9). */
+/** The panel plus the two controls it shares with the shell — Pause, which
+ *  the header action drives (nocx-wzc4.9), and Filter, whose field the
+ *  shell pins ABOVE the scrolling body (nocx-708q.3).
+ *
+ *  The filter component is rendered here rather than left out, because it
+ *  is no longer part of the panel: the panel narrows its rows by the
+ *  control and reports whether there is a list to narrow, and the field
+ *  that writes the query is the shell's. Rendering both is what keeps
+ *  `getByLabelText('Filter ports')` a test of the seam a user reaches
+ *  rather than of markup that no longer exists. */
 function renderPanel(services: PortsPanelServices, over: Partial<PortsPanelProps> = {}) {
-  // The control is created ONCE, outside the JSX. Solid wraps every prop
+  // The controls are created ONCE, outside the JSX. Solid wraps every prop
   // expression in a getter, so `pause={createPortsPauseControl()}` builds a
   // fresh control on every read — `sync` would write one instance while the
   // view read another, and the panel could never show a pause it did not
   // itself initiate (nocx-wzc4.10).
   const pause = createPortsPauseControl()
+  const filter = over.filter ?? createPortsFilterControl()
+  const PortsFilter = createPortsFilter(filter)
   return render(() => (
-    <PortsPanel
-      profileId={() => 'ssh:p1:1'}
-      services={services}
-      visible={() => true}
-      pause={pause}
-      {...over}
-    />
+    <>
+      <PortsFilter />
+      <PortsPanel
+        profileId={() => 'ssh:p1:1'}
+        services={services}
+        visible={() => true}
+        pause={pause}
+        {...over}
+        filter={filter}
+      />
+    </>
   ))
 }
 
@@ -375,6 +402,43 @@ describe('PortsPanel — loading and refresh (nocx-wzc4.9)', () => {
     expect(meta.textContent).not.toContain('last sample')
     expect(meta.querySelector('.ui-badge')).toBeNull()
   })
+
+  it('a failed status fetch raises one Toast, not one per poll tick (nocx-8sudy)', async () => {
+    vi.useFakeTimers()
+    try {
+      const status = vi.fn().mockRejectedValue(new Error('rpc: tunnel is closed'))
+      const services = fakeServices({ status })
+      renderPanel(services)
+      // The first fetch fails immediately (refresh runs on mount).
+      await vi.advanceTimersByTimeAsync(0)
+      await waitFor(() => expect(listingToasts.length).toBe(1))
+      expect(listingToasts[0].level).toBe('danger')
+      // The outcome is a sentence at the surface, and the wire's reason is
+      // mapped, not dropped (AGENTS.md: a soft degrade must be visible;
+      // nocx-8sudy BRIEF-2). A dropped connection is one case.
+      expect(listingToasts[0].message).toBe('Could not read the ports — the connection was lost.')
+      expect(listingToasts[0].message).not.toContain('rpc:')
+      // The failure persists across polls — the toast must not restack.
+      await vi.advanceTimersByTimeAsync(POLL_INTERVAL_MS * 3)
+      expect(listingToasts.length).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a listing failure is not a document-flow badge — the body carries no status line', async () => {
+    const services = fakeServices({
+      status: vi.fn().mockRejectedValue(new Error('down')),
+    })
+    renderPanel(services)
+    await waitFor(() => expect(listingToasts.length).toBe(1))
+    // The unclassifiable reason is never swallowed: the open-set fallback
+    // appends it to a person's sentence, so the diagnostic survives
+    // (BRIEF-2 — we cannot claim to map an open set).
+    expect(listingToasts[0].message).toBe('Could not read the ports (down).')
+    expect(document.body.textContent).not.toContain('down')
+    expect(document.querySelector('.ui-badge[data-tone="danger"]')).toBeNull()
+  })
 })
 
 // ── Forwarded / Stopped lifecycle ─────────────────────────────────────────
@@ -459,7 +523,13 @@ describe('PortsPanel — forwards', () => {
     })
     renderPanel(services)
     await waitFor(() => expect(screen.getByText(/connection lost/)).toBeTruthy())
-    expect(screen.getByText('connection closed')).toBeTruthy()
+    // The raw reason is the row's hover, not a line of the row: a stopped
+    // forward IS stopped, the badge says so persistently, and the reason
+    // rides the same title hover the API tree's unreadable rows use
+    // (commit 1e264610) — out of the document flow (nocx-8sudy 3/4).
+    const row = screen.getByTestId('detected-row')
+    expect(row.getAttribute('title')).toBe('connection closed')
+    expect(row.textContent).not.toContain('connection closed')
     expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
     // The port's own row is the single owner of its state: exactly one row
     // mentions the port, and the Stopped section is gone.
@@ -513,7 +583,11 @@ describe('PortsPanel — forwards', () => {
     // them — and holds exactly this one.
     expect(screen.getByText('Orphaned forwards')).toBeTruthy()
     expect(screen.queryAllByTestId('forwarded-row')).toHaveLength(1)
-    expect(screen.getByText(/remote refused the channel/)).toBeTruthy()
+    // The state marker stays on the row; the raw reason rides the row's
+    // hover (commit 1e264610's treatment), not a line beside the badge.
+    const row = screen.getByTestId('forwarded-row')
+    expect(row.getAttribute('title')).toBe('remote refused the channel')
+    expect(row.textContent).not.toContain('remote refused the channel')
     expect(screen.getByTestId('ports-retry-forward')).toBeTruthy()
     expect(screen.queryByTestId('stopped-row')).toBeNull()
   })
@@ -992,6 +1066,10 @@ describe('PortsPanel — the unavailable-host empty state (W2)', () => {
     })
     expect(screen.queryByTestId('ports-open-as-connection')).toBeNull()
   })
+})
+
+afterEach(() => {
+  clearToasts()
 })
 
 // ── The filter (nocx-cdub) ──────────────────────────────────────────────

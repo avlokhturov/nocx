@@ -309,6 +309,10 @@ type filesMachine interface {
 	// filesBaseline takes the watch baseline synchronously: one listing per
 	// path in the new set, inside files.watch, before the response.
 	filesBaseline(h filesystem.Handle, paths []string) map[string]string
+	// cancelBindingTransfers cancels every running transfer of one binding
+	// and waits, bounded, for them to unwind — files.close's half of D8.
+	// It never waits for an upload: the bound expires and the close goes on.
+	cancelBindingTransfers(bid string)
 }
 
 // ── wire shapes (contracts/files.*.schema.json) ──────────────────────────
@@ -319,9 +323,10 @@ type filesOpenParams struct {
 }
 
 type filesOpenResult struct {
-	BindingID  string          `json:"bindingId"`
-	EndpointID *string         `json:"endpointId"` // null for a local binding, never absent
-	Root       filesRootResult `json:"root"`
+	BindingID       string          `json:"bindingId"`
+	EndpointID      *string         `json:"endpointId"` // null for a local binding, never absent
+	Root            filesRootResult `json:"root"`
+	RevealAvailable bool            `json:"revealAvailable"`
 }
 
 type filesRootResult struct {
@@ -431,7 +436,12 @@ type filesOpenHandlers struct {
 	op      capability.FilesystemOpenOperation // nil → filesystem not wired
 	factory capability.ProviderFactory         // nil → no provider factory wired
 	machine filesMachine
-	r       Responder
+	// revealAvailable is the composition fact carried on every open result:
+	// whether this build has a file-manager revealer wired. Set once from
+	// s.revealer != nil at registration; the renderer reads it to decide
+	// whether the "Show in Finder" action exists at all (nocx-ngf3u).
+	revealAvailable bool
+	r               Responder
 }
 
 // handleOpen resolves a session the requesting connection owns and registers
@@ -504,8 +514,9 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 			ep = &endpointID
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(filesOpenResult{
-			BindingID:  bid,
-			EndpointID: ep,
+			BindingID:       bid,
+			EndpointID:      ep,
+			RevealAvailable: h.revealAvailable,
 			Root: filesRootResult{
 				Path:           root.Path,
 				Display:        root.Display,
@@ -804,6 +815,14 @@ func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState,
 		if b != nil && b.watcher != nil {
 			h.machine.stopFilesWatcher(b.watcher)
 		}
+		// Cancel this binding's running uploads BEFORE the registry close
+		// (upload design D8). Not because the close would otherwise block —
+		// a transfer runs on a detached sink and holds no use-guard for
+		// Binding.close to drain — but because a transfer whose binding has
+		// gone should be told so, and told so before its lease is closed
+		// underneath it. The wait after the cancel is bounded and the close
+		// proceeds either way.
+		h.machine.cancelBindingTransfers(params.BindingID)
 		if err := svc.Close(params.BindingID); err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
 			return nil
@@ -886,9 +905,9 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	}
 	openSub := s.operationQueue("files-open")
 	bindingSub := s.operationQueue("files")
-	return []methodSpec{
+	specs := []methodSpec{
 		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: r}
+			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, revealAvailable: s.revealer != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -911,7 +930,19 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleReveal(ctx, state, req) }
 		}),
+		reg(bindingSub, "files.upload", params(validateFilesUploadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := uploadHandlers{op: bindingOp, machine: s, sources: s.sources, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUpload(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.uploadCancel", params(validateFilesUploadCancelRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := uploadHandlers{op: bindingOp, machine: s, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleUploadCancel(ctx, state, req) }
+		}),
 	}
+	// The download half is declared in ws_download.go and appended here,
+	// on the SAME bounded submission, so both directions of the binding
+	// domain queue against one bound rather than two.
+	return append(specs, s.filesDownloadSpecs(bindingOp, bindingSub)...)
 }
 
 // ── notification delivery ─────────────────────────────────────────────────
@@ -1201,6 +1232,10 @@ func (s *WSServer) filesSessionClosed(sid session.ID) {
 	for _, w := range watchers {
 		s.stopFilesWatcher(w)
 	}
+	// Same ordering, same reason as files.close (D8): the cancel tells a
+	// transfer its binding is going before the lease under its sink is
+	// closed. CloseSession does not wait for it either way.
+	s.cancelSessionTransfers(sid)
 	if s.filesys != nil {
 		s.filesys.CloseSession(sid)
 	}
@@ -1317,7 +1352,15 @@ func filesErrorCode(err error) int {
 	case *filesystem.ErrUnknownBinding, *filesystem.ErrNotOwned,
 		*filesystem.ErrInvalidPath, *filesystem.ErrInvalidPage,
 		*filesystem.ErrNotFound, *filesystem.ErrNotDir,
-		*filesystem.ErrNotRegular, *filesystem.ErrPermission:
+		*filesystem.ErrNotRegular, *filesystem.ErrPermission,
+		// A binding with no sink cannot be uploaded to, and one with no
+		// source cannot be downloaded from (rule R1, in each direction).
+		// Both belong with the request-shaped refusals and not with
+		// -32603: the caller named a binding that cannot do this, which is
+		// a property of what they asked for, not of the server going
+		// wrong.
+		*filesystem.ErrUploadUnsupported,
+		*filesystem.ErrDownloadUnsupported:
 		return -32602
 	default:
 		return -32603

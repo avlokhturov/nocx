@@ -82,6 +82,7 @@ import {
   CodeBlock,
   Section,
 } from './ui'
+import { showToast } from './ui/toast'
 import { ResetIcon } from './ui/icons'
 import { systemPromptText } from './systemprompt'
 import {
@@ -136,6 +137,29 @@ export function keyToDomId(key: string): string {
   return 'st-setting-' + encodeURIComponent(key)
 }
 
+/**
+ * The backend's exact save refusal, in a person's words.
+ *
+ * The wire carries the registry's error verbatim — `settings: "key"
+ * validation failed: …` and the Go sentinels beneath it — because a
+ * developer wants that text in a log. A person watching a save fail does
+ * not: the prefix names a package, and the sentinel answers a question they
+ * never asked. The same rule as malformed-reason.ts: the wire keeps the
+ * precise reason and the renderer says what it means.
+ *
+ * The validation shape carries its own message after the prefix
+ * (`value must not be empty`, `"x" is not a valid option`) — stripping the
+ * machine prefix IS the mapping. Everything else collapses to one honest
+ * sentence rather than surfacing a transport string.
+ */
+function settingSaveErrorSentence(raw: string): string {
+  const validation = /^settings: "[^"]*" validation failed: (.+)$/.exec(raw)
+  if (validation) return validation[1]
+  if (raw === 'settings: store is read-only') {
+    return 'This setting could not be saved — the store is read-only'
+  }
+  return 'This setting could not be saved'
+}
 // ── Types ──────────────────────────────────────────────────────────────
 
 // The wire declaration (with its Min/Max/unit validation) lives in the
@@ -700,6 +724,48 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return count
   })
 
+  /**
+   * Whether a refusal to save a setting should be raised as a toast.
+   *
+   * One refusal is NOT toasted, and the reason is not that it is routed
+   * somewhere else — the element that used to render it is gone. For a
+   * number whose value the declaration's range rules reject, the number
+   * field's caption already states the range fact ("Must be at least 128
+   * MiB" sits under the box the moment the value leaves the bounds), so the
+   * person is already looking at the news. `fieldSaveError` returns
+   * `undefined` for exactly that case — its comment records the defect it
+   * prevents: the backend's sentence rendered directly under the caption
+   * that already said the same thing, in the backend's language and wider
+   * than the field's column. Toasting the same fact would be that defect
+   * again. Every other refusal — an unpredicted validation, a transport
+   * failure, a read-only store — is the outcome of the save call the user
+   * triggered and belongs in a toast (ui/README.md "Toast"), never in the
+   * document flow.
+   */
+  function rejectionNeedsToast(key: string, value: unknown, message: string | undefined): boolean {
+    if (message === undefined) return false
+    const decl = declarations().find((d) => d.key === key)
+    if (decl && decl.control === 'number') {
+      const numericValue = Number(value)
+      if (
+        !Number.isNaN(numericValue) &&
+        fieldSaveError(decl, numericValue, message) === undefined
+      ) {
+        return false
+      }
+    }
+    // The same reasoning one control over. A paragraph past its declared
+    // length carries the bound in its own caption, permanently on screen, so
+    // the backend refusing it is not news either — and `fieldSaveError` is
+    // where that judgement is made for both controls rather than here for one
+    // and there for the other.
+    if (decl && decl.control === 'text') {
+      const text = typeof value === 'string' ? value : ''
+      if (fieldSaveError(decl, 0, message, text) === undefined) return false
+    }
+    return true
+  }
+
   const modifiedBySection = createMemo(() => {
     const counts = new Map<string, number>()
     for (const d of declarations()) {
@@ -760,6 +826,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
     }
     const nextState = recordSaveOutcome(toMirror(), key, outcome)
     applyMirror(nextState)
+    if (outcome.kind === 'rejected') {
+      const label = declarations().find((d) => d.key === key)?.label ?? key
+      if (rejectionNeedsToast(key, outcome.attemptedValue, outcome.error)) {
+        showToast({
+          level: 'danger',
+          message: `Could not save "${label}": ${settingSaveErrorSentence(outcome.error)}`,
+        })
+      }
+    }
   }
 
   async function resetSetting(key: string): Promise<void> {
@@ -778,7 +853,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
         applyMirror(nextState)
       }
     } catch (err) {
-      setErrors(key, (err as Error).message)
+      const message = (err as Error).message
+      setErrors(key, message)
+      const label = declarations().find((d) => d.key === key)?.label ?? key
+      showToast({
+        level: 'danger',
+        message: `Could not reset "${label}": ${settingSaveErrorSentence(message)}`,
+      })
     }
   }
 
@@ -788,7 +869,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       await props.profileClient.secretSet(key, value)
       setSecretStates(key, true)
     } catch (err) {
-      setErrors(key, (err as Error).message)
+      const message = (err as Error).message
+      setErrors(key, message)
+      const label = declarations().find((d) => d.key === key)?.label ?? key
+      showToast({
+        level: 'danger',
+        message: `Could not save "${label}": ${settingSaveErrorSentence(message)}`,
+      })
     }
   }
 
@@ -798,7 +885,13 @@ export function SettingsComponent(props: SettingsComponentProps) {
       await props.profileClient.secretDelete(key)
       setSecretStates(key, false)
     } catch (err) {
-      setErrors(key, (err as Error).message)
+      const message = (err as Error).message
+      setErrors(key, message)
+      const label = declarations().find((d) => d.key === key)?.label ?? key
+      showToast({
+        level: 'danger',
+        message: `Could not clear "${label}": ${settingSaveErrorSentence(message)}`,
+      })
     }
   }
 
@@ -1055,7 +1148,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // eslint-disable-next-line solid/reactivity
     const decl = props.decl
     const eff = () => effectiveValue(decl.key)
-    const err = () => errors[decl.key]
     // The number this row shows, for the two consumers that reason about
     // bounds. Guarded by the control kind: displayValue coerces to a string
     // and warns when it can find neither a usable value nor a usable
@@ -1194,10 +1286,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
 
             <ProvenanceBadge decl={decl} />
           </div>
-
-          <Show when={fieldSaveError(decl, numeric(), err(), textValue())}>
-            <div class="ui-settings-error">{err()}</div>
-          </Show>
         </Field>
       </div>
     )

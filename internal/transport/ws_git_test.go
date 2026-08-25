@@ -943,82 +943,26 @@ func TestGitChanged_DeliveredOnSessionClose(t *testing.T) {
 	}
 }
 
-// closeSessionCollectNotification issues the close RPC and reads until BOTH
-// the matching response and a notification with the given method have
-// arrived, returning the response and the notification's params. Notifications
-// that beat the response are retained, never discarded: gitSessionClosed
-// writes git.changed from a detached goroutine, so its delivery can precede
-// the close response, and a response-only wait (jsonrpcCallWithID) would
-// consume and drop the frame. That discard is the flake this helper replaces:
-// with the notification gone, the follow-up read deadlined once, and
-// gorilla/websocket stores the first read error in c.readErr and returns it
-// from every subsequent read — so the "5s wait" could never succeed even
-// though the delivery had already happened.
+// closeSessionCollectNotification issues the close RPC and returns both the
+// matching response and the params of the given notification.
+//
+// It used to be the ONLY reader in this package that retained a frame it
+// had not asked for, with a doc comment describing why: gitSessionClosed
+// writes git.changed from a detached goroutine, so the notification can
+// precede the close response and a response-only wait would eat it. That
+// was right, and it was right for every other wait in the package too —
+// which is now where it lives (ws_inbox_test.go). What is left here is the
+// close call and its two waits, in either order on the wire.
 func closeSessionCollectNotification(t *testing.T, conn *websocket.Conn, sid, method string, id int, d time.Duration) (json.RawMessage, json.RawMessage) {
 	t.Helper()
-	req, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  "close",
-		"params":  map[string]string{"sessionId": sid},
-	})
-	if err != nil {
-		t.Fatalf("close: marshal: %v", err)
-	}
-	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
-		t.Fatalf("close: write: %v", err)
-	}
-
 	deadline := time.Now().Add(d)
-	var resp json.RawMessage
-	var params json.RawMessage
-	for time.Now().Before(deadline) {
-		// The remaining budget, not the whole one: a read error is
-		// permanent in gorilla (c.readErr), so retrying after one spun this
-		// loop at full speed until the bound and then blamed the deadline
-		// for a socket that had already failed (nocx-2bvy). The loop below
-		// still reports whichever half is missing.
-		_ = conn.SetReadDeadline(deadline)
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			break
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil {
-			if n.Method == method && params == nil {
-				params = n.Params
-			}
-		} else {
-			var idCheck struct {
-				ID int `json:"id"`
-			}
-			_ = json.Unmarshal(msg, &idCheck)
-			if idCheck.ID == id && resp == nil {
-				resp = msg
-			}
-		}
-		// Checked after EITHER half arrives: the notification can precede
-		// the response or follow it, and a `continue` that skipped this
-		// check let the loop run to its deadline, poison the connection
-		// (gorilla's permanent c.readErr) and break the NEXT call.
-		if resp != nil && params != nil {
-			break
-		}
+	resp := jsonrpcCallWithID(t, conn, "close", map[string]string{"sessionId": sid}, id)
+	msg, err := awaitFrame(conn, deadline, isNotification(method))
+	if err != nil {
+		t.Fatalf("waiting for %s notification after close: %v", method, err)
 	}
-	if resp == nil {
-		t.Fatalf("timed out waiting for close response")
-	}
-	if params == nil {
-		t.Fatalf("timed out waiting for %s notification", method)
-	}
-	return resp, params
+	f, _ := decodeFrame(msg)
+	return resp, f.Params
 }
 
 // TestGitChanged_NotDeliveredWithoutSubscriber pins the other end: with no
@@ -1239,24 +1183,185 @@ func initRealGitRepo(t *testing.T, dir string) {
 // nil when no matching notification arrives within the window.
 func tryReadNotification(t *testing.T, conn *websocket.Conn, method string, d time.Duration) json.RawMessage {
 	t.Helper()
-	deadline := time.Now().Add(d)
-	for time.Now().Before(deadline) {
-		_ = conn.SetReadDeadline(time.Now().Add(d))
-		_, msg, err := conn.ReadMessage()
-		if err != nil {
-			return nil
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == method {
-			return n.Params
-		}
+	params, err := awaitNotification(conn, method, d)
+	if err != nil {
+		return nil
 	}
-	return nil
+	return params
+}
+
+// ── the error discriminator (nocx-bpqil) ─────────────────────────────────
+//
+// isUnknownBinding in the renderer treated EVERY -32602 as an unknown
+// binding, so a conflicted stage-all (which also rides -32602) was silently
+// re-resolved through git.open instead of surfacing as the refusal it is.
+// The fix is a machine-readable reason on the wire: every git domain error
+// that maps to -32602 carries data.reason so the renderer can distinguish
+// them. These tests prove the reason arrives over the real socket — not
+// only that the DTO could carry it, but that the handler actually sends it.
+
+// gitErrorDataWire is the on-wire shape of a git error's data payload.
+// Mirrors the Go gitErrorData struct (ws_git.go) for test-side decoding.
+type gitErrorDataWire struct {
+	Reason string `json:"reason"`
+}
+
+// gitErrorEnvelope decodes a JSON-RPC error response's data field.
+type gitErrorEnvelope struct {
+	Error *struct {
+		Code    int             `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	} `json:"error"`
+}
+
+func decodeGitErrorData(t *testing.T, raw json.RawMessage) gitErrorDataWire {
+	t.Helper()
+	if len(raw) == 0 || string(raw) == "null" {
+		t.Fatalf("error data is absent; the handler must send data.reason")
+	}
+	// The payload must satisfy the declared contract — the closed enum and
+	// additionalProperties:false make the discriminator exact in both
+	// directions (contracts/git.error.schema.json, AGENTS.md rule 5).
+	validateJSON(t, loadSchema(t, "git.error.schema.json"), raw, "git error data (real socket)")
+	var d gitErrorDataWire
+	if err := json.Unmarshal(raw, &d); err != nil {
+		t.Fatalf("unmarshal error data: %v (raw: %s)", err, raw)
+	}
+	return d
+}
+
+// TestGitError_UnknownBindingCarriesReasonOverTheWire: a git.status on a
+// binding that never existed answers -32602 with data.reason =
+// "unknown-binding" — the discriminator the renderer's isUnknownBinding
+// reads to decide whether to re-resolve through git.open.
+func TestGitError_UnknownBindingCarriesReasonOverTheWire(t *testing.T) {
+	e := newGitTestEnv(t, WithGitRepoFactory(newStubGitFactory()))
+
+	// A well-formed 32-hex binding id the registry never minted: it passes
+	// the shape validator and Acquire answers ErrUnknownBinding — the path
+	// the renderer's re-resolve listens for. (A malformed id is refused by
+	// validation with a bare -32602 that carries no reason.)
+	resp := jsonrpcCallWithID(t, e.conn, "git.status",
+		map[string]any{"bindingId": "00000000000000000000000000000000"}, 1)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "unknown-binding" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "unknown-binding")
+	}
+}
+
+// TestGitError_ConflictedCarriesReasonOverTheWire: a git.stageAll that is
+// refused because a merge conflict is unresolved answers -32602 with
+// data.reason = "conflicted" — NOT "unknown-binding", so the renderer
+// does not re-resolve and the refusal reaches the user.
+func TestGitError_ConflictedCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.mutateErr = &git.ErrConflicted{Path: "conf.txt"}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.stageAll", map[string]any{"bindingId": bid}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "conflicted" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "conflicted")
+	}
+}
+
+// TestGitError_NothingToCommitCarriesReasonOverTheWire: a git.commit
+// refused because nothing is staged answers -32602 with data.reason =
+// "nothing-to-commit" — NOT "unknown-binding".
+func TestGitError_NothingToCommitCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.commitErr = &git.ErrNothingToCommit{}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.commit", map[string]any{
+		"bindingId": bid, "message": "subject", "amend": false,
+	}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "nothing-to-commit" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "nothing-to-commit")
+	}
+}
+
+// TestGitError_AmendUnbornCarriesReasonOverTheWire: a git.commit with
+// amend=true on an unborn branch answers -32602 with data.reason =
+// "amend-unborn" — NOT "unknown-binding".
+func TestGitError_AmendUnbornCarriesReasonOverTheWire(t *testing.T) {
+	repo := newStubGitRepo()
+	repo.commitErr = &git.ErrAmendUnborn{}
+	e := gitContractEnv(t, repo)
+	sid := e.openSession(t, 1)
+	bid := e.openGitBinding(t, sid, "/tmp/repo", 2)
+
+	resp := jsonrpcCallWithID(t, e.conn, "git.commit", map[string]any{
+		"bindingId": bid, "message": "subject", "amend": true,
+	}, 3)
+	var env gitErrorEnvelope
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if env.Error == nil || env.Error.Code != -32602 {
+		t.Fatalf("error = %+v, want -32602", env.Error)
+	}
+	data := decodeGitErrorData(t, env.Error.Data)
+	if data.Reason != "amend-unborn" {
+		t.Errorf("data.reason = %q, want %q", data.Reason, "amend-unborn")
+	}
+}
+
+// TestGitErrorReasonMapping verifies the reason mapping for every git
+// domain error that shares -32602, so the renderer can distinguish them.
+// This is the function-level check; the over-the-wire tests above prove
+// the handler actually sends the reason for the two shapes the acceptance
+// criteria name.
+func TestGitErrorReasonMapping(t *testing.T) {
+	for name, tc := range map[string]struct {
+		err  error
+		want string
+	}{
+		"unknown-binding":   {&git.ErrUnknownBinding{ID: "x"}, "unknown-binding"},
+		"not-owned":         {&git.ErrNotOwned{ID: "x", SessionID: session.ID("")}, "not-owned"},
+		"handle-released":   {&git.ErrHandleReleased{}, "handle-released"},
+		"nothing-to-commit": {&git.ErrNothingToCommit{}, "nothing-to-commit"},
+		"amend-unborn":      {&git.ErrAmendUnborn{}, "amend-unborn"},
+		"conflicted":        {&git.ErrConflicted{Path: "p"}, "conflicted"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := gitErrorReason(tc.err)
+			if got == nil || got.Reason != tc.want {
+				t.Fatalf("gitErrorReason(%v) = %+v, want reason %q", tc.err, got, tc.want)
+			}
+		})
+	}
+
+	// A non-git error carries no reason — it is an invocation failure,
+	// not a domain refusal, and the renderer must not treat it as one.
+	if got := gitErrorReason(errors.New("some io error")); got != nil {
+		t.Fatalf("gitErrorReason(arbitrary error) = %+v, want nil", got)
+	}
 }

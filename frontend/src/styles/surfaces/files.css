@@ -71,3 +71,44 @@
   margin: var(--space-2) var(--space-4) 0;
   padding: var(--space-2) var(--space-3);
 }
+
+/* The drop target while a files drag is over it (terminal-drop.ts sets the
+   attribute). An outline rather than a background: the terminal underneath
+   is a live grid and tinting it would repaint somebody's output.
+
+   SCOPED TO .pane, and the scope is the point. Written as a bare attribute
+   pair it matched ANY element carrying the two attributes — which was every
+   element that could, while the pane was the only drop surface in the
+   product. `ui/drop-zone.tsx` ended that: the kit now owns a drop surface
+   with its own dashed hint, and this rule would have drawn a second, outer
+   dashed outline around it from a SURFACE stylesheet — a surface repainting
+   a kit component, which is the defect the kit rules exist to stop.
+   check-css-integrity cannot see it either: its surface-paints-kit rule
+   derives kit identity by CLASS, and this selector had none (nocx-jwiee,
+   escalated by the worker that added the kit component rather than edited
+   this file). The pane's own affordance moves onto the kit in nocx-c892h;
+   until then it keeps its outline and stops lending it to everybody. */
+.pane[data-file-drop-target][data-drop-active] {
+  outline: 2px dashed var(--color-accent);
+  outline-offset: calc(-1 * var(--space-1));
+}
+
+/* The name filter (nocx-708q.2) lives in the shell's pinned slot now
+   (nocx-708q.3), and the slot supplies its own spacing and inset. What was
+   here — a margin of its own — is what left the field 48px narrower than the
+   panel; keeping any of it would leave Files roomier than the other three
+   for no reason anybody could name. The SearchField takes the row.
+
+   There WAS a Names/Contents toggle beside it, from the file-manager
+   design's Orca reference. It went: content search is not built, so the
+   other half was permanently disabled, and a two-option control with one
+   option is not a control. If content search is ever built the toggle
+   returns with it, which is the only moment it means anything. */
+.files-filter {
+  display: flex;
+}
+
+.files-filter > .ui-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}

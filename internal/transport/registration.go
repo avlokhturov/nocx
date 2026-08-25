@@ -397,4 +397,9 @@ var coarseMethodClasses = map[string]string{
 	"dialog":      "dialog",
 	"connections": "connections",
 	"sessions":    "session",
+	// The api.* surface is one product area to a person — "API testing" —
+	// however many method families it grows, so both prefixes map to one
+	// class. The renderer groups refusals by product area, never by raw
+	// method name.
+	"api": "api",
 }
