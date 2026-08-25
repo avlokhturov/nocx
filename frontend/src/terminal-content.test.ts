@@ -4998,7 +4998,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('marks the same whole block once from a selection and from its menu', async () => {
+  it('marks selected rows, leaves the block unfilled, and unmarks from its menu', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5010,10 +5010,13 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
+      selectRows(block, 0, 1)
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
       expect(chip.dataset.state).toBe('chosen')
       expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBeUndefined()
+      expect(block.querySelector<HTMLElement>('.term-line')?.dataset.granted).toBe('true')
+      expect(block.querySelectorAll<HTMLElement>('.term-line[data-granted]')).toHaveLength(1)
 
       block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
@@ -5023,11 +5026,12 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       unmark?.click()
       expect(chip.textContent).toContain('0')
       expect(block.dataset.granted).toBeUndefined()
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
     } finally {
       teardown()
     }
   })
-  it('sends marked block ids on a real question without capturing or leaking another block', async () => {
+  it('marks a whole block from its menu without carrying a line range', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5038,25 +5042,27 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const marked = frozenBlockOf(content, 'git status', ['clean'])
-      frozenBlockOf(content, 'npm test', ['passed'])
-
-      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       document
         .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
         .click()
+      expect(block.dataset.granted).toBe('true')
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
       typeAndAsk(ed, content, 'what happened?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
       })
-
-      const ask = dispatcherCalls.find((call) => call.method === 'agent.ask')!
-      expect(ask.params).toMatchObject({
-        question: 'what happened?',
+      const params = recordedParams(dispatcherCalls, 'agent.ask')
+      expect(params).toMatchObject({
         attachedContent: [
-          { itemId: marked.dataset.entryId, command: 'git status', state: 'exited' },
+          { itemId: block.dataset.entryId, command: 'ls', state: 'exited' },
         ],
       })
+      const attached = params.attachedContent
+      if (!Array.isArray(attached)) throw new Error('ask payload missing attachedContent')
+      expect(attached[0]).not.toHaveProperty('start')
+      expect(attached[0]).not.toHaveProperty('count')
     } finally {
       teardown()
     }

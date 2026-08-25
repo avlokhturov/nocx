@@ -41,16 +41,29 @@ it('keeps the grant chip label in one production module', () => {
   expect(owners).toEqual([resolve(SRC_ROOT, 'grant.ts')])
 })
 
-const block = (itemId: string, command: string, running = false): GrantBlock => {
+const block = (
+  itemId: string,
+  command: string,
+  running = false,
+  window?: { start: number; count: number },
+): GrantBlock => {
   const blockEl = document.createElement('div')
   blockEl.className = running ? 'cmd-block cmd-block-running' : 'cmd-block'
   blockEl.dataset.entryId = itemId
   const header = document.createElement('span')
   header.className = 'cmd-header-text'
   header.textContent = command
-  blockEl.appendChild(header)
+  const output = document.createElement('div')
+  output.className = 'cmd-output'
+  for (const text of ['first', 'second', 'third']) {
+    const row = document.createElement('span')
+    row.className = 'term-line'
+    row.textContent = text
+    output.appendChild(row)
+  }
+  blockEl.append(header, output)
   document.body.appendChild(blockEl)
-  return { itemId, blockEl, command, state: running ? 'running' : 'exited' }
+  return { itemId, blockEl, command, state: running ? 'running' : 'exited', ...window }
 }
 
 afterEach(() => {
@@ -58,6 +71,43 @@ afterEach(() => {
 })
 
 describe('GrantController', () => {
+  it('fills a whole-block mark but paints only selected rows for a row mark', () => {
+    const controller = new GrantController()
+    const whole = block('whole', 'git status')
+    const rows = block('rows', 'npm test', false, { start: 1, count: 1 })
+    controller.setBlocks([whole])
+    expect(whole.blockEl.dataset.granted).toBe('true')
+    expect(whole.blockEl.querySelectorAll('.term-line[data-granted]')).toHaveLength(0)
+
+    controller.setBlocks([rows])
+    expect(rows.blockEl.dataset.granted).toBeUndefined()
+    expect(rows.blockEl.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
+    expect(rows.blockEl.querySelectorAll('.term-line[data-granted]')[0]?.textContent).toBe('second')
+    expect(rows.blockEl.querySelectorAll('.cmd-block[data-granted]')).toHaveLength(0)
+    controller.destroy()
+  })
+
+  it('does not paint a composer rail on either block or row marks', () => {
+    const controller = new GrantController()
+    const marked = block('item-rail', 'printf hi', false, { start: 0, count: 2 })
+    controller.setBlocks([marked])
+
+    expect(marked.blockEl.dataset.granted).toBeUndefined()
+    expect(marked.blockEl.querySelector('.term-line[data-granted]')).not.toBeNull()
+    expect(marked.blockEl.querySelector('.term-line[data-granted]')?.className).toBe('term-line')
+    controller.destroy()
+  })
+  it('uses a visible fill without a left rail for block and row marks', () => {
+    const css = readFileSync(resolve(SRC_ROOT, 'style.css'), 'utf8')
+    expect(css).toMatch(
+      /\.cmd-block\[data-granted\]\s*\{[^}]*background:\s*color-mix\(in srgb, var\(--color-accent\), transparent (?:8[0-9]|7[0-9])%\)/s,
+    )
+    expect(css).toMatch(/\.cmd-block \.term-line\[data-granted\]\s*\{[^}]*background:/s)
+    expect(css).not.toMatch(/\.cmd-block\[data-granted\][^{]*\{[^}]*box-shadow:/s)
+    expect(css).not.toMatch(/\.cmd-block\[data-granted\]::before/)
+  })
+
+
   it('shows the default grant as a chip and changes it when a person marks a block', () => {
     const controller = new GrantController()
     controller.mount(document.body)

@@ -68,6 +68,11 @@ const (
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
 	maxCwdRunes = 4_096
+	// maxAttachedWindowLines mirrors contracts/tools/session.read.schema.json:
+	// session.read permits any nonnegative start but caps count at 2000.
+	// Therefore only count is bounded here; start has no ceiling, and the
+	// check below rejects integer overflow.
+	maxAttachedWindowLines = 2_000
 	// maxCellRunes bounds one cell's character (a wide glyph is one or two
 	// runes; anything more is not a terminal cell).
 	maxCellRunes = 8
@@ -133,6 +138,8 @@ type agentAttachedContentWire struct {
 	ItemID  string `json:"itemId"`
 	Command string `json:"command"`
 	State   string `json:"state"`
+	Start   *int   `json:"start,omitempty"`
+	Count   *int   `json:"count,omitempty"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -1976,8 +1983,18 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 		default:
 			return empty(fmt.Sprintf("attachedContent[%d].state must be running or exited", i))
 		}
+		if (grant.Start == nil) != (grant.Count == nil) {
+			return empty(fmt.Sprintf("attachedContent[%d] requires both start and count", i))
+		}
+		if grant.Start != nil {
+			if *grant.Start < 0 || *grant.Count <= 0 || *grant.Count > maxAttachedWindowLines ||
+				*grant.Start > int(^uint(0)>>1)-*grant.Count {
+				return empty(fmt.Sprintf("attachedContent[%d] start/count is out of bounds", i))
+			}
+		}
 		attached = append(attached, assistant.AttachedContentItem{
 			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
+			Start: grant.Start, Count: grant.Count,
 		})
 	}
 	in := content.AgentAsk{

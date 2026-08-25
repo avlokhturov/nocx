@@ -20,6 +20,7 @@ export class GrantController {
   private blocks: GrantBlock[] = []
   private readonly paintedBlocks = new Set<HTMLElement>()
   private mounted = false
+  private readonly paintedRows = new Set<HTMLElement>()
   private readonly ownsChip: boolean
   constructor(options: GrantControllerOptions = {}) {
     this.onChange = options.onChange
@@ -66,7 +67,9 @@ export class GrantController {
   destroy(): void {
     this.panel.destroy()
     for (const block of this.paintedBlocks) delete block.dataset.granted
+    for (const row of this.paintedRows) delete row.dataset.granted
     this.paintedBlocks.clear()
+    this.paintedRows.clear()
     if (this.ownsChip) this.chip.remove()
     this.blocks = []
     this.mounted = false
@@ -126,22 +129,43 @@ export class GrantController {
     })
     return button
   }
-
   private reveal(index: number): void {
     const grant = this.blocks[index]
     if (!grant) return
     grant.blockEl.scrollIntoView?.({ block: 'center', behavior: 'smooth' })
-    grant.blockEl.classList.remove('cmd-block-grant-flash')
-    void grant.blockEl.offsetWidth
-    grant.blockEl.classList.add('cmd-block-grant-flash')
+    const marked: HTMLElement[] =
+      grant.start !== undefined && grant.count !== undefined
+        ? Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
+            grant.start,
+            grant.start + grant.count,
+          )
+        : [grant.blockEl]
+    for (const element of marked) {
+      element.classList.remove('cmd-block-grant-flash')
+      void element.offsetWidth
+      element.classList.add('cmd-block-grant-flash')
+    }
   }
 
   private repaintBlocks(): void {
     for (const block of this.paintedBlocks) delete block.dataset.granted
+    for (const row of this.paintedRows) delete row.dataset.granted
     this.paintedBlocks.clear()
+    this.paintedRows.clear()
     for (const grant of this.blocks) {
-      grant.blockEl.dataset.granted = 'true'
-      this.paintedBlocks.add(grant.blockEl)
+      if (grant.start !== undefined && grant.count !== undefined) {
+        const rows = Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(
+          grant.start,
+          grant.start + grant.count,
+        )
+        for (const row of rows) {
+          row.dataset.granted = 'true'
+          this.paintedRows.add(row)
+        }
+      } else {
+        grant.blockEl.dataset.granted = 'true'
+        this.paintedBlocks.add(grant.blockEl)
+      }
     }
   }
 }

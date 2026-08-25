@@ -64,6 +64,40 @@ describe('whole-block grants', () => {
     expect(grant?.blockEl).toBe(block)
     expect(Object.keys(grant ?? {}).sort()).toEqual(['blockEl', 'command', 'itemId', 'state'])
   })
+  it('carries the selected output row window instead of a whole-block mark', () => {
+    const { block, output } = blockOf('item-10', 'npm test')
+    output.replaceChildren()
+    for (const text of ['first', 'second', 'third']) {
+      const row = document.createElement('span')
+      row.className = 'term-line'
+      row.textContent = text
+      output.appendChild(row)
+    }
+    const rows = output.querySelectorAll<HTMLElement>('.term-line')
+    const range = document.createRange()
+    range.setStart(rows[0].firstChild!, 0)
+    range.setEnd(rows[1].firstChild!, rows[1].textContent!.length)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    expect(grantBlockFromSelection(selection)).toMatchObject({
+      itemId: 'item-10',
+      start: 0,
+      count: 2,
+    })
+    expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowStart')
+    expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowEnd')
+  })
+
+  it('keeps the whole-block mark without a line window', () => {
+    const { block } = blockOf('item-11', 'pwd')
+    const grant = grantBlockFromElement(block)
+
+    expect(grant).not.toHaveProperty('start')
+    expect(grant).not.toHaveProperty('count')
+  })
+
 
   it('marks one block when selection crosses answer prose into a nested fenced row', () => {
     const { block, output } = blockOf('item-9', 'explain the failure')

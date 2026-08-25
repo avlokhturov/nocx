@@ -1,7 +1,7 @@
 // The ask entry gesture (nocx-4wtlh): the caret indicator that renders
-// InputTargetRegistry.active(), and the whole blocks a person grants to a
-// question. Selection is a quote; the grant is the permission to read the
-// surrounding block through session.read.
+// InputTargetRegistry.active(), and the blocks or output rows a person marks
+// for a question. Selection is a quote; the mark carries the same granularity
+// through session.read.
 
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
@@ -14,6 +14,19 @@ export interface GrantBlock {
   readonly blockEl: HTMLElement
   readonly command: string
   readonly state: 'running' | 'exited'
+  /** The selected output window; omitted means the whole block. */
+  readonly start?: number
+  readonly count?: number
+}
+
+function selectedWindow(blockEl: HTMLElement, range: Range): { start: number; count: number } | null {
+  const rows = Array.from(blockEl.querySelectorAll<HTMLElement>('.term-line'))
+  const selected = rows
+    .map((row, index) => (range.intersectsNode(row) ? index : -1))
+    .filter((index) => index >= 0)
+  if (selected.length === 0) return null
+  const start = selected[0]!
+  return { start, count: selected[selected.length - 1]! - start + 1 }
 }
 
 function blockOf(node: Node | null): HTMLElement | null {
@@ -21,10 +34,10 @@ function blockOf(node: Node | null): HTMLElement | null {
   return element?.closest<HTMLElement>('.cmd-block') ?? null
 }
 
-/** Derive one whole-block grant from the block's durable `data-entry-id`.
+/** Derive one whole-block mark from the block's durable `data-entry-id`.
  *  Commands receive the lifecycle attempt id when they bind; restored and
  *  answer blocks carry their ledger entry id. Renderer selection counters
- *  are deliberately not grant identities. */
+ *  are deliberately not mark identities. */
 export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
   const itemId = blockEl.dataset.entryId
   if (!itemId) return null
@@ -37,14 +50,17 @@ export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
   }
 }
 
-/** A selection grants its containing block, never a row range. */
+/** A selection marks its selected rows; without output rows it marks the whole block. */
 export function grantBlockFromSelection(sel: Selection | null): GrantBlock | null {
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
   const range = sel.getRangeAt(0)
   const start = blockOf(range.startContainer)
   const end = blockOf(range.endContainer)
   if (!start || start !== end) return null
-  return grantBlockFromElement(start)
+  const grant = grantBlockFromElement(start)
+  if (!grant) return null
+  const window = selectedWindow(start, range)
+  return window ? { ...grant, ...window } : grant
 }
 
 // ── The line-start indicator (ADR-0004 §3's UI chip) ───────────────────────

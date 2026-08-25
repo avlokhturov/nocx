@@ -526,16 +526,16 @@ export class TerminalContent extends BasePaneContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  /** Whole blocks granted to the next question. Selection is a quote and also
-   * marks its containing block; no row coordinates or copied frame live here. */
+  /** Marks are either whole-block grants or row windows selected by gesture.
+   *  The absent window is the explicit whole-block form. */
   private grantedBlocks: GrantBlock[] = []
   private grantController: GrantController | null = null
   private readonly onSelectionChange = (): void => {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) return
-    const block = grantBlockFromSelection(selection)
-    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return
-    this.ensureGrant(block.blockEl)
+    const grant = grantBlockFromSelection(selection)
+    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) return
+    this.ensureGrant(grant)
   }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
@@ -4208,22 +4208,26 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  /** A selection is a quote and a whole-block grant. The grant is idempotent:
-   * repeated quotes from one block keep one mark, while the menu remains the
-   * explicit toggle for removing it. */
+  /** A selection is a quote and a grant whose window follows the selected
+   *  rows. Repeating a quote replaces that item's mark so the newest gesture
+   *  owns its granularity; the menu remains the explicit whole-block toggle. */
   private grantCurrentSelection(): boolean {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) return false
-    const block = grantBlockFromSelection(selection)
-    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return false
-    this.ensureGrant(block.blockEl)
+    const grant = grantBlockFromSelection(selection)
+    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) return false
+    this.ensureGrant(grant)
     return true
   }
 
-  private ensureGrant(blockEl: HTMLElement): void {
-    const grant = grantBlockFromElement(blockEl)
-    if (!grant || this.grantedBlocks.some((item) => item.itemId === grant.itemId)) return
-    this.grantedBlocks = [...this.grantedBlocks, grant]
+  private ensureGrant(grant: GrantBlock): void {
+    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
+    this.grantedBlocks =
+      index < 0
+        ? [...this.grantedBlocks, grant]
+        : this.grantedBlocks.map((item, candidateIndex) =>
+            candidateIndex === index ? grant : item,
+          )
     this.grantController?.setBlocks(this.grantedBlocks)
   }
 
@@ -4243,9 +4247,12 @@ export class TerminalContent extends BasePaneContent {
     if (!refreshed) return
     const index = this.grantedBlocks.findIndex((grant) => grant.itemId === refreshed.itemId)
     if (index < 0) return
-    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) =>
-      candidateIndex === index ? refreshed : grant,
-    )
+    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) => {
+      if (candidateIndex !== index) return grant
+      return grant.start !== undefined && grant.count !== undefined
+        ? { ...refreshed, start: grant.start, count: grant.count }
+        : refreshed
+    })
     this.grantController?.setBlocks(this.grantedBlocks)
   }
 
