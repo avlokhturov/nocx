@@ -41,7 +41,7 @@ class FakeDispatcher {
 function grant(itemId: string, command: string, state: GrantBlock['state'] = 'exited'): GrantBlock {
   const blockEl = document.createElement('div')
   blockEl.className = state === 'running' ? 'cmd-block cmd-block-running' : 'cmd-block'
-  blockEl.dataset.blockId = itemId
+  blockEl.dataset.entryId = itemId
   return { itemId, blockEl, command, state }
 }
 

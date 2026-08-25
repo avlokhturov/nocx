@@ -27,6 +27,7 @@ const facts = (over: Partial<Parameters<typeof restoredBlock>[0]> = {}) => ({
   body: 'all good',
   author: 'shell' as const,
   kind: 'command' as const,
+  entryId: 'entry-1',
   ...over,
 })
 
@@ -47,6 +48,7 @@ describe('a block built from the store', () => {
     const el = restoredBlock(facts(), S, container, () => {}, store())
     expect(el.dataset.restored).toBe('true')
     expect(el.classList.contains('cmd-block')).toBe(true)
+    expect(el.dataset.entryId).toBe('entry-1')
   })
 
   it('carries the command, the directory and the outcome', () => {

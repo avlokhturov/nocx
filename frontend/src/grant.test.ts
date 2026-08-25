@@ -5,7 +5,7 @@ import { GrantController, type GrantBlock } from './grant'
 const block = (itemId: string, command: string, running = false): GrantBlock => {
   const blockEl = document.createElement('div')
   blockEl.className = running ? 'cmd-block cmd-block-running' : 'cmd-block'
-  blockEl.dataset.blockId = itemId
+  blockEl.dataset.entryId = itemId
   const header = document.createElement('span')
   header.className = 'cmd-header-text'
   header.textContent = command

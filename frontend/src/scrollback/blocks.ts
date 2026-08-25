@@ -1231,6 +1231,9 @@ export function createCommandBlock(
   author: CommandAuthor,
   answerText?: AnswerTextSource,
   menuActions?: RunningBlockActions,
+  /** Durable ledger identity, when this block already has one. Renderer
+   *  selection ids remain internal and never cross this DOM seam. */
+  entryId?: string,
 ): HTMLElement {
   const wrapper = document.createElement('div')
   wrapper.className = 'cmd-block'
@@ -1250,7 +1253,7 @@ export function createCommandBlock(
   // machine. renderRecordedCommand overwrites it with the masked text when
   // the ack lands, which is the same rule one step later.
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
-  wrapper.setAttribute('data-block-id', String(id))
+  if (entryId) wrapper.dataset.entryId = entryId
 
   let outputEl: HTMLElement | null = null
   if (outputHtml && !isOutputEmpty(outputHtml)) {
@@ -1373,7 +1376,6 @@ export function createRunningBlock(
   // like the block it will freeze into (nocx-ex636).
   wrapper.dataset.blockKind = 'command'
   if (command && findReferences(command).length > 0) wrapper.dataset.recordedCommand = command
-  wrapper.setAttribute('data-block-id', String(id))
 
   const header = createHeader(
     'command',
@@ -1424,6 +1426,7 @@ export function freezeBlock(
   status: 'success' | 'failure' | 'entered' | 'unknown',
   author: CommandAuthor = 'shell',
   menuActions?: RunningBlockActions,
+  entryId?: string,
 ): HTMLElement {
   const newEl = createCommandBlock(
     'command',
@@ -1441,6 +1444,7 @@ export function freezeBlock(
     author,
     undefined,
     menuActions,
+    entryId,
   )
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
@@ -1748,10 +1752,10 @@ export class BlockManager {
   /** An id for a block this manager did not create: a RESTORED one, built
    *  from the store and handed back to `restorePast` (nocx-m3fqk).
    *
-   *  From the same counter as every other block, because the id space is what
-   *  selection and the DOM address blocks by — two spaces would let a
-   *  restored block and a live one answer to the same number, and the
-   *  selection would follow whichever the query found first. */
+   *  The number is renderer-internal selection state. Restored blocks expose
+   *  their durable ledger entry id separately as `data-entry-id`; keeping the
+   *  same counter here only prevents selection collisions inside the renderer.
+   */
   nextRestoredId(): number {
     return this._nextId++
   }
@@ -1842,7 +1846,10 @@ export class BlockManager {
    */
   bindAttempt(attemptId: string): void {
     this._attemptId = attemptId
-    if (this._runningBlock) this._runningBlock.attemptId = attemptId
+    if (this._runningBlock) {
+      this._runningBlock.attemptId = attemptId
+      this._runningBlock.el.dataset.entryId = attemptId
+    }
   }
 
   /** The block bound to an attempt id — running or frozen. */
@@ -2046,6 +2053,7 @@ export class BlockManager {
       status,
       rec.author,
       this._runningActions,
+      rec.attemptId,
     )
 
     this._reown(rec.el, newEl)
@@ -2405,6 +2413,7 @@ export class BlockManager {
         store,
         'shell',
       )
+      if (blockId) pel.dataset.entryId = blockId
       const outputEl = document.createElement('div')
       // The class comes from the kind's rules — the wrap policy is owned
       // there, never a second copy (nocx-ex636).

@@ -5,7 +5,7 @@ import { grantBlockFromElement, grantBlockFromSelection } from './ask-entry'
 const blockOf = (id: string, command: string, running = false) => {
   const block = document.createElement('div')
   block.className = running ? 'cmd-block cmd-block-running' : 'cmd-block'
-  block.dataset.blockId = id
+  block.dataset.entryId = id
   const header = document.createElement('span')
   header.className = 'cmd-header-text'
   header.textContent = command
@@ -27,6 +27,12 @@ describe('whole-block grants', () => {
       command: 'git status',
       state: 'running',
     })
+  })
+  it('does not treat a renderer-local block counter as a grant identity', () => {
+    const { block } = blockOf('entry-ignored', 'git status')
+    delete block.dataset.entryId
+    block.dataset.blockId = '3'
+    expect(grantBlockFromElement(block)).toBeNull()
   })
 
   it('marks the whole containing block for a non-collapsed selection', () => {

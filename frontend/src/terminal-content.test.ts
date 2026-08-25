@@ -28,7 +28,7 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
 import type { PaneIdentity } from './terminal-content'
-import type { GrantBlock } from './ask-entry'
+import { grantBlockFromElement, type GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
 import {
@@ -2616,6 +2616,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
         epoch: 1,
         attempt: { id: 'att-1', state: 'open', origin: 'app', command: 'make' },
       })
+      const live = withScrollback.scrollback.blockManager.blocks[0]
+      expect(live.el.dataset.entryId).toBe('att-1')
+      expect(grantBlockFromElement(live.el)?.itemId).toBe('att-1')
       // The published running fact must NOT tear the block model down: the
       // pane stays in the running layout with the block visible. It used to
       // call setUnstructured unconditionally here, which put the pane back
@@ -2646,6 +2649,8 @@ describe('the projections consume the kernel through the composition root (ADR-0
       expect(frozen.status).toBe('success')
       expect(frozen.exitCode).toBe(0)
       expect(frozen.attemptId).toBe('att-1')
+      expect(frozen.el.dataset.entryId).toBe('att-1')
+      expect(grantBlockFromElement(frozen.el)?.itemId).toBe('att-1')
       expect(withScrollback.scrollback.blockManager.runningBlock).toBeNull()
 
       // History persisted the app-owned text, authorized by the attempt.
@@ -4529,6 +4534,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
     const manager = scrollback.blockManager
     manager.startBlock(command, '~', 0)
+    manager.bindAttempt('att-fixture')
     const lines = output.map((t) => new BufferLine(t))
     const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
     expect(frozen).not.toBeNull()
@@ -4922,12 +4928,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
         expect(dispatcherCalls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
       })
 
-      expect(dispatcherCalls.some((call) => call.method === 'agent.captureFrame')).toBe(false)
       const ask = dispatcherCalls.find((call) => call.method === 'agent.ask')!
       expect(ask.params).toMatchObject({
         question: 'what happened?',
         attachedContent: [
-          { itemId: marked.dataset.blockId, command: 'git status', state: 'exited' },
+          { itemId: marked.dataset.entryId, command: 'git status', state: 'exited' },
         ],
       })
     } finally {

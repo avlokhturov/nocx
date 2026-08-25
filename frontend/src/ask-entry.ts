@@ -20,9 +20,12 @@ function blockOf(node: Node | null): HTMLElement | null {
   return element?.closest<HTMLElement>('.cmd-block') ?? null
 }
 
-/** Derive one whole-block grant from the block's existing DOM facts. */
+/** Derive one whole-block grant from the block's durable `data-entry-id`.
+ *  Commands receive the lifecycle attempt id when they bind; restored and
+ *  answer blocks carry their ledger entry id. Renderer selection counters
+ *  are deliberately not grant identities. */
 export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
-  const itemId = blockEl.dataset.blockId
+  const itemId = blockEl.dataset.entryId
   if (!itemId) return null
   return {
     itemId,

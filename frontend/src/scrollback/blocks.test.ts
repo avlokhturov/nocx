@@ -46,7 +46,8 @@ describe('createRunningBlock', () => {
     expect(el.tagName).toBe('DIV')
     expect(el.classList.contains('cmd-block')).toBe(true)
     expect(el.classList.contains('cmd-block-running')).toBe(true)
-    expect(el.getAttribute('data-block-id')).toBe('1')
+    expect(el.dataset.blockId).toBeUndefined()
+    expect(el.dataset.entryId).toBeUndefined()
   })
 
   it('includes command text in header', () => {
@@ -1397,6 +1398,9 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     const rec = manager.startBlock('make', '~', 0)
     manager.bindAttempt('att-1')
     expect(rec.attemptId).toBe('att-1')
+    expect(rec.el.dataset.entryId).toBe('att-1')
+    expect(rec.el.dataset.blockId).toBeUndefined()
+    expect(rec.el.getAttribute('data-entry-id')).toBe('att-1')
     expect(manager.blockForAttempt('att-1')).toBe(rec)
 
     // The fence landed before the completion: the rendezvous is complete
@@ -1414,6 +1418,8 @@ describe('BlockManager attempt projections (ADR-0024 §5, §7 — bead nocx-u7uh
     expect(frozen!.attemptId).toBe('att-1')
     expect(manager.runningBlock).toBeNull()
     expect(manager.blockForAttempt('att-1')).toBe(frozen)
+    expect(frozen!.el.dataset.entryId).toBe('att-1')
+    expect(frozen!.el.dataset.blockId).toBeUndefined()
   })
 
   it('freezeFromAttempt refuses a non-completed attempt — an open attempt cannot freeze a block', () => {
