@@ -145,14 +145,30 @@ const TITLE: Record<AgentApprovalRequested['reason'], string> = {
  * decides this proposal and commits to nothing. It is also what the prompt
  * focuses on open, since Prompt puts the caret on the first enabled button.
  */
-const SCOPES: ReadonlyArray<{ scope: ApprovalScope; suffix: string }> = [
-  { scope: 'once', suffix: 'once' },
+const SCOPES: ReadonlyArray<{ scope: ApprovalScope; label: string }> = [
+  { scope: 'once', label: 'once' },
   // "in this session", never "in this pane": the permission binds to the
   // terminal session, so restarting the shell is a new session and the
   // question comes back. Naming the pane would promise a lifetime it has not.
-  { scope: 'session', suffix: 'in this session' },
-  { scope: 'always', suffix: 'always' },
+  { scope: 'session', label: 'in this session' },
+  { scope: 'always', label: 'always' },
 ]
+
+/**
+ * The coverage sentence belongs to the answer control, not to the explanatory
+ * prose below the call. The effect is interpolated from the wire's class so a
+ * standing answer cannot silently widen to every effect.
+ */
+const approvalScopeCoverage = (scope: ApprovalScope, effect: AgentApprovalRequested['effect']) => {
+  switch (scope) {
+    case 'once':
+      return 'this proposal only'
+    case 'session':
+      return `every ${EFFECT_LABEL[effect]} call in this session`
+    case 'always':
+      return `every ${EFFECT_LABEL[effect]} call, in every session, from now on`
+  }
+}
 
 export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const ask = () => props.ask
@@ -347,13 +363,14 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const group = (approved: boolean, verb: string, variant: 'primary' | 'danger') => (
     <ActionGroup ariaLabel={approved ? 'Allow this action' : 'Refuse this action'}>
       <For each={SCOPES}>
-        {({ scope, suffix }) => (
+        {({ scope, label }) => (
           <Button
             variant={scope === 'once' ? variant : 'default'}
             disabled={props.busy}
+            secondary={`— ${approvalScopeCoverage(scope, ask().effect)}`}
             onClick={() => props.onDecide(approved, scope)}
           >
-            {verb} {suffix}
+            {`${verb} ${label}`}
           </Button>
         )}
       </For>
@@ -378,16 +395,18 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <Button
                 variant="primary"
                 disabled={props.busy}
+                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(true, 'once')}
               >
-                Allow
+                Allow once
               </Button>
               <Button
                 variant="danger"
                 disabled={props.busy}
+                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(false, 'once')}
               >
-                Deny
+                Deny once
               </Button>
             </>
           }

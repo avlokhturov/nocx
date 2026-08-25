@@ -376,19 +376,15 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 
 // ── the row an "always" writes is the one a REAL gate decided ─────────────
 
-// TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow: the scripted
-// suspensions above prove the transport applies a scope; only this one can
-// prove it applies it to the row the GATE chose, because only here did a gate
-// choose one. The real engine calls readScreen, the real policy middleware
-// escalates it — recording the proposal in the approval store BEFORE the
-// transport ever sees it — and the person answers "allow always". The observe
-// row must come back permit.
+// TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow holds the
+// gate's row for a tool with no command carrier. The real engine calls
+// readScreen, the real policy middleware escalates it, and "allow always"
+// must write the observe row selected by that gate.
 //
-// This is the test that separates the feature from a green suite: on the
-// scripted path the transport creates the store record itself and could
-// record the effect there; on this one the record already exists, and an
-// implementation that only filled the effect when it created the record would
-// write no row at all here while every other test stayed green.
+// The scripted suspensions above prove the transport applies a scope; only
+// this real escalation can prove it applies the scope to the row the GATE
+// chose. On the scripted path the transport creates the store record itself
+// and could record the effect there; here the record already exists.
 func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) {
 	fake, srv := newToolCallingServer("")
 	defer srv.Close()
@@ -429,5 +425,67 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 	}
 	if d := policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionPermit {
 		t.Fatalf("observe = %q, want permit — the gate's own row, written by the answer", d)
+	}
+}
+
+// TestAgentApprove_ScopeAlways_RealRunClassificationWritesTheObserveRow
+// holds the gate's row for a command whose declared worst case was lowered.
+// The model proposes `run` with `df -h`; the gate must present observe, not
+// the tool's declared destructive worst case. The stored destructive row
+// starts at ask and must remain ask after "allow always".
+func TestAgentApprove_ScopeAlways_RealRunClassificationWritesTheObserveRow(t *testing.T) {
+	fake, srv := newRunToolCallingServer("")
+	defer srv.Close()
+	client, err := assistant.NewClient(nil)
+	if err != nil {
+		t.Fatalf("assistant.NewClient: %v", err)
+	}
+	policy := askObserveStore(t)
+	initial := policy.Policy()
+	initial.MutateDestructive = content.EffectRow{Decision: content.DecisionAsk}
+	if err := policy.SetPolicy(initial); err != nil {
+		t.Fatalf("seed destructive ask row: %v", err)
+	}
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(policy))
+	h.createEndpointAt(srv.URL)
+
+	sid := openLocalSession(t, h.conn)
+	fake.args = `{"sessionId":"` + sid + `","command":"df -h"}`
+
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "ask-always-1", "sessionId": sid, "question": "how much disk is free?", "cwd": "/repo",
+	}, 2); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.approvalRequested", 15*time.Second)
+	if raw == nil {
+		t.Fatalf("no approvalRequested within 15s; provider requests=%d", fake.requests.Load())
+	}
+	var n agentApprovalRequested
+	if uerr := json.Unmarshal(raw, &n); uerr != nil {
+		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", uerr, raw)
+	}
+	if n.Tool != "run" {
+		t.Fatalf("approval tool = %q, want run", n.Tool)
+	}
+	if n.Effect != string(content.EffectObserve) {
+		t.Fatalf("approval effect = %q, want observe — the call is read-only", n.Effect)
+	}
+
+	got, errObj := approveOverWire(t, h.conn, map[string]any{
+		"runId": n.RunID, "attempt": n.Attempt, "tool": n.Tool,
+		"callId": n.CallID, "argHash": n.ArgHash, "approved": true, "scope": "always",
+	}, 3)
+	if errObj != nil {
+		t.Fatalf("agent.approve: %+v", errObj)
+	}
+	if got.Warning != "" {
+		t.Fatalf("warning = %q, want none — the row was there to write", got.Warning)
+	}
+	if d := policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionPermit {
+		t.Fatalf("observe = %q, want permit — allow always writes the call's row", d)
+	}
+	if d := policy.Policy().DecisionFor(content.EffectMutateDestructive); d != content.DecisionAsk {
+		t.Fatalf("mutate-destructive = %q, want untouched ask — df must not grant destructive calls", d)
 	}
 }

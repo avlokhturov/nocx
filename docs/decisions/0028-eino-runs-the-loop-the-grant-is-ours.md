@@ -162,6 +162,35 @@ that — so it cannot exceed the grant, because it never has more than it. Packa
 not a substitute: Go's `internal` stops another package naming a symbol, not code in the
 same package calling it, and such a test rots at the first refactor.
 
+The prohibition on a rule over a tool name does not prohibit a backend
+classification of the **validated call**. The declaration remains the tool's
+worst-case effect, while the policy gate may lower that effect for a command
+carrier only when all of these conditions hold:
+
+- The command is split on the shell's own separators, and every subcommand
+  qualifies independently.
+- Lowering uses only a closed table of programs that cannot write in any
+  invocation. A program with an output-file option has a per-program guard
+  for that option.
+- A carrier of somebody else's program, an exec wrapper, command substitution,
+  redirection to a file, backgrounding, or `tee` keeps the declared worst case.
+- Matching is on whole tokens, so `ls` never matches `lsof`.
+- Anything unparsed keeps the declared worst case.
+
+This is sound because the parser is a backend mechanical gate, not a renderer
+or model-supplied effect. An alias or shell function can still **lie**: it is
+resolved by the person's shell, whose rc files nocx does not read. The bound is
+deliberate. A lowered call becomes `observe`, whose default policy remains
+"Ask every time"; a mistaken alias classification can lose only the blanket
+grant, never the question.
+
+Two independent reference implementations use the same shape. Claude Code
+keys a Bash rule on the command and saves it as permanent per repository and
+command, splitting compound commands and refusing prefix approval for exec
+wrappers. pi-permission-system layers Bash patterns with most-restrictive-wins
+and resolves an unparseable command to `ask`. These are evidence for the
+conditions above, not authority for the product's policy.
+
 **5. The ledger stays ours, and the framework's state is a projection.** eino owns run
 mechanics; ADR-0019 owns the record. Its checkpoints, message history and retries are
 implementation detail of a run, never the authoritative transcript, and nothing in the
