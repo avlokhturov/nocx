@@ -164,9 +164,9 @@ const approvalScopeCoverage = (scope: ApprovalScope, effect: AgentApprovalReques
     case 'once':
       return 'this proposal only'
     case 'session':
-      return 'every call with this effect in this terminal session'
+      return `every ${EFFECT_LABEL[effect]} call in this session`
     case 'always':
-      return `the standing answer for ${EFFECT_LABEL[effect]}`
+      return `every ${EFFECT_LABEL[effect]} call, in every session, from now on`
   }
 }
 
@@ -367,9 +367,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <Button
             variant={scope === 'once' ? variant : 'default'}
             disabled={props.busy}
+            secondary={`— ${approvalScopeCoverage(scope, ask().effect)}`}
             onClick={() => props.onDecide(approved, scope)}
           >
-            {`${verb} ${label} — ${approvalScopeCoverage(scope, ask().effect)}`}
+            {`${verb} ${label}`}
           </Button>
         )}
       </For>
@@ -394,16 +395,18 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <Button
                 variant="primary"
                 disabled={props.busy}
+                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(true, 'once')}
               >
-                {`Allow once — ${approvalScopeCoverage('once', ask().effect)}`}
+                Allow once
               </Button>
               <Button
                 variant="danger"
                 disabled={props.busy}
+                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(false, 'once')}
               >
-                {`Deny once — ${approvalScopeCoverage('once', ask().effect)}`}
+                Deny once
               </Button>
             </>
           }
