@@ -1346,21 +1346,24 @@ func (m *policyMiddleware) seams() toolSeams {
 	return toolSeams{sessions: sessions}
 }
 
-// executeInRenderer runs one InRenderer tool: the capability is the
-// narrowed session authority (agenttools.ScreenReader for readScreen, the
-// grant's sessions; agenttools.Runner for run — same narrowing, its own
-// type), the renderer request goes through the run's requester seam. The
-// capability check happens BEFORE the request: a session outside the grant
-// is refused here and the renderer is never asked (criterion 4 — asserted
-// by trying, not by inspecting). The type switch is the exhaustiveness
-// proof: a third InRenderer tool extends the switch or it does not compile.
+// executeInRenderer runs one InRenderer tool: the capability is the narrowed
+// session authority (agenttools.Runner for run), and the renderer request
+// goes through the run's requester seam. The capability check happens BEFORE
+// the request: a session outside the grant is refused here and the renderer
+// is never asked (criterion 4 — asserted by trying, not by inspecting). The
+// type switch is the exhaustiveness proof: a second InRenderer tool extends
+// the switch or it does not compile.
+//
+// `run` is the only row here. readScreen was the other, until session.read
+// took its job (nocx-2ryxf.1) — and session.read is Dynamic, not InRenderer,
+// because which side owns the answer depends on whether the item is still
+// running. Its arm of that switch, and the ScreenReader capability it
+// consumed, were left behind by that change and are gone now.
 func (m *policyMiddleware) executeInRenderer(ctx context.Context, decl agenttools.Tool, capability agenttools.Capability, rawArgs []byte) (string, error) {
 	if m.requester == nil {
 		return "", fmt.Errorf("tool %q executes in the renderer but no renderer requester is wired for this run", decl.Name)
 	}
 	switch cap := capability.(type) {
-	case *agenttools.ScreenReader:
-		return executeReadScreen(ctx, cap, m.requester, rawArgs)
 	case *agenttools.Runner:
 		return executeRun(ctx, cap, m.requester, rawArgs, func(entryID string) {
 			m.noteCause(ctx, entryID)
