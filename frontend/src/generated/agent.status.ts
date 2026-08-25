@@ -18,9 +18,9 @@ export interface AgentStatusResult {
    */
   endpointConfigured: boolean
   /**
-   * The one credential fact (ADR-0032) of the endpoint the answering role RESOLVED to, and of no other. Null whenever the role does not resolve — there is then no endpoint the question is about, and reporting some other endpoint's fact would be a sentence about an endpoint nobody chose. 'resolvable' means the vault can currently resolve that endpoint's credential; 'sealed' means the vault cannot answer right now (the unlock offer); 'deleted' means the referenced secret is gone; 'none' means the endpoint has no reference at all; 'unavailable' is the honest fallback for a store failure that is none of those.
+   * The one credential fact (ADR-0032) of the endpoint the answering role RESOLVED to, and of no other. Null whenever the role does not resolve. 'resolvable' means the vault can resolve the endpoint credential; 'not-required' means the endpoint explicitly declares that it needs no credential; 'sealed' means the vault cannot answer right now; 'deleted' means the referenced secret is gone; 'none' means a credential is required but no reference exists; 'unavailable' is the honest fallback for a store failure that is none of those.
    */
-  credential: ('resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
+  credential: ('resolvable' | 'not-required' | 'none' | 'deleted' | 'sealed' | 'unavailable') | null
   /**
    * The last endpoints.probe outcome, or null when none has run in this process lifetime, or when the one that ran does not describe the CURRENT resolution — a probe names one endpoint and one model, and 'Last test ok' about a different model is a lie the person cannot see through. Process-lifetime by design: a probe's meaning expires with the endpoint that produced it.
    */

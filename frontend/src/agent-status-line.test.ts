@@ -9,7 +9,7 @@
 // right thing and opens the wrong page is exactly the defect the ladder
 // exists to prevent, and a test that checks only the text cannot see it.
 import { describe, expect, it } from 'vitest'
-import { agentStatusLine } from './agent-status-line'
+import { agentStatusLine, credentialLine } from './agent-status-line'
 import type { AgentStatusResult } from './generated/agent.status'
 
 const ready: AgentStatusResult = {
@@ -149,6 +149,10 @@ describe('agentStatusLine', () => {
         tone: 'warning',
         text: 'The endpoint has no key yet',
       })
+    })
+
+    it('says nothing when the endpoint explicitly needs no credential', () => {
+      expect(credentialLine('not-required')).toBeNull()
     })
 
     it('a store failure is its own honest sentence, not one of the three', () => {

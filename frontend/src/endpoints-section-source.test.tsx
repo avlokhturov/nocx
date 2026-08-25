@@ -22,6 +22,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
     id: 'endpoint:custom:provider:1',
     name: 'provider',
     baseUrl: 'https://api.example.com/v1',
+    noKey: false,
     schema: 'openai-compatible',
     credential: null,
     models: [{ name: 'gpt-4o', alias: null }],
@@ -46,6 +47,7 @@ function createClient(initial: Endpoint[] = []) {
         name: input.name,
         baseUrl: input.baseUrl,
         schema: 'openai-compatible',
+        noKey: input.noKey,
         credential:
           input.key !== '' ? `secrow:${next++}` : input.credential !== '' ? input.credential : null,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
@@ -65,6 +67,7 @@ function createClient(initial: Endpoint[] = []) {
         ...existing,
         name: input.name,
         baseUrl: input.baseUrl,
+        noKey: input.noKey,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
         headers: input.headers.map((h) => ({ name: h.name, value: h.value, secret: h.secret })),
       }

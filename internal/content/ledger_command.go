@@ -142,10 +142,11 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		}
 		defer func() { _ = tx.Rollback() }()
 
+		var lookupErr error
 		if in.AttemptID != "" {
 			var phase, client string
-			err := tx.QueryRowContext(ctx, `SELECT phase, client FROM entries WHERE id = ?`, in.AttemptID).Scan(&phase, &client)
-			if err == nil {
+			lookupErr = tx.QueryRowContext(ctx, `SELECT phase, client FROM entries WHERE id = ?`, in.AttemptID).Scan(&phase, &client)
+			if lookupErr == nil {
 				if client != in.Client {
 					return fmt.Errorf("content: record: attempt %q belongs to another client", in.AttemptID)
 				}
@@ -154,32 +155,32 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 					return tx.Commit()
 				}
 				var executionID int64
-				if err := tx.QueryRowContext(ctx,
+				if executionErr := tx.QueryRowContext(ctx,
 					`SELECT id FROM executions WHERE entry_id = ? ORDER BY attempt DESC LIMIT 1`,
-					in.AttemptID).Scan(&executionID); err != nil {
-					return fmt.Errorf("content: record: find attempt execution: %w", err)
+					in.AttemptID).Scan(&executionID); executionErr != nil {
+					return fmt.Errorf("content: record: find attempt execution: %w", executionErr)
 				}
 				now := time.Now().UnixMilli()
-				if _, err := tx.ExecContext(ctx,
+				if _, updateErr := tx.ExecContext(ctx,
 					`UPDATE executions SET ended_at = ?, termination_reason = ? WHERE id = ?`,
-					coalesceTime(in.EndedAt, now), string(in.TerminationReason), executionID); err != nil {
-					return err
+					coalesceTime(in.EndedAt, now), string(in.TerminationReason), executionID); updateErr != nil {
+					return updateErr
 				}
-				if _, err := tx.ExecContext(ctx,
+				if _, entryErr := tx.ExecContext(ctx,
 					`UPDATE entries SET phase = 'closed', status = ?,
 					   started_at = COALESCE(started_at, ?),
 					   ended_at = ?, duration_ms = COALESCE(?, duration_ms),
 					   payload = json_patch(payload, ?)
 					 WHERE id = ?`,
 					string(in.Status), in.StartedAt, coalesceTime(in.EndedAt, now),
-					in.DurationMs, in.Payload, in.AttemptID); err != nil {
-					return err
+					in.DurationMs, in.Payload, in.AttemptID); entryErr != nil {
+					return entryErr
 				}
 				id = in.AttemptID
 				return tx.Commit()
 			}
-			if err != sql.ErrNoRows {
-				return err
+			if lookupErr != sql.ErrNoRows {
+				return lookupErr
 			}
 		}
 

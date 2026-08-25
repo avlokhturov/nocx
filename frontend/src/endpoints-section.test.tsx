@@ -32,6 +32,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
     name: 'provider',
     baseUrl: 'https://api.example.com/v1',
     schema: 'openai-compatible',
+    noKey: false,
     credential: null,
     models: [{ name: 'gpt-4o', alias: null }],
     headers: [],
@@ -71,6 +72,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
         name: input.name,
         baseUrl: input.baseUrl,
         schema: 'openai-compatible',
+        noKey: input.noKey,
         // The backend mints the key into the vault and returns only the row
         // handle — the value never crosses back.
         credential: input.key !== '' ? `secrow:${next++}` : null,
@@ -91,6 +93,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
         ...existing,
         name: input.name,
         baseUrl: input.baseUrl,
+        noKey: input.noKey,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
       }
       store[index] = updated
@@ -106,21 +109,21 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
       )
       return {}
     })
-  const probeEndpoint = vi.spyOn(client, 'probeEndpoint').mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async (input: { name: string; baseUrl: string; key: string; model: string }) => {
-      // A backend probe answers with a result — the Test button's whole
-      // contract is that a failed probe is a RESULT, not an error.
-      return {
-        name: input.name,
-        model: input.model,
-        kind: 'model' as const,
-        ok: true,
-        elapsedMs: 12,
-        at: new Date().toISOString(),
-      }
-    },
-  )
+  const probeEndpoint = vi
+    .spyOn(client, 'probeEndpoint')
+    .mockImplementation(
+      (input: { name: string; baseUrl: string; noKey: boolean; key: string; model: string }) =>
+        Promise.resolve({
+          // A backend probe answers with a result — the Test button's whole
+          // contract is that a failed probe is a RESULT, not an error.
+          name: input.name,
+          model: input.model,
+          kind: 'model' as const,
+          ok: true,
+          elapsedMs: 12,
+          at: new Date().toISOString(),
+        }),
+    )
   return {
     client,
     listEndpoints,
@@ -311,6 +314,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(createEndpoint.mock.calls[0][0]).toEqual({
       name: 'My provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: 'sk-live-abc',
       // No schema on the wire: the form has no dialect control while one
       // schema exists (design §4.5, decision 2), so the backend owns the
@@ -330,6 +334,31 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(row.textContent).toContain('My provider')
     expect(row.textContent).not.toContain('sk-live-abc')
     expect(toastMessages()).toContain('Saved "My provider"')
+  })
+
+  it('creates an explicitly keyless endpoint without rendering or sending key material', async () => {
+    const { container, createEndpoint } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'Local model')
+    fillField(container, 'endpoint-base-url', 'http://127.0.0.1:11434/v1')
+    const noKey = dialog.querySelector('input[type="checkbox"]') as HTMLInputElement
+    expect(noKey).toBeTruthy()
+    fireEvent.click(noKey)
+    expect(dialog.querySelector('#endpoint-key')).toBeNull()
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'qwen3')
+    clickButton(dialog, 'Create Endpoint')
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(createEndpoint.mock.calls[0][0]).toMatchObject({
+      name: 'Local model',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      noKey: true,
+      key: '',
+      credential: '',
+    })
   })
 
   it('the dialog is ordered by what Test actually tests: headers before the button, models after', async () => {
@@ -655,6 +684,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'Local',
       baseUrl: 'http://127.0.0.1:11434/v1',
+      noKey: false,
       key: '',
       model: 'qwen3',
       headers: [],
@@ -725,6 +755,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: '',
       model: 'gpt-4o',
       endpointId: 'endpoint:custom:provider:1',
@@ -1048,6 +1079,23 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     expect(test.disabled).toBe(false)
   })
 
+  it('keeps an explicitly keyless row quiet while leaving Test enabled', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({ id: 'endpoint:custom:local:1', name: 'local', noKey: true }),
+    ])
+    await waitForRows(container, 1)
+    const row = rows(container)[0]
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
+    expect(row.textContent).not.toContain('No key')
+    const test = row.querySelector('[aria-label="Test local"]') as HTMLButtonElement
+    expect(test.disabled).toBe(false)
+    fireEvent.click(test)
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(probeEndpoint.mock.calls[0][0].noKey).toBe(true)
+  })
+
   it('a saved endpoint row is tested by naming the record — the SAME client method the editor uses', async () => {
     const { container, probeEndpoint } = mount([
       ep({
@@ -1073,6 +1121,7 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: '',
       model: '',
       endpointId: 'endpoint:custom:provider:1',

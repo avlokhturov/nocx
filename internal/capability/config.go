@@ -449,6 +449,9 @@ func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, 
 	if err := profile.ValidateEndpoint(e); err != nil {
 		return profile.Endpoint{}, err
 	}
+	if e.NoKey && !key.IsEmpty() {
+		return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
+	}
 	// Row handles resolve BEFORE the mint or the write: a bad row must not
 	// orphan a freshly-minted key (the same ordering as validation).
 	headers, err := s.resolveEndpointHeaders(e.Headers)
@@ -547,6 +550,13 @@ func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, 
 	e.Headers = headers
 
 	switch {
+	case e.NoKey:
+		if key != nil && !key.IsEmpty() {
+			return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
+		}
+		// The declaration is an explicit replacement for the previous
+		// credential choice, so it clears the old reference before storage.
+		e.CredentialRef = ""
 	case e.CredentialRef != "":
 		if key != nil && !key.IsEmpty() {
 			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")

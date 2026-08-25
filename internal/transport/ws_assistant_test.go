@@ -751,7 +751,7 @@ func TestEndpointsProbe_ProbeFailureIsAResult(t *testing.T) {
 	})
 
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:1/v1", "key": "", "model": "qwen3",
+		"name": "Local", "baseUrl": "http://127.0.0.1:1/v1", "key": "", "noKey": true, "model": "qwen3",
 	})
 
 	if isErrorResponse(t, raw) {
@@ -780,7 +780,7 @@ func TestEndpointsProbe_EngineGoErrorIsAnRPCError(t *testing.T) {
 	})
 
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "", "model": "qwen3",
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "", "noKey": true, "model": "qwen3",
 	})
 	if !strings.Contains(string(raw), "-32603") {
 		t.Fatalf("endpoints.probe with a Go error = %s, want -32603", raw)

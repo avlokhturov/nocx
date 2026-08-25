@@ -60,6 +60,8 @@ export type WireRole = ListRole | AssignRole
 export interface EndpointWrite {
   name: string
   baseUrl: string
+  /** Explicitly declares that this endpoint needs no API key. */
+  noKey: boolean
   /** A key typed fresh: an input, sent once, minted or rotated by the
    *  backend, never read back (ADR-0030 §3). */
   key: string
@@ -157,6 +159,7 @@ export class EndpointClient {
    */
   probeEndpoint(input: {
     name: string
+    noKey: boolean
     baseUrl: string
     key: string
     model: string

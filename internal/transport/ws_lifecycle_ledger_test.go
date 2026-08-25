@@ -161,15 +161,15 @@ func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 		Result json.RawMessage  `json:"result"`
 		Error  *jsonrpcErrorObj `json:"error"`
 	}
-	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
-		t.Fatalf("history.record response: %v", err)
+	if unmarshalErr := json.Unmarshal(recordResp, &recordEnvelope); unmarshalErr != nil {
+		t.Fatalf("history.record response: %v", unmarshalErr)
 	}
 	if recordEnvelope.Error != nil {
 		t.Fatalf("history.record: %+v", recordEnvelope.Error)
 	}
 	var ack historyRecordResponse
-	if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
-		t.Fatalf("history.record result: %v", err)
+	if ackErr := json.Unmarshal(recordEnvelope.Result, &ack); ackErr != nil {
+		t.Fatalf("history.record result: %v", ackErr)
 	}
 	if ack.EntryID != got.ID {
 		t.Fatalf("history.record entry id = %q, want attempt id %q", ack.EntryID, got.ID)

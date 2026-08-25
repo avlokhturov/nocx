@@ -4,11 +4,10 @@
 // everywhere and disagree somewhere they did not check. The sentences are
 // the product's words.
 //
-// The credential fact is an enum, not a boolean (ADR-0032): 'none' (no
-// reference at all), 'deleted' (the secret is gone) and 'sealed' (the vault
-// cannot answer right now) each get their own sentence. An endpoint with no
-// key is not told to unlock a vault — that was the three-facts conflation
-// this mapping exists to prevent.
+// The credential fact is an enum, not a boolean (ADR-0032): 'none' means a
+// credential is required but no reference exists, 'deleted' means the secret
+// is gone and 'sealed' means the vault cannot answer right now. 'not-required'
+// is the quiet completed state for an endpoint that explicitly needs no key.
 import type { AgentStatusResult } from './generated/agent.status'
 
 export interface AgentStatusLine {
@@ -29,6 +28,8 @@ export function credentialLine(
   credential: AgentStatusResult['credential'],
 ): AgentStatusLine | null {
   switch (credential) {
+    case 'not-required':
+      return null
     case 'sealed':
       return { tone: 'warning', text: 'The vault is locked — unlock it to use the assistant' }
     case 'deleted':

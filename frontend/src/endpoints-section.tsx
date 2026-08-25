@@ -13,6 +13,7 @@
  */
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
 import { Badge } from './ui/badge'
+import { Checkbox } from './ui/checkbox'
 import { Button } from './ui/button'
 import { CollectionView } from './ui/collection-view'
 import { RecordRow } from './ui/record-row'
@@ -70,41 +71,24 @@ function probeOutcomeLine(
   }
 }
 
-/** The row's credential state, in the agent.status vocabulary (nocx-y7fg):
- *  what the frontend can know without a vault read that raises the unlock
- *  prompt.
- *
- *  - none — the endpoint has no reference at all.
- *  - sealed — the vault is locked right now (its own status); the check
- *    cannot pass, and the list is not the place to raise the unlock prompt.
- *  - deleted — the referenced secret is gone: no vault exists (never set
- *    up, or reset), or the unsealed vault's own inventory no longer lists
- *    the row the endpoint references. The deleted secret case is read from
- *    the SAME inventory the editor's secret pickers read (vault.inventory),
- *    loaded at list time and only while the vault is unsealed — a sealed
- *    vault is never asked, so the list cannot raise the prompt.
- *  - unavailable — the inventory read failed (a store failure that is none
- *    of the above): the honest sentence, and the check cannot pass.
- *  - resolvable — the vault is unsealed and the inventory lists the row, or
- *    the inventory has not been asked (no controller — the dev-web harness
- *    — or still loading): the backend resolves the stored credential at
- *    probe time, and the probe's own refusal is the truth if it does not. */
-type RowCredentialState = 'resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable'
+/** The row's credential state, in the agent.status vocabulary (nocx-y7fg).
+ * noKey is an explicit completed state, while an empty credential on an
+ * endpoint that needs one remains a warning. */
+type RowCredentialState =
+  'resolvable' | 'not-required' | 'none' | 'deleted' | 'sealed' | 'unavailable'
 
-/** The inventory fact the row derivation reads: whether the unsealed vault
- *  has answered, and which rows it lists. 'idle'/'loading' mean not asked
- *  or in flight — treated optimistically, because the probe is the
- *  truth-teller when the credential really cannot resolve. */
 interface RowInventoryFact {
   state: 'idle' | 'loading' | 'loaded' | 'failed'
   entries: InventoryEntry[]
 }
 
 function rowCredentialState(
+  noKey: boolean,
   ref: string | null,
   vaultState: 'uninitialized' | 'sealed' | 'unsealed' | undefined,
   inventory: RowInventoryFact,
 ): RowCredentialState {
+  if (noKey) return 'not-required'
   if (ref === null) return 'none'
   if (vaultState === 'sealed') return 'sealed'
   if (vaultState === 'uninitialized') return 'deleted'
@@ -141,6 +125,7 @@ interface HeaderDraft {
 interface EndpointDraft {
   name: string
   baseUrl: string
+  noKey: boolean
   keyMode: SecretSourceMode
   /** A key typed fresh ('new' mode). Sent once, minted/rotated by the
    *  backend, never read back. */
@@ -154,6 +139,7 @@ interface EndpointDraft {
 const blankDraft = (): EndpointDraft => ({
   name: '',
   baseUrl: '',
+  noKey: false,
   keyMode: 'new',
   key: '',
   keyRow: '',
@@ -326,6 +312,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl: d.baseUrl.trim(),
+        noKey: d.noKey,
         key: draftKey(d),
         model,
         headers: draftHeaders(d),
@@ -443,6 +430,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       name: ep.name,
       baseUrl: ep.baseUrl,
       keyMode: ep.credential !== null ? 'secret' : 'new',
+      noKey: ep.noKey,
       key: '',
       keyRow: ep.credential ?? '',
       models: ep.models.map((m) => ({ name: m.name, alias: m.alias ?? '' })),
@@ -506,12 +494,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The key the WIRE carries: only a fresh 'new' mode key is material. In
    *  'secret' mode the wire carries the row handle instead (draftKeyRow),
    *  and a blank 'new' key keeps the existing material on update (design
-   *  §4.5.4) — the source control has made "keep" a visible choice. */
-  const draftKey = (d: EndpointDraft): string => (d.keyMode === 'new' ? d.key : '')
+   *  §4.5.4). */
+  const draftKey = (d: EndpointDraft): string => (d.noKey ? '' : d.keyMode === 'new' ? d.key : '')
 
   /** The row handle the WIRE carries in 'secret' mode, or '' to keep the
    *  existing reference (or stay keyless on create). */
-  const draftKeyRow = (d: EndpointDraft): string => (d.keyMode === 'secret' ? d.keyRow : '')
+  const draftKeyRow = (d: EndpointDraft): string =>
+    d.noKey ? '' : d.keyMode === 'secret' ? d.keyRow : ''
 
   /** The wire form of the draft's header rows: exactly one source per row,
    *  the unused side null. A 'secret' row with no picker selection is
@@ -574,6 +563,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const input = {
       name: d.name.trim(),
       baseUrl: d.baseUrl.trim(),
+      noKey: d.noKey,
       key: draftKey(d),
       credential: draftKeyRow(d),
       headers: draftHeaders(d),
@@ -689,13 +679,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const baseUrl = d.baseUrl.trim()
     if (baseUrl === '' || probing()) return
     const ep = editing()
-    const key = `${baseUrl}${draftKey(d)}${draftKeyRow(d)}${ep?.id ?? ''}`
+    const key = `${baseUrl}${d.noKey}${draftKey(d)}${draftKeyRow(d)}${ep?.id ?? ''}`
     if (discoveryKey() === key) return
     setDiscoveryKey(key)
     try {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl,
+        noKey: d.noKey,
         key: draftKey(d),
         model: '',
         headers: draftHeaders(d),
@@ -751,6 +742,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       const res = await props.client.probeEndpoint({
         name: ep.name,
         baseUrl: ep.baseUrl,
+        noKey: ep.noKey,
         key: '',
         model: '',
         endpointId: ep.id,
@@ -805,6 +797,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  pass against a public endpoint. */
   function rowTestDisabled(ep: Endpoint): boolean {
     const state = rowCredentialState(
+      ep.noKey,
       ep.credential,
       props.vaultController?.status()?.state,
       inventoryFact(),
@@ -832,12 +825,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       return { tone: line.tone === 'danger' ? 'error' : 'ok', text: line.text }
     }
     const state = rowCredentialState(
+      ep.noKey,
       ep.credential,
       props.vaultController?.status()?.state,
       inventoryFact(),
     )
     if (state === 'none') return { tone: 'neutral', text: 'No key' }
-    if (state === 'resolvable' || state === 'sealed') return undefined
+    if (state === 'not-required' || state === 'resolvable' || state === 'sealed') return undefined
     // deleted / unavailable: the sentences agent-status-line owns, always in
     // the StatusDot's warning — the Badge tone that mapping speaks (warning)
     // is the same meaning, spelled for the dot.
@@ -1055,28 +1049,43 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             error={validation.error('baseUrl')}
             placeholder="https://api.example.com/v1"
           />
-          <SecretSource
-            id="endpoint-key"
-            label="API key"
-            mode={draft().keyMode}
-            onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
-            newLabel="Type a new one"
-            secretLabel="Use existing secret"
-            ariaLabel="API key source"
-            newControl={
-              <TextField
-                id="endpoint-key"
-                label="API key"
-                type="password"
-                value={draft().key}
-                onInput={(v) => setDraftField('key', v)}
-                description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
-              />
+          <Checkbox
+            label="This endpoint does not require an API key"
+            checked={draft().noKey}
+            onChange={(checked) =>
+              setDraft((d) => ({
+                ...d,
+                noKey: checked,
+                keyMode: checked ? 'new' : d.keyMode,
+                key: checked ? '' : d.key,
+                keyRow: checked ? '' : d.keyRow,
+              }))
             }
-            secrets={passwordRows()}
-            value={draft().keyRow}
-            onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
           />
+          <Show when={!draft().noKey}>
+            <SecretSource
+              id="endpoint-key"
+              label="API key"
+              mode={draft().keyMode}
+              onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
+              newLabel="Type a new one"
+              secretLabel="Use existing secret"
+              ariaLabel="API key source"
+              newControl={
+                <TextField
+                  id="endpoint-key"
+                  label="API key"
+                  type="password"
+                  value={draft().key}
+                  onInput={(v) => setDraftField('key', v)}
+                  description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
+                />
+              }
+              secrets={passwordRows()}
+              value={draft().keyRow}
+              onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
+            />
+          </Show>
           {/* Custom headers belong to the CONNECTION, so they come before the
               button that checks it: the probe sends them on every request it
               makes (ws_assistant.go resolveProbeHeaders), and a header typed

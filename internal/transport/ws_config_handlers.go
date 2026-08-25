@@ -709,12 +709,15 @@ func validateSettingsSecretSetRaw(raw json.RawMessage) string {
 // on save — and the key rides the params once to become an Authorization
 // header, so it gets the probe key's bound and the control-character
 // refusal.
-func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
+func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, noKey bool, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
 	if msg := boundedRunes("name", name, maxConfigNameRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedRunes("baseUrl", baseURL, maxEndpointURLRunes); msg != "" {
 		return msg
+	}
+	if noKey && (key != "" || credentialRow != "") {
+		return "endpoint declaring noKey must not carry a credential"
 	}
 	if key != "" {
 		if msg := boundedRunes("key", key, maxProbeKeyRunes); msg != "" {
@@ -759,6 +762,7 @@ func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSch
 		Name:          name,
 		BaseURL:       baseURL,
 		Schema:        resolveEndpointSchema(schema),
+		NoKey:         noKey,
 		CredentialRef: credentialRow,
 		Models:        wireModelsToStored(models),
 		Headers:       wireHeadersToStored(headers),
@@ -808,7 +812,7 @@ func validateEndpointCreateRaw(raw json.RawMessage) string {
 	if msg := decodeObject(raw, &p); msg != "" {
 		return msg
 	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
 }
 
 // validateEndpointUpdateRaw is the registered validator for endpoints.update.
@@ -823,7 +827,7 @@ func validateEndpointUpdateRaw(raw json.RawMessage) string {
 	if msg := configIDRunes("id", p.ID); msg != "" {
 		return msg
 	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
 }
 
 // validateEndpointDeleteRaw is the registered validator for endpoints.delete.
