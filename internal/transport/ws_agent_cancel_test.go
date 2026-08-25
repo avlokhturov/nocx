@@ -65,7 +65,7 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "cancel-ask-1", "sessionId": sid, "question": "stop this", "cwd": "/repo", "references": []any{},
+		"askId": "cancel-ask-1", "sessionId": sid, "question": "stop this", "cwd": "/repo", "attachedContent": []any{},
 	}, 1)
 	if errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)

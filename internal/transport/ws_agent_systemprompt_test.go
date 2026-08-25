@@ -42,11 +42,11 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 	sid := openLocalSession(t, h.conn)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":      "ask-sysprompt-1",
-		"sessionId":  sid,
-		"question":   "what is in this directory?",
-		"cwd":        "/home/dev/repos/nocx",
-		"references": []any{},
+		"askId":           "ask-sysprompt-1",
+		"sessionId":       sid,
+		"question":        "what is in this directory?",
+		"cwd":             "/home/dev/repos/nocx",
+		"attachedContent": []any{},
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask refused: %+v", errObj)
@@ -85,28 +85,24 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 	}
 }
 
-// TestAgentAsk_ReferencedContentIsAnnouncedInTheOneSystemPrompt is the far
-// end: with a frame attached the standing prompt is still there, still names
-// the session, and now carries the data-not-instructions sentence — one
-// system message, not two, because there is one owner of what the model is
-// told.
-func TestAgentAsk_ReferencedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
+// TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt is the far
+// end: with terminal items attached the standing prompt is still there,
+// still names the session, and carries the data-not-instructions sentence —
+// one system message, not two, because there is one owner of what the model
+// is told.
+func TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
 	client := &scriptedAssistantClient{deltas: []string{"ok"}}
 	h := newAskHarness(t, client)
 	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 
-	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-sysprompt-1"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
-	_, errObj = askOverWire(t, h.conn, map[string]any{
+	_, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-sysprompt-2",
 		"sessionId": sid,
 		"question":  "what does this mean?",
 		"cwd":       "/repo",
-		"references": []any{
-			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
+		"attachedContent": []any{
+			map[string]any{"itemId": "item-1", "command": "git status", "state": "exited"},
 		},
 	}, 2)
 	if errObj != nil {
@@ -124,15 +120,13 @@ func TestAgentAsk_ReferencedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T)
 	if !strings.Contains(sys[0].Content, sid) {
 		t.Fatalf("the prompt never names this run's session %q:\n%s", sid, sys[0].Content)
 	}
-	if !strings.Contains(sys[0].Content, "attached to this question") {
+	if !strings.Contains(sys[0].Content, "Attached terminal content") {
 		t.Fatalf("content was attached and the prompt never says so:\n%s", sys[0].Content)
 	}
-	var full string
-	for _, m := range msgs {
-		full += m.Content + "\n"
-	}
-	if !strings.Contains(full, "Referenced frame:") {
-		t.Fatalf("the referenced frame's text never reached the engine: %q", full)
+	for _, want := range []string{"item-1", "git status", "state: exited", "session.read"} {
+		if !strings.Contains(sys[0].Content, want) {
+			t.Fatalf("attached content prompt lacks %q:\n%s", want, sys[0].Content)
+		}
 	}
 }
 
@@ -162,7 +156,7 @@ func TestAgentAsk_ThePersonsOwnParagraphIsWrittenOnChangeAndReachesTheModelLast(
 		t.Helper()
 		if _, errObj := askOverWire(t, h.conn, map[string]any{
 			"askId": askID, "sessionId": sid, "question": question,
-			"cwd": "/repo", "references": []any{},
+			"cwd": "/repo", "attachedContent": []any{},
 		}, id); errObj != nil {
 			t.Fatalf("ask refused: %+v", errObj)
 		}

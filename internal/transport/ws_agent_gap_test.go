@@ -632,28 +632,9 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 	// through it (strictCall/strictNotify), never the conn directly.
 	tap := newStrictTap(h.conn)
 
-	frameRaw := strictCall(t, h.conn, tap, 1, "agent.captureFrame", map[string]any{
-		"captureId": "frame-ad1", "sessionId": sid, "source": "frozen",
-		"rows": []any{
-			map[string]any{"kind": "text", "text": "line one"},
-			map[string]any{"kind": "text", "text": "line two"},
-		},
-		"serializerVersion": 1, "cwd": "/repo",
-	})
-	var fr struct {
-		Result struct {
-			FrameID string `json:"frameId"`
-		} `json:"result"`
-	}
-	if err := json.Unmarshal(frameRaw, &fr); err != nil || fr.Result.FrameID == "" {
-		t.Fatalf("captureFrame over the tap: %v (%s)", err, frameRaw)
-	}
-
 	askRaw := strictCall(t, h.conn, tap, 2, "agent.ask", map[string]any{
 		"askId": "ask-ad1", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{
-			map[string]any{"frameId": fr.Result.FrameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
-		},
+		"attachedContent": []any{},
 	})
 	var ar struct {
 		Result struct {
@@ -776,7 +757,7 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 
 	askARaw := tapCall(t, h.conn, tap, 11, "agent.ask", map[string]any{
 		"askId": "ask-a", "sessionId": sid, "question": "first?", "cwd": "/repo",
-		"references": []any{},
+		"attachedContent": []any{},
 	})
 	var askARes struct {
 		Result agentAskResponse `json:"result"`
@@ -787,7 +768,7 @@ func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) 
 	resA := askARes.Result
 	askBRaw := tapCall(t, h.conn, tap, 12, "agent.ask", map[string]any{
 		"askId": "ask-b", "sessionId": sid, "question": "second?", "cwd": "/repo",
-		"references": []any{},
+		"attachedContent": []any{},
 	})
 	var askBRes struct {
 		Result agentAskResponse `json:"result"`

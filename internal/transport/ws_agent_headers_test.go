@@ -65,18 +65,12 @@ func TestAgentAsk_EndpointHeadersResolveAtStreamTime(t *testing.T) {
 		t.Fatalf("roles.assign: %s", assign)
 	}
 	sid := openLocalSession(t, h.conn)
-	frameID, errObj := captureFrameOverWire(t, h.conn, frozenWireFrame(sid, "frame-1"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-headers",
-		"sessionId": sid,
-		"question":  "q",
-		"cwd":       "/repo",
-		"references": []any{
-			map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}},
-		},
+		"askId":           "ask-headers",
+		"sessionId":       sid,
+		"question":        "q",
+		"cwd":             "/repo",
+		"attachedContent": []any{},
 	}, 2); errObj != nil {
 		t.Fatalf("agent.ask: %+v", errObj)
 	}

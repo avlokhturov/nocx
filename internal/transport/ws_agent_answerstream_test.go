@@ -59,6 +59,7 @@ func askAndCollect(t *testing.T, h *askHarness, question string) []wireNotificat
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": question, "cwd": "/repo",
+		"attachedContent": []any{},
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
@@ -156,6 +157,7 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "what is in that file?", "cwd": "/repo",
+		"attachedContent": []any{},
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
@@ -213,6 +215,7 @@ func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "how much disk is left?", "cwd": "/repo",
+		"attachedContent": []any{},
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
@@ -248,6 +251,7 @@ func TestAgentRunToolCall_NoResourceOverTheWireConformsToContract(t *testing.T) 
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "is the tree clean?", "cwd": "/repo",
+		"attachedContent": []any{},
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
@@ -269,6 +273,7 @@ func TestAgentRunReasoning_OverTheWireConformsToContract(t *testing.T) {
 	sid := openLocalSession(t, h.conn)
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "what is in that file?", "cwd": "/repo",
+		"attachedContent": []any{},
 	}, 1); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}

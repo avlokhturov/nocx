@@ -41,11 +41,17 @@ type twoReadsProvider struct {
 	first    string
 	second   string
 	requests int
+	bodies   []string
+	ready    chan struct{}
 }
 
 func (p *twoReadsProvider) serve(w http.ResponseWriter, r *http.Request) {
-	_, _ = io.ReadAll(r.Body)
+	body, _ := io.ReadAll(r.Body)
+	p.bodies = append(p.bodies, string(body))
 	p.requests++
+	if p.requests == 3 {
+		close(p.ready)
+	}
 	switch p.requests {
 	case 1:
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
@@ -61,7 +67,7 @@ func (p *twoReadsProvider) serve(w http.ResponseWriter, r *http.Request) {
 func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
 
-	prov := &twoReadsProvider{}
+	prov := &twoReadsProvider{ready: make(chan struct{})}
 	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
 	defer srv.Close()
 
@@ -83,12 +89,15 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 		"0198f2b0-0000-7000-8000-0000000000f1", "Filesystem  Size")
 	prov.second = recordBlockWithBody(t, h.db, blockPaneThis, "du -sh .",
 		"0198f2b0-0000-7000-8000-0000000000f2", "12G\t.")
-
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "0198f2b0-0000-7000-8000-0000000000fa",
 		"sessionId": sid,
 		"question":  "what did those two commands say?",
 		"cwd":       "/repo",
+		"attachedContent": []any{
+			map[string]any{"itemId": prov.first, "command": "df -h", "state": "exited"},
+			map[string]any{"itemId": prov.second, "command": "du -sh .", "state": "exited"},
+		},
 	}, 2); errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
@@ -111,6 +120,16 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 			t.Fatalf("unmarshal: %v\nraw: %s", err, raw)
 		}
 		calls = append(calls, got)
+	}
+	<-prov.ready
+	if len(prov.bodies) < 3 {
+		t.Fatalf("provider requests = %d, want initial prompt plus two tool-result requests", len(prov.bodies))
+	}
+	if !strings.Contains(prov.bodies[0], prov.first) || !strings.Contains(prov.bodies[0], prov.second) {
+		t.Fatalf("initial model request omitted granted item ids: %s", prov.bodies[0])
+	}
+	if !strings.Contains(prov.bodies[1], "Filesystem  Size") || !strings.Contains(prov.bodies[2], "12G") {
+		t.Fatalf("session.read tool results did not reach the model: %q / %q", prov.bodies[1], prov.bodies[2])
 	}
 
 	// The tool and the resource are IDENTICAL — which is the whole reason
