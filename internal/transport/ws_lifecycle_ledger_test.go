@@ -289,8 +289,8 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 
 	const lane = lifecycle.LaneID("lane-block-read")
 	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
-	if err := pub.BindTransport("T", noopPort{}); err != nil {
-		t.Fatalf("BindTransport: %v", err)
+	if bindErr := pub.BindTransport("T", noopPort{}); bindErr != nil {
+		t.Fatalf("BindTransport: %v", bindErr)
 	}
 	domain, err := pub.RequestDomain(lane, nil, "T")
 	if err != nil {
