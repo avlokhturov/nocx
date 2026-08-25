@@ -28,8 +28,8 @@ function selectedWindow(
     .map((row, index) => (range.intersectsNode(row) ? index : -1))
     .filter((index) => index >= 0)
   if (selected.length === 0) return null
-  const start = selected[0]!
-  return { start, count: selected[selected.length - 1]! - start + 1 }
+  const start = selected[0]
+  return { start, count: selected[selected.length - 1] - start + 1 }
 }
 
 function blockOf(node: Node | null): HTMLElement | null {

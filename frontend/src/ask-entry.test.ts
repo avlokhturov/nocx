@@ -65,7 +65,7 @@ describe('whole-block grants', () => {
     expect(Object.keys(grant ?? {}).sort()).toEqual(['blockEl', 'command', 'itemId', 'state'])
   })
   it('carries the selected output row window instead of a whole-block mark', () => {
-    const { block, output } = blockOf('item-10', 'npm test')
+    const { output } = blockOf('item-10', 'npm test')
     output.replaceChildren()
     for (const text of ['first', 'second', 'third']) {
       const row = document.createElement('span')
@@ -76,7 +76,7 @@ describe('whole-block grants', () => {
     const rows = output.querySelectorAll<HTMLElement>('.term-line')
     const range = document.createRange()
     range.setStart(rows[0].firstChild!, 0)
-    range.setEnd(rows[1].firstChild!, rows[1].textContent!.length)
+    range.setEnd(rows[1].firstChild!, rows[1].textContent.length)
     const selection = window.getSelection()!
     selection.removeAllRanges()
     selection.addRange(range)
