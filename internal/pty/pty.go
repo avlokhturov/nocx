@@ -2,12 +2,20 @@ package pty
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/sandbox"
 )
+
+// ErrNoForeground is returned by SignalForeground when there is no
+// foreground execution to signal: the pty's foreground process group is the
+// shell's own (it is sitting at a prompt), or the process is gone. The
+// lease's escalation treats it as "nothing running to cancel" — never an
+// error worth failing the terminalization for.
+var ErrNoForeground = errors.New("pty: no foreground process to signal")
 
 type Pty interface {
 	io.ReadWriteCloser

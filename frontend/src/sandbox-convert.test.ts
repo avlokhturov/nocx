@@ -268,4 +268,19 @@ describe('conversion failure preservation', () => {
     await createSandboxConvertController(deps).toggle()
     await vi.waitFor(() => expect(inFlight.value).toBe(false))
   })
+
+  it('reports a failed replacement create instead of leaving an unhandled rejection', async () => {
+    const { deps } = makeDeps({
+      paneManager: makePaneManager({
+        newSandboxedPane: vi.fn(() => ({
+          pane: newPane,
+          created: Promise.reject(new Error('boom')),
+        })),
+      }),
+    })
+    const controller = createSandboxConvertController(deps)
+
+    await expect(controller.toggle()).resolves.toBeUndefined()
+    await vi.waitFor(() => expect(deps.reportConversionError).toHaveBeenCalledTimes(1))
+  })
 })

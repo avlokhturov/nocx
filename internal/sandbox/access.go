@@ -149,6 +149,7 @@ type AccessInbox struct {
 	events      []AccessEvent
 	keys        map[string]int
 	grants      map[string]accessGrantCheck
+	resolving   map[string]struct{}
 	revision    uint64
 	lost        uint64
 	capacity    int
@@ -266,7 +267,7 @@ func (s *AccessSession) Close() {
 }
 
 func NewAccessInbox(grant AccessGrantStore) *AccessInbox {
-	return &AccessInbox{grant: grant, keys: make(map[string]int), grants: make(map[string]accessGrantCheck), capacity: accessInboxCapacity, watchers: make(map[uint64]func(uint64))}
+	return &AccessInbox{grant: grant, keys: make(map[string]int), grants: make(map[string]accessGrantCheck), resolving: make(map[string]struct{}), capacity: accessInboxCapacity, watchers: make(map[uint64]func(uint64))}
 }
 
 func (i *AccessInbox) SetGrantStore(grant AccessGrantStore) {
@@ -413,7 +414,6 @@ func (i *AccessInbox) List(opts AccessListOptions) AccessPage {
 
 func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	index := -1
 	for n := range i.events {
 		if i.events[n].ID == req.EventID {
@@ -422,59 +422,107 @@ func (i *AccessInbox) Resolve(req AccessResolveRequest) (AccessEvent, error) {
 		}
 	}
 	if index < 0 {
+		i.mu.Unlock()
 		return AccessEvent{}, ErrAccessEventNotFound
 	}
 	event := &i.events[index]
 	if event.State != AccessStatePending {
+		i.mu.Unlock()
 		return AccessEvent{}, ErrAccessEventResolved
 	}
-	switch req.Decision {
-	case AccessDecisionDismiss:
+	if _, resolving := i.resolving[event.ID]; resolving {
+		i.mu.Unlock()
+		return AccessEvent{}, ErrAccessEventResolved
+	}
+
+	if req.Decision == AccessDecisionDismiss {
 		event.State = AccessStateDismissed
-	case AccessDecisionWorkspaceReadOnly, AccessDecisionWorkspaceReadWrite:
-		if !event.CanGrant || event.Directory == "" {
-			return AccessEvent{}, ErrAccessGrantUnavailable
-		}
-		check, ok := i.grants[event.ID]
-		if !ok || !check.validNow() {
+		event.Decision = req.Decision
+		i.revision++
+		rev, callbacks := i.snapshotWatchersLocked()
+		resolved := *event
+		i.mu.Unlock()
+		go notifyAccessWatchers(callbacks, rev)
+		return resolved, nil
+	}
+
+	if req.Decision != AccessDecisionWorkspaceReadOnly && req.Decision != AccessDecisionWorkspaceReadWrite {
+		i.mu.Unlock()
+		return AccessEvent{}, ErrInvalidAccessDecision
+	}
+	if !event.CanGrant || event.Directory == "" {
+		i.mu.Unlock()
+		return AccessEvent{}, ErrAccessGrantUnavailable
+	}
+	check, ok := i.grants[event.ID]
+	if !ok || !check.validNow() {
+		event.CanGrant = false
+		event.GrantReason = "The directory changed or no longer exists; granting it would be unsafe."
+		i.revision++
+		rev, callbacks := i.snapshotWatchersLocked()
+		i.mu.Unlock()
+		go notifyAccessWatchers(callbacks, rev)
+		return AccessEvent{}, ErrAccessGrantUnavailable
+	}
+	if i.grant == nil {
+		i.mu.Unlock()
+		return AccessEvent{}, errors.New("sandbox access grant store unavailable")
+	}
+	access := AccessReadOnly
+	if req.Decision == AccessDecisionWorkspaceReadWrite {
+		access = AccessReadWrite
+	}
+	if access == AccessReadWrite {
+		systemRoots, rootsErr := canonicalSystemRoots()
+		if rootsErr != nil || writableRootIsProtected(event.Directory, systemRoots) {
 			event.CanGrant = false
-			event.GrantReason = "The directory changed or no longer exists; granting it would be unsafe."
+			event.GrantReason = "The directory would make a protected system root writable."
 			i.revision++
 			rev, callbacks := i.snapshotWatchersLocked()
+			i.mu.Unlock()
 			go notifyAccessWatchers(callbacks, rev)
 			return AccessEvent{}, ErrAccessGrantUnavailable
 		}
-		if i.grant == nil {
-			return AccessEvent{}, errors.New("sandbox access grant store unavailable")
-		}
-		access := AccessReadOnly
-		if req.Decision == AccessDecisionWorkspaceReadWrite {
-			access = AccessReadWrite
-		}
-		if access == AccessReadWrite {
-			systemRoots, rootsErr := canonicalSystemRoots()
-			if rootsErr != nil || writableRootIsProtected(event.Directory, systemRoots) {
-				event.CanGrant = false
-				event.GrantReason = "The directory would make a protected system root writable."
-				i.revision++
-				rev, callbacks := i.snapshotWatchersLocked()
-				go notifyAccessWatchers(callbacks, rev)
-				return AccessEvent{}, ErrAccessGrantUnavailable
-			}
-		}
-		revision, err := i.grant.PromoteSandboxPath(event.WorkspaceID, access, event.Directory)
-		if err != nil {
-			return AccessEvent{}, err
-		}
-		event.State = AccessStateGranted
-		event.ProfileRevision = revision
-	default:
-		return AccessEvent{}, ErrInvalidAccessDecision
 	}
+
+	// Mark in-flight and release the mutex for the store write. A concurrent
+	// Resolve now fails closed at the resolving check above instead of
+	// double-promoting the same directory.
+	i.resolving[event.ID] = struct{}{}
+	workspaceID := event.WorkspaceID
+	directory := event.Directory
+	i.mu.Unlock()
+
+	revision, err := i.grant.PromoteSandboxPath(workspaceID, access, directory)
+
+	i.mu.Lock()
+	delete(i.resolving, event.ID)
+	if err != nil {
+		i.mu.Unlock()
+		return AccessEvent{}, err
+	}
+	// Re-find by ID: the slice may have shifted while the mutex was released.
+	index = -1
+	for n := range i.events {
+		if i.events[n].ID == req.EventID {
+			index = n
+			break
+		}
+	}
+	if index < 0 {
+		// Dropped while promoting (the inbox overflowed). The grant is
+		// durable; the event is gone with the lost counter already bumped.
+		i.mu.Unlock()
+		return AccessEvent{}, ErrAccessEventNotFound
+	}
+	event = &i.events[index]
+	event.State = AccessStateGranted
 	event.Decision = req.Decision
+	event.ProfileRevision = revision
 	i.revision++
 	rev, callbacks := i.snapshotWatchersLocked()
 	resolved := *event
+	i.mu.Unlock()
 	go notifyAccessWatchers(callbacks, rev)
 	return resolved, nil
 }

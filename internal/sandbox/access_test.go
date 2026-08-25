@@ -245,3 +245,104 @@ func TestAccessInboxRejectsWritableProtectedSystemRoot(t *testing.T) {
 		t.Fatalf("protected path persisted: %q", store.path)
 	}
 }
+
+// blockingGrantStore parks inside PromoteSandboxPath until released, so a test
+// can hold the store write open and observe what else the inbox allows.
+type blockingGrantStore struct {
+	entered chan struct{}
+	release chan struct{}
+	rev     int64
+}
+
+func (s *blockingGrantStore) PromoteSandboxPath(string, AccessClass, string) (int64, error) {
+	s.rev++
+	close(s.entered)
+	<-s.release
+	return s.rev, nil
+}
+
+func TestAccessInboxResolveDoesNotBlockObservationWhileGrantPromotes(t *testing.T) {
+	store := &blockingGrantStore{entered: make(chan struct{}), release: make(chan struct{})}
+	inbox := NewAccessInbox(store)
+	identity := SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 1}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dir", "file.txt")
+	inbox.Record(AccessObservation{Identity: identity, Shell: "/bin/zsh", Executable: "/usr/bin/cat", Path: path, Access: AccessReadOnly, Operation: "openat", Source: AccessSourceLinuxSeccomp, At: time.Now().UTC()})
+	event := inbox.List(AccessListOptions{Limit: 10}).Events[0]
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionWorkspaceReadOnly})
+		done <- err
+	}()
+
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("grant promotion never entered")
+	}
+
+	// While the grant promotion is parked, a read must not block on the inbox
+	// mutex — the whole point of not holding it across the store write.
+	listDone := make(chan struct{})
+	go func() { _ = inbox.List(AccessListOptions{Limit: 10}); close(listDone) }()
+	select {
+	case <-listDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("List blocked on the inbox mutex held across grant promotion")
+	}
+
+	close(store.release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Resolve did not finish after release")
+	}
+}
+
+func TestAccessInboxConcurrentResolvePromotesExactlyOnce(t *testing.T) {
+	store := &blockingGrantStore{entered: make(chan struct{}), release: make(chan struct{})}
+	inbox := NewAccessInbox(store)
+	identity := SessionIdentity{SessionID: "session", InstanceID: "instance", Epoch: 1}
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "dir", "file.txt")
+	inbox.Record(AccessObservation{Identity: identity, Shell: "/bin/zsh", Executable: "/usr/bin/cat", Path: path, Access: AccessReadOnly, Operation: "openat", Source: AccessSourceLinuxSeccomp, At: time.Now().UTC()})
+	event := inbox.List(AccessListOptions{Limit: 10}).Events[0]
+
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionWorkspaceReadOnly})
+		firstDone <- err
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("grant promotion never entered")
+	}
+
+	// A second Resolve for the same event, while the first promotion is still
+	// in flight, must fail closed rather than double-promote the directory.
+	if _, err := inbox.Resolve(AccessResolveRequest{EventID: event.ID, Decision: AccessDecisionWorkspaceReadOnly}); !errors.Is(err, ErrAccessEventResolved) {
+		t.Fatalf("concurrent Resolve err = %v, want ErrAccessEventResolved", err)
+	}
+	if store.rev != 1 {
+		t.Fatalf("promotions = %d, want 1", store.rev)
+	}
+
+	close(store.release)
+	if err := <-firstDone; err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if store.rev != 1 {
+		t.Fatalf("promotions = %d after completion, want 1", store.rev)
+	}
+}

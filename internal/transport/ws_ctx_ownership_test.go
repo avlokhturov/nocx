@@ -292,8 +292,12 @@ func (d *blockingDialog) OpenFile(_ context.Context) (string, error) {
 	return "/home/dev/.ssh/id_ed25519", nil
 }
 
-func (d *blockingDialog) OpenDirectory(ctx context.Context) (string, error) {
-	return d.OpenFile(ctx)
+// The directory picker of the same non-cooperative adapter. It never blocks:
+// these tests drive the FILE picker, and this method exists so the fake
+// satisfies the whole capability — a test that needs a blocking directory
+// picker uses blockingDirectoryDialog (ws_dialog_test.go).
+func (d *blockingDialog) OpenDirectory(_ context.Context) (string, error) {
+	return "/home/dev/collections", nil
 }
 
 // cancelAwareDialog is the cooperative adapter: it observes ctx.Done and
@@ -321,8 +325,8 @@ func (d *cancelAwareDialog) OpenFile(ctx context.Context) (string, error) {
 	return "/home/dev/.ssh/id_ed25519", nil
 }
 
-func (d *cancelAwareDialog) OpenDirectory(ctx context.Context) (string, error) {
-	return d.OpenFile(ctx)
+func (d *cancelAwareDialog) OpenDirectory(_ context.Context) (string, error) {
+	return "/home/dev/collections", nil
 }
 
 // waitDialogFree polls dialog.openFile until it succeeds, asserting the

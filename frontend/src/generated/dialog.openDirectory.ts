@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the dialog.openDirectory JSON-RPC method: the native folder picker behind the sandboxed-shell workspace action (ADR-0037 §3.2, §4.3; ADR-0040). The chosen ABSOLUTE directory, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists; the caller reports the typed failure without creating a pane.
+ * Result of the dialog.openDirectory JSON-RPC method: the native directory picker, reached through the backend because the renderer has no path to the Wails runtime (AD-1). It is the same capability as dialog.openFile — one native dialog at a time — and answers the same shape: the chosen ABSOLUTE path, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists — the dev-web harness has no Wails at all, and that is the ordinary configuration — and the surface degrades to typing the path by hand.
  */
 export interface DialogOpenDirectory {
   /**

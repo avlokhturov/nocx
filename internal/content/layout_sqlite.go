@@ -1369,18 +1369,19 @@ func (s *sqliteContent) SandboxGrantExists(ctx context.Context, paneID string) (
 	if s.closed.Load() {
 		return false, ErrClosed
 	}
-	var granted int
+	// ONE statement, so open-ness and granted-ness are read from the same
+	// snapshot: a pane closed or a grant inserted between two separate
+	// queries could otherwise answer "granted" about a pane that just
+	// closed, or "not granted" about one that was just granted.
+	var open, granted int
 	err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(
-		   SELECT 1 FROM panes p LEFT JOIN sandbox_grants g ON g.pane_id = p.id
-		    WHERE p.id = ? AND p.closed_at IS NULL AND g.pane_id IS NOT NULL
-		 )`, paneID).Scan(&granted)
+		`SELECT
+		   EXISTS(SELECT 1 FROM panes WHERE id = ? AND closed_at IS NULL),
+		   EXISTS(
+		     SELECT 1 FROM panes p LEFT JOIN sandbox_grants g ON g.pane_id = p.id
+		      WHERE p.id = ? AND p.closed_at IS NULL AND g.pane_id IS NOT NULL
+		   )`, paneID, paneID).Scan(&open, &granted)
 	if err != nil {
-		return false, err
-	}
-	var open int
-	if err := s.db.QueryRowContext(ctx,
-		`SELECT EXISTS(SELECT 1 FROM panes WHERE id = ? AND closed_at IS NULL)`, paneID).Scan(&open); err != nil {
 		return false, err
 	}
 	if open == 0 {

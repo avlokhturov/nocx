@@ -139,6 +139,11 @@ async function convert(deps: SandboxConversionDeps, mode: 'toggle' | 'relaunch')
     } else {
       await applySandbox(deps, oldPane, state.workspace)
     }
+  } catch {
+    // A durable-create or transcript-install rejection must surface as a
+    // visible toast, never as an unhandled promise (the `/sandbox` path
+    // fire-and-forgets convert).
+    deps.reportConversionError()
   } finally {
     deps.setInFlight(false)
   }
@@ -179,8 +184,14 @@ async function applySandbox(
     },
     { workspace, paneId: oldPane.wireId },
   )
-  // Null when the dialog was cancelled: no tab, no replacement.
-  await conversion
+  // The replacement is launched by the permissions flow's callback, so its
+  // rejection is not caught by openSandboxedShell. Consume it here and report
+  // it visibly before the `/sandbox` fire-and-forget can observe a rejection.
+  try {
+    await conversion
+  } catch {
+    deps.reportConversionError()
+  }
 }
 
 /** Remove flow: ordinary pane → durable create → transcript install → strip

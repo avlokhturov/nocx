@@ -19,6 +19,7 @@ PKG_CONFIG ?= pkg-config
 # empty and v3's GTK4 default is used.
 HOST_GOOS ?= $(shell $(GO) env GOOS)
 WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf gtk3; fi)
+GOLANGCI_BUILD_TAGS := $(if $(WAILS_PLATFORM_TAGS),--build-tags=$(WAILS_PLATFORM_TAGS))
 
 # v3 dropped the `wails build` wrapper: the project builds with plain go
 # build. Wails v2 used to run the frontend build (wails.json frontend:build);
@@ -270,12 +271,12 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # SCM_RIGHTS descriptor passing, and the probes that decide a refusal class —
 # and a package with a platform split that stays in the portable set has its
 # `!unix` half compiled by nothing at all.
-OS_PKG_DIRS := cmd/e2e-sshd internal/app internal/contentkey \
+OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
                internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
-               internal/pty internal/ssh/mux \
+               internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —
@@ -455,7 +456,7 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
-	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
+	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
 
 test-ci:
 	@echo "=== go test -race ==="
