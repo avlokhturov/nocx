@@ -596,7 +596,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		if err := m.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
 			return "", fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 		}
-		return out, nil
+		return decl.FrameToolResult(out), nil
 	}, nil
 }
 

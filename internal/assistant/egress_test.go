@@ -193,9 +193,10 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 // ── criterion 4: no finding means the result is returned unchanged ────────
 
 // TestMiddleware_EgressNoFindingReturnsByteForByte is acceptance criterion
-// 4's paired end: a tool result with no finding passes the gate unchanged,
-// byte for byte — the gate never re-serializes or rewrites what the executor
-// produced. The reference is the executor's own output, computed directly.
+// 4's paired end: a tool result with no finding passes the egress gate
+// unchanged, byte for byte. The shared model-facing frame is applied only
+// after that gate, so this test compares the executor bytes with the result
+// after the one deliberate framing step.
 func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	path := filepath.Join(dir, "a.txt")
@@ -208,7 +209,8 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 		t.Fatalf("wrappedEndpoint: %v", err)
 	}
 
-	// The reference: the executor's own bytes, untouched by any gate.
+	// The reference is the executor's own bytes, untouched by the egress gate;
+	// the model-facing return adds the registry-derived frame exactly once.
 	decl, ok := mw.registry.Lookup("files.read")
 	if !ok {
 		t.Fatal("files.read not in the registry")
@@ -221,8 +223,9 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	if refErr != nil {
 		t.Fatalf("executor: %v", refErr)
 	}
-	if out != ref {
-		t.Fatalf("the gate changed the result:\n through the gate: %s\n executor alone: %s", out, ref)
+	want := decl.FrameToolResult(ref)
+	if out != want {
+		t.Fatalf("the gate changed the result:\n through the gate: %s\n expected model result: %s", out, want)
 	}
 	if !strings.Contains(out, "the file's contents") {
 		t.Fatalf("result = %s, want the file's contents in the window", out)
