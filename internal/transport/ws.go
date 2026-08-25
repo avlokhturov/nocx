@@ -16,6 +16,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/apibind"
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 
@@ -153,6 +157,32 @@ type WSServer struct {
 	// notes is the notes library service backing the notes.* JSON-RPC
 	// methods. When nil, those methods return -32601.
 	notes *note.Service
+	// The API-testing surface (design §6, §7). Four seams that wire
+	// independently, so each is its own field and each has its own -32601:
+	// apiCollections is the collection folder service backing
+	// api.collections.* and api.request.read/write; apiSender additionally
+	// backs api.request.send; apiBindings is where an import puts a secret
+	// VALUE (design §8.1) and additionally backs api.import.postman.
+	// api.import.curl needs none of them.
+	//
+	// apiVariables is the binding document's READ half, and it is a separate
+	// field from apiBindings because the two are separate contracts in
+	// apibind for a reason that survives here: a holder of Store can write a
+	// value and can only ever get an IDENTIFIER back, while a holder of
+	// ValueResolver can ask what a variable is worth and has no parameter
+	// through which an identifier could arrive. The send path is given only
+	// the second, so no identifier for credential material exists anywhere
+	// on the path from a collection file to a header (design §8).
+	//
+	// apiFetch is the fifth: it acquires an import document by URL, over
+	// the same route table the sender dials through. It wires separately
+	// too — a build without it still imports by path and by document, and
+	// answers the URL entrance by name rather than pretending.
+	apiCollections apicoll.Collections
+	apiSender      apisend.Sender
+	apiBindings    apibind.Store
+	apiVariables   apibind.ValueResolver
+	apiFetch       apifetch.Fetcher
 	// uiState owns what the app remembers without being asked (ADR-0033);
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
 	// -32601 and the shell keeps its declared defaults.
@@ -836,6 +866,65 @@ func WithUIState(store *uistate.Store) WSServerOption {
 	return func(s *WSServer) { s.uiState = store }
 }
 
+// WithAPI attaches the API-testing collection service and the sender,
+// enabling api.collections.*, api.request.read/write and api.request.send.
+//
+// The whole folder surface, not the reading half: api.collections.create
+// mints a folder and api.request.send resolves the environment it is sent
+// under, so both the creator and the environment reader are reached from
+// this one domain — through one handle table and one root re-validation.
+// With no collection service those methods return -32601; with a collection
+// service but no sender, everything but api.request.send answers — a
+// collection you can read and edit but not fire, which is an honest half of
+// the feature rather than a send that quietly does nothing.
+func WithAPI(collections apicoll.Collections, sender apisend.Sender) WSServerOption {
+	return func(s *WSServer) {
+		s.apiCollections = collections
+		s.apiSender = sender
+	}
+}
+
+// WithAPIBindings attaches the binding document — the only thing in the API
+// surface that holds an identifier for stored credential material (design
+// §8.1) — enabling api.import.postman, which writes the secret values a
+// Postman export carries. When nil that method returns -32601: an import
+// that had nowhere to put a token would have to either drop it silently or
+// write it into the collection folder, and the folder being safe to commit
+// BY CONSTRUCTION is the whole security argument.
+func WithAPIBindings(store apibind.Store) WSServerOption {
+	return func(s *WSServer) { s.apiBindings = store }
+}
+
+// WithAPIVariables attaches the binding document's READ half — the one that
+// answers "what is this variable worth" and never yields an identifier.
+// api.request.send needs it because a collection file names a VARIABLE for
+// its auth (design §8) and the send is the moment that name has to become a
+// header.
+//
+// It is a second option rather than a second parameter of WithAPIBindings
+// because the two halves genuinely wire apart: a build that can import but
+// not resolve, or resolve but not import, is a coherent half of the feature
+// and says so through its own -32601 or its own unresolved-variable
+// refusal. When nil, an auth variable resolves to nothing and the send is
+// BLOCKED, naming the variable — never sent with an empty credential, which
+// is the plausible-looking request §6.5 spends a paragraph refusing.
+func WithAPIVariables(values apibind.ValueResolver) WSServerOption {
+	return func(s *WSServer) { s.apiVariables = values }
+}
+
+// WithAPIImportFetcher attaches the seam that acquires an import document by
+// URL (internal/apifetch), enabling api.import.postman's third source.
+//
+// It is a third option rather than a parameter of WithAPI because it wires
+// apart from the sender in exactly the way the other three do: a build with
+// a sender and no fetcher can send requests and cannot fetch an export, and
+// says so. Without it, `url` is refused by name (ErrImportURLUnavailable)
+// while `path` and `document` go on working — absence is the capability, and
+// the renderer draws the entrance from what the backend answers.
+func WithAPIImportFetcher(f apifetch.Fetcher) WSServerOption {
+	return func(s *WSServer) { s.apiFetch = f }
+}
+
 // WithBuildInfo attaches the running binary's description, which is what
 // app.about answers with. The transport is told rather than reading
 // internal/version itself: that package's vars are link-time state, and a
@@ -1067,6 +1156,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
+	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a
@@ -1106,7 +1196,7 @@ func (s *WSServer) operationQueue(name string) control.Submission {
 // gate is constructed; operations take them as separate parameters and
 // compose in the canonical order.
 type domainGates struct {
-	config, vault, content, session, git, filesystem control.Admission
+	config, vault, content, session, git, filesystem, api control.Admission
 }
 
 func (s *WSServer) domainGates() domainGates {
@@ -1117,6 +1207,7 @@ func (s *WSServer) domainGates() domainGates {
 		session:    capability.Gate(capability.GateSession, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		git:        capability.Gate(capability.GateGit, 1, s.domainMaxQueue, s.domainWaitTimeout),
 		filesystem: capability.Gate(capability.GateFilesystem, 1, s.domainMaxQueue, s.domainWaitTimeout),
+		api:        capability.Gate(capability.GateAPI, 1, s.domainMaxQueue, s.domainWaitTimeout),
 	}
 }
 
@@ -1739,7 +1830,22 @@ func paramsBudgetForMethod(method string) int {
 	case "vault.unlockResolved", "connections.passwordResolved":
 		return budgetTiny
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
-		"profiles.importTabby", "profiles.tabbyPreview":
+		"profiles.importTabby", "profiles.tabbyPreview",
+		// api.import.postman carries a Postman export INLINE as `document`
+		// (the route for a backend that is not the person's machine), so
+		// it is a document-carrying method in exactly the sense this tier
+		// names. budgetDefault is 64 KiB because it was sized on an
+		// ORDINARY frame — a pasted key, a form — and an export of a
+		// working API with its saved examples is not that size class;
+		// apiimport bounds the document it parses at 16 MiB, which is the
+		// size an export is expected to reach.
+		//
+		// This tier is not the bound a caller meets. That is
+		// maxAPIImportDocumentRunes (1 MiB, ws_api_handlers.go), which is
+		// what the refusal names and what points at `path` for anything
+		// larger; the budget only has to sit above it so the refusal comes
+		// from the method rather than from the frame.
+		"api.import.postman":
 		return budgetDocument
 	default:
 		return budgetDefault
