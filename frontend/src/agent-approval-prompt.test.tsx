@@ -27,6 +27,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { AgentApprovalPrompt } from './agent-approval-prompt'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
+import { EFFECT_LABEL } from './effect-labels'
 import type { AgentApprove } from './generated/agent.approve'
 
 const POLICY_ASK: AgentApprovalRequested = {
@@ -562,12 +563,12 @@ describe('AgentApprovalPrompt', () => {
     const ui = renderPrompt({ onDecide })
 
     for (const name of [
-      'Allow once',
-      'Allow in this session',
-      'Allow always',
-      'Deny once',
-      'Deny in this session',
-      'Deny always',
+      'Allow once — this proposal only',
+      'Allow in this session — every read and inspect call in this session',
+      'Allow always — every read and inspect call, in every session, from now on',
+      'Deny once — this proposal only',
+      'Deny in this session — every read and inspect call in this session',
+      'Deny always — every read and inspect call, in every session, from now on',
     ]) {
       fireEvent.click(ui.getByRole('button', { name }))
     }
@@ -590,8 +591,16 @@ describe('AgentApprovalPrompt', () => {
       Array.from(g.querySelectorAll('.ui-button')).map((b) => b.textContent),
     )
     expect(names).toEqual([
-      ['Allow once', 'Allow in this session', 'Allow always'],
-      ['Deny once', 'Deny in this session', 'Deny always'],
+      [
+        'Allow once — this proposal only',
+        'Allow in this session — every read and inspect call in this session',
+        'Allow always — every read and inspect call, in every session, from now on',
+      ],
+      [
+        'Deny once — this proposal only',
+        'Deny in this session — every read and inspect call in this session',
+        'Deny always — every read and inspect call, in every session, from now on',
+      ],
     ])
   })
 
@@ -623,13 +632,25 @@ describe('AgentApprovalPrompt', () => {
     const { decisions, onDecide } = recordDecisions()
     const ui = renderPrompt({ ask: EGRESS_ASK, onDecide })
 
-    expect(ui.queryByRole('button', { name: 'Allow always' })).toBeNull()
-    expect(ui.queryByRole('button', { name: 'Allow in this session' })).toBeNull()
-    expect(ui.queryByRole('button', { name: 'Deny always' })).toBeNull()
+    expect(
+      ui.queryByRole('button', {
+        name: 'Allow always — every read and inspect call, in every session, from now on',
+      }),
+    ).toBeNull()
+    expect(
+      ui.queryByRole('button', {
+        name: 'Allow in this session — every read and inspect call in this session',
+      }),
+    ).toBeNull()
+    expect(
+      ui.queryByRole('button', {
+        name: 'Deny always — every read and inspect call, in every session, from now on',
+      }),
+    ).toBeNull()
     expect(ui.container.querySelectorAll('.ui-button')).toHaveLength(2)
 
-    fireEvent.click(ui.getByRole('button', { name: 'Allow' }))
-    fireEvent.click(ui.getByRole('button', { name: 'Deny' }))
+    fireEvent.click(ui.getByRole('button', { name: 'Allow once — this proposal only' }))
+    fireEvent.click(ui.getByRole('button', { name: 'Deny once — this proposal only' }))
     expect(decisions).toEqual([
       [true, 'once'],
       [false, 'once'],
@@ -649,5 +670,29 @@ describe('AgentApprovalPrompt', () => {
     const buttons = Array.from(container.querySelectorAll('.ui-button'))
     expect(buttons).toHaveLength(6)
     for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('states each answer coverage by the control name, using the effect vocabulary', () => {
+    const effect = 'mutate-destructive'
+    const { container, getByRole, queryByRole } = renderPrompt({
+      ask: { ...POLICY_ASK, effect },
+    })
+    const coverage = [
+      `Allow once — this proposal only`,
+      `Allow in this session — every ${EFFECT_LABEL[effect]} call in this session`,
+      `Allow always — every ${EFFECT_LABEL[effect]} call, in every session, from now on`,
+      `Deny once — this proposal only`,
+      `Deny in this session — every ${EFFECT_LABEL[effect]} call in this session`,
+      `Deny always — every ${EFFECT_LABEL[effect]} call, in every session, from now on`,
+    ]
+    for (const name of coverage) expect(getByRole('button', { name })).toBeTruthy()
+
+    const egress = renderPrompt({ ask: { ...EGRESS_ASK, effect } })
+    expect(egress.queryByRole('button', { name: /every .* call in this session/ })).toBeNull()
+    expect(
+      egress.queryByRole('button', { name: /every .* call, in every session, from now on/ }),
+    ).toBeNull()
+    expect(queryByRole('button', { name: 'Allow once' })).toBeNull()
+    expect(container.textContent).toContain(EFFECT_LABEL[effect])
   })
 })
