@@ -2,6 +2,7 @@
 import { readFileSync, readdirSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { grantBlockFromElement } from './ask-entry'
 import { GrantController, type GrantBlock } from './grant'
 
 const SRC_ROOT = resolve(import.meta.dirname ?? new URL('.', import.meta.url).pathname)
@@ -74,6 +75,40 @@ describe('GrantController', () => {
     expect(one.blockEl.dataset.granted).toBe('true')
     controller.destroy()
   })
+  it('opens an ask mark with the question as its row label', () => {
+    const controller = new GrantController()
+    const answer = block('answer-1', 'what does this do?')
+    answer.blockEl.dataset.blockKind = 'ask'
+    answer.blockEl.dataset.recordedCommand = ''
+    const marked = grantBlockFromElement(answer.blockEl)
+    expect(marked?.command).toBe('what does this do?')
+
+    controller.setBlocks(marked ? [marked] : [])
+    controller.mount(document.body)
+    controller.chip.click()
+
+    const row = document.querySelector<HTMLElement>('.ui-floating-panel__row')
+    expect(row?.textContent).toContain('what does this do?')
+    expect(row?.textContent?.trim()).not.toBe('')
+    controller.destroy()
+  })
+
+  it('opens an empty command mark with an explicit row label', () => {
+    const controller = new GrantController()
+    const empty = block('empty-1', '')
+    empty.blockEl.dataset.recordedCommand = ''
+    const marked = grantBlockFromElement(empty.blockEl)
+
+    controller.setBlocks(marked ? [marked] : [])
+    controller.mount(document.body)
+    controller.chip.click()
+
+    expect(document.querySelector<HTMLElement>('.ui-floating-panel__row')?.textContent).toContain(
+      '(empty command)',
+    )
+    controller.destroy()
+  })
+
 
   it('opens a block list, dismisses one row, and dismisses all', () => {
     const onChange = vi.fn()
@@ -93,6 +128,8 @@ describe('GrantController', () => {
     expect(dismiss).not.toBeNull()
     dismiss?.click()
     expect(onChange).toHaveBeenCalledWith([second])
+    expect(first.blockEl.dataset.granted).toBeUndefined()
+    expect(second.blockEl.dataset.granted).toBe('true')
     expect(panel?.textContent).not.toContain('git status')
     expect(panel?.textContent).toContain('npm test')
 

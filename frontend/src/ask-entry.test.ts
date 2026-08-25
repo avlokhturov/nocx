@@ -28,6 +28,20 @@ describe('whole-block grants', () => {
       state: 'running',
     })
   })
+  it('uses the ask question when an empty recorded command is present', () => {
+    const { block } = blockOf('answer-1', 'what does this do?')
+    block.dataset.blockKind = 'ask'
+    block.dataset.recordedCommand = ''
+
+    expect(grantBlockFromElement(block)?.command).toBe('what does this do?')
+  })
+
+  it('gives an empty command an explicit label', () => {
+    const { block } = blockOf('empty-1', '')
+    block.dataset.recordedCommand = ''
+
+    expect(grantBlockFromElement(block)?.command).toBe('(empty command)')
+  })
   it('does not treat a renderer-local block counter as a grant identity', () => {
     const { block } = blockOf('entry-ignored', 'git status')
     delete block.dataset.entryId
