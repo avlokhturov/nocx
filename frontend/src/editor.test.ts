@@ -1103,7 +1103,7 @@ describe('the grant chip (nocx-wcswn)', () => {
     const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
     expect(grant.classList.contains('nocx-chip')).toBe(true)
     expect(grant.dataset.state).toBe('default')
-    expect(grant.textContent).toContain('отмечено для вопроса')
+    expect(grant.textContent).toContain('marked for the question')
     expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
 
     ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })

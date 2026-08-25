@@ -26,7 +26,7 @@ describe('GrantController', () => {
 
     expect(controller.chip.classList.contains('nocx-chip')).toBe(true)
     expect(controller.chip.dataset.state).toBe('default')
-    expect(controller.chip.textContent).toContain('отмечено для вопроса')
+    expect(controller.chip.textContent).toContain('marked for the question')
     expect(controller.chip.textContent).toContain('0')
 
     controller.setBlocks([one])

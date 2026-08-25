@@ -33,7 +33,7 @@ export class GrantController {
     this.panel = new FloatingPanel({
       variant: 'grant',
       role: 'listbox',
-      ariaLabel: 'отмечено для вопроса',
+      ariaLabel: 'marked for the question',
       callbacks: {
         onPick: (index) => this.reveal(index),
       },
@@ -75,9 +75,9 @@ export class GrantController {
   private updateChip(): void {
     const count = this.blocks.length
     this.chip.dataset.state = count === 0 ? 'default' : 'chosen'
-    this.chip.textContent = `отмечено для вопроса · ${count}`
-    this.chip.title = 'Открыть отмеченные блоки'
-    this.chip.setAttribute('aria-label', `отмечено для вопроса · ${count}`)
+    this.chip.textContent = `marked for the question · ${count}`
+    this.chip.title = 'Open the marked blocks'
+    this.chip.setAttribute('aria-label', `marked for the question · ${count}`)
   }
 
   private renderPanel(): void {
@@ -93,7 +93,7 @@ export class GrantController {
     dismissAll.type = 'button'
     dismissAll.className = 'ui-context-menu__item'
     dismissAll.dataset.action = 'dismiss-all-grants'
-    dismissAll.textContent = 'снять всё'
+    dismissAll.textContent = 'Dismiss all'
     dismissAll.addEventListener('click', (event) => {
       event.stopPropagation()
       this.blocks = []
@@ -112,7 +112,7 @@ export class GrantController {
     button.className = 'ui-context-menu__item'
     button.dataset.action = 'dismiss-grant'
     button.dataset.itemId = itemId
-    button.setAttribute('aria-label', 'снять отметку')
+    button.setAttribute('aria-label', 'Dismiss this mark')
     button.textContent = '×'
     button.addEventListener('mousedown', (event) => event.stopPropagation())
     button.addEventListener('click', (event) => {
