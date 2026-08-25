@@ -258,6 +258,7 @@ func TestLifecycleSubmitAttempt_StoreUnavailableStillRunsCommand(t *testing.T) {
 		t.Fatalf("state after store degrade = %q, want running", state.Lifecycle)
 	}
 }
+
 func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *testing.T) {
 	client, err := assistant.NewClient(nil)
 	if err != nil {
@@ -527,6 +528,7 @@ func (p *lifecycleBlockReadProvider) failure() error {
 	}
 	return fmt.Errorf("fake model assertions: %s", strings.Join(p.errs, "; "))
 }
+
 func lifecycleBlockReadToolResult(body string) string {
 	var req struct {
 		Messages []struct {
