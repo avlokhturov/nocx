@@ -1,12 +1,14 @@
 package transport
 
-// agent.captureFrame and agent.ask — the ask transaction (nocx-f4s5, design
-// §5, §7). The renderer ingests the frame FIRST (agent.captureFrame returns
-// a backend-minted frame id); agent.ask references it and returns a
-// backend-minted run id, with the frame reference, the question and a
-// PENDING run recorded in ONE ledger transaction before the model would be
-// called. The run reaches state `prepared` and stops — the model half
-// (nocx-edio) joins in nocx-x8s2.2.
+// agent.ask carries the person's explicit terminal-item grants
+// (nocx-p4f7r). The backend records the question and pending run, then tells
+// the model each granted ledger item by id, command and running/exited state.
+// The model uses session.read to fetch item bodies; this path never inlines
+// terminal output.
+//
+// agent.captureFrame remains a standalone renderer-frame ingestion endpoint
+// for the frame capture contract and read-screen frame vocabulary. It is not
+// part of agent.ask: asks no longer mint or reference frames.
 //
 // This domain validates params and bounds sizes (design §7): frame content,
 // region bounds, capture identity and run identity all arrive as params,
@@ -19,6 +21,7 @@ package transport
 // is the check, and rejects what it cannot parse.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -60,9 +63,10 @@ const (
 	maxFrameChars = 5_000_000
 	// maxQuestionRunes bounds the question text.
 	maxQuestionRunes = 8_000
-	// maxReferences bounds the number of frame references one ask may
-	// carry.
-	maxReferences = 32
+	// maxAttachedContent bounds the number of item grants one ask may carry.
+	maxAttachedContent = 32
+	// maxAttachedCommandRunes bounds the descriptive command carried with a grant.
+	maxAttachedCommandRunes = 8_000
 	// maxIDRunes bounds renderer-supplied ids (captureId, askId, frameId).
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
@@ -137,13 +141,18 @@ type frameRangeWire struct {
 type captureFrameResponse struct {
 	FrameID string `json:"frameId"`
 }
-
 type agentAskParams struct {
-	AskID      string         `json:"askId"`
-	SessionID  string         `json:"sessionId"`
-	Question   string         `json:"question"`
-	References []agentRefWire `json:"references"`
-	Cwd        string         `json:"cwd"`
+	AskID           string          `json:"askId"`
+	SessionID       string          `json:"sessionId"`
+	Question        string          `json:"question"`
+	AttachedContent json.RawMessage `json:"attachedContent"`
+	Cwd             string          `json:"cwd"`
+}
+
+type agentAttachedContentWire struct {
+	ItemID  string `json:"itemId"`
+	Command string `json:"command"`
+	State   string `json:"state"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -156,18 +165,6 @@ type agentCancelResponse struct {
 	RunID     int64  `json:"runId"`
 	State     string `json:"state"`
 	Cancelled bool   `json:"cancelled"`
-}
-
-type agentRefWire struct {
-	FrameID string          `json:"frameId"`
-	Region  frameRegionWire `json:"region"`
-}
-
-type frameRegionWire struct {
-	RowStart int  `json:"rowStart"`
-	RowEnd   int  `json:"rowEnd"`
-	ColStart *int `json:"colStart"`
-	ColEnd   *int `json:"colEnd"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -415,13 +412,14 @@ type agentApproveResponse struct {
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-// agentHandlers answers agent.captureFrame and agent.ask. It holds the
-// AgentOperation (nil → the ledger is not wired), the connection's
-// connState (session ownership and the session facts the environment is
-// derived from), the connection's client identity (the idempotency binding
-// of capture/ask ids — per connection, so a reconnect mints a new one and a
-// retried capture after a reconnect orphans a duplicate frame, which the
-// retention sweep exists to reap) and the Responder; never the *WSServer.
+// agentHandlers answers the standalone agent.captureFrame endpoint and
+// agent.ask. It holds the AgentOperation (nil → the ledger is not wired), the
+// connection's connState (session ownership and the session facts the
+// environment is derived from), the connection's client identity (the
+// idempotency binding of capture/ask ids — per connection, so a reconnect
+// mints a new one and a retried capture after a reconnect orphans a duplicate
+// frame, which the retention sweep exists to reap) and the Responder; never
+// the *WSServer.
 type agentHandlers struct {
 	op capability.AgentOperation // nil → content store not wired
 	// configOp resolves the endpoint the run uses (the ONE config operation,
@@ -533,8 +531,14 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment, personal string) assistant.SystemPromptFacts {
-	f := assistant.SystemPromptFacts{SessionID: sessionID, Cwd: cwd, Env: env, PersonalInstructions: personal}
+func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+	f := assistant.SystemPromptFacts{
+		SessionID:            sessionID,
+		Cwd:                  cwd,
+		Env:                  env,
+		AttachedContent:      attached,
+		PersonalInstructions: personal,
+	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
 	}
@@ -610,14 +614,33 @@ func (h agentHandlers) handleCaptureFrame(ctx context.Context, req jsonrpcReques
 // line.
 var errNoEndpoint = errors.New("no endpoint configured")
 
+func decodeAgentAskParams(raw json.RawMessage) (agentAskParams, string) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		return agentAskParams{}, "params must be an object"
+	}
+	for name := range fields {
+		switch name {
+		case "askId", "sessionId", "question", "attachedContent", "cwd":
+		default:
+			return agentAskParams{}, fmt.Sprintf("unsupported field %q; use attachedContent", name)
+		}
+	}
+	var p agentAskParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return agentAskParams{}, "params must be an object"
+	}
+	return p, ""
+}
+
 func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
 		return
 	}
-	var p agentAskParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
+	p, msg := decodeAgentAskParams(req.Params)
+	if msg != "" {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
 	}
 	sid := session.ID(p.SessionID)
@@ -625,7 +648,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
 		return
 	}
-	in, msg := validateAgentAsk(p)
+	in, attached, msg := validateAgentAsk(p)
 	if msg != "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
@@ -748,17 +771,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	runCtx, runCancel := context.WithCancel(ctx)
 	runControl := &agentRunControl{cancelFn: runCancel}
 	rc := askRunContext{
-		secret:     secret,
-		headers:    headers,
-		runID:      askRes.RunID,
-		control:    runControl,
-		entryID:    askRes.EntryID,
-		paneID:     in.PaneID,
-		question:   in.Question,
-		references: in.References,
-		endpoint:   endpoint,
-		model:      facts.Model,
-		grant:      runGrant,
+		secret:   secret,
+		headers:  headers,
+		runID:    askRes.RunID,
+		control:  runControl,
+		entryID:  askRes.EntryID,
+		paneID:   in.PaneID,
+		question: in.Question,
+		endpoint: endpoint,
+		model:    facts.Model,
+		grant:    runGrant,
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -773,7 +795,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// carried and the ledger recorded with it, the pane's environment
 		// as environmentForSession already derived it, and the person's
 		// own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, h.personalParagraph()),
+		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -887,11 +909,10 @@ type askRunContext struct {
 	// so the prose it writes belongs to the block the question interrupted,
 	// not to a second one opened beside it. Written by suspendForApproval into
 	// the pendingRuns copy; never wire-facing as a struct.
-	prose      content.ProseBlock
-	question   string
-	references []content.AgentReference
-	endpoint   profile.Endpoint
-	model      string
+	prose    content.ProseBlock
+	question string
+	endpoint profile.Endpoint
+	model    string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
@@ -987,16 +1008,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// terminally (nocx-avogl.1). It is assembled here, from the facts
 	// pinned when the ask arrived, and never stored: the same run resumed
 	// after an approval rebuilds the same text from the same facts.
-	//
-	// The one thing in it that is not standing is the claim that content
-	// follows (design §6.2: frame content is data, not instructions). A
-	// zero-reference ask (nocx-4wtlh) is a GENERAL question — nothing was
-	// pointed at, so claiming attached screen content would send the model
-	// looking for something that is not there. It stays derived from the
-	// reference list, never a constant: no references, no claim.
 	promptFacts := rc.promptFacts
-	promptFacts.AttachedContent = len(rc.references) > 0
-	msgs := make([]assistant.Message, 0, 4+len(rc.references))
+	msgs := make([]assistant.Message, 0, 4)
+	//
 	msgs = append(msgs, assistant.Message{
 		Role:    "system",
 		Content: assistant.SystemPrompt(promptFacts),
@@ -1013,14 +1027,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// ledger (PriorTurn), and what happens here is only the mapping from a
 	// stored turn to two Messages.
 	//
-	// A FAILED READ IS NOT FATAL, and it is the one place in this assembly
-	// that is so. A referenced frame that cannot be read terminalizes the run
-	// below, because the person pointed at it and an answer about something
-	// else is worse than none. Nobody pointed at the previous turn: it is
-	// context the backend added, so losing it degrades the answer instead of
-	// invalidating the question. It is logged rather than swallowed —
-	// a conversation that silently stopped being multi-turn is the failure
-	// that would take longest to notice.
+	// A FAILED READ of the previous turn is not fatal: it is context the
+	// backend added, so losing it degrades the answer instead of invalidating
+	// the question. It is logged rather than swallowed — a conversation that
+	// silently stopped being multi-turn is the failure that would take
+	// longest to notice.
 	if prior, priorErr := h.priorTurn(ctx, rc); priorErr != nil {
 		h.log.Warn("the previous turn could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
@@ -1031,29 +1042,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
-	for _, ref := range rc.references {
-		var text string
-		frameErr := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-			var e error
-			text, e = svc.FrameText(ctx, ref.FrameID)
-			return e
-		})
-		if frameErr != nil {
-			h.terminalize(ctx, rc, dropped, content.RunFailed, content.TermFailed,
-				"a referenced frame could not be read", r)
-			return
-		}
-		// The reference is a REGION: the model gets the pointed-at rows and
-		// no others (design §2.2 — a frozen block frame is the whole block,
-		// and the chip's rows are what the question carries). The durable
-		// frame text is rows joined by '\n' (frameText), and a frozen row
-		// never contains a newline — it was split at mint time — so the
-		// split is exact. A live frame's region is row-scoped the same way;
-		// column sub-ranges are not applied to text.
-		msgs = append(msgs, assistant.Message{
-			Role: "user", Content: "Referenced frame:\n" + sliceFrameText(text, ref.Region),
-		})
-	}
 
 	// The deltas continue where the last drive of this run stopped: a
 	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
@@ -2084,54 +2072,58 @@ func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identit
 }
 
 // validateAgentAsk maps the wire ask onto the ledger's AgentAsk.
-func validateAgentAsk(p agentAskParams) (content.AgentAsk, string) {
+func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedContentItem, string) {
+	empty := func(msg string) (content.AgentAsk, []assistant.AttachedContentItem, string) {
+		return content.AgentAsk{}, nil, msg
+	}
 	if strings.TrimSpace(p.AskID) == "" || utf8.RuneCountInString(p.AskID) > maxIDRunes {
-		return content.AgentAsk{}, "askId is required and bounded"
+		return empty("askId is required and bounded")
 	}
 	if p.SessionID == "" {
-		return content.AgentAsk{}, "sessionId is required"
+		return empty("sessionId is required")
 	}
 	if strings.TrimSpace(p.Question) == "" || utf8.RuneCountInString(p.Question) > maxQuestionRunes {
-		return content.AgentAsk{}, "question is required and bounded"
+		return empty("question is required and bounded")
 	}
 	if strings.TrimSpace(p.Cwd) == "" || utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
-		return content.AgentAsk{}, "cwd is required and bounded"
+		return empty("cwd is required and bounded")
 	}
-	// Zero references is a GENERAL question (nocx-4wtlh): ⌘Enter is the
-	// whole gesture for a question that is not about a block — the ask
-	// transaction and the stream are the same with an empty reference list.
-	if len(p.References) > maxReferences {
-		return content.AgentAsk{}, "references must carry at most " + strconv.Itoa(maxReferences) + " frame regions"
+	raw := bytes.TrimSpace(p.AttachedContent)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return empty("attachedContent is required and must be an array")
+	}
+	var grants []agentAttachedContentWire
+	if err := json.Unmarshal(raw, &grants); err != nil || grants == nil {
+		return empty("attachedContent must be an array of grant objects")
+	}
+	if len(grants) > maxAttachedContent {
+		return empty("attachedContent must carry at most " + strconv.Itoa(maxAttachedContent) + " items")
+	}
+	attached := make([]assistant.AttachedContentItem, 0, len(grants))
+	for i, grant := range grants {
+		if strings.TrimSpace(grant.ItemID) == "" || utf8.RuneCountInString(grant.ItemID) > maxIDRunes {
+			return empty(fmt.Sprintf("attachedContent[%d].itemId is required and bounded", i))
+		}
+		if strings.TrimSpace(grant.Command) == "" || utf8.RuneCountInString(grant.Command) > maxAttachedCommandRunes {
+			return empty(fmt.Sprintf("attachedContent[%d].command is required and bounded", i))
+		}
+		switch grant.State {
+		case "running", "exited":
+		default:
+			return empty(fmt.Sprintf("attachedContent[%d].state must be running or exited", i))
+		}
+		attached = append(attached, assistant.AttachedContentItem{
+			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
+		})
 	}
 	in := content.AgentAsk{
 		ID:         p.AskID,
 		SessionID:  new(p.SessionID),
 		Cwd:        p.Cwd,
 		Question:   p.Question,
-		References: make([]content.AgentReference, 0, len(p.References)),
+		References: []content.AgentReference{},
 	}
-	for _, ref := range p.References {
-		if strings.TrimSpace(ref.FrameID) == "" || utf8.RuneCountInString(ref.FrameID) > maxIDRunes {
-			return content.AgentAsk{}, "a frameId is required and bounded"
-		}
-		r := ref.Region
-		if r.RowStart < 0 || r.RowEnd <= r.RowStart || r.RowEnd > maxFrameRows {
-			return content.AgentAsk{}, "a region's rows are out of bounds"
-		}
-		if (r.ColStart == nil) != (r.ColEnd == nil) {
-			return content.AgentAsk{}, "a region's columns must come as a pair"
-		}
-		if r.ColStart != nil {
-			if *r.ColStart < 0 || *r.ColEnd <= *r.ColStart || *r.ColEnd > maxFrameCols {
-				return content.AgentAsk{}, "a region's columns are out of bounds"
-			}
-		}
-		in.References = append(in.References, content.AgentReference{
-			FrameID: ref.FrameID,
-			Region:  content.FrameRegion{RowStart: r.RowStart, RowEnd: r.RowEnd, ColStart: r.ColStart, ColEnd: r.ColEnd},
-		})
-	}
-	return in, ""
+	return in, attached, ""
 }
 
 // priorTurn reads the turn before this one in this run's pane — the

@@ -8,8 +8,8 @@ package assistant
 //     the test runs on;
 //   - a model told this prompt can name the session its tools require. The
 //     id is read back OUT OF THE PROMPT, the way a model reads it, and the
-//     same string is then put through the real policy pipeline: it passes
-//     the scope check that terminally refuses an invented one.
+//     same string is then put through the real policy pipeline: it passes the
+//     scope check that terminally refuses an invented one.
 
 import (
 	"encoding/json"
@@ -75,7 +75,7 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 		t.Fatalf("renderer was asked %+v, want exactly one read of %s", calls, sid)
 	}
 	if !strings.Contains(out, "hello") {
-		t.Fatalf("readScreen result = %q, want the screen text", out)
+		t.Fatalf("session.read result = %q, want the screen text", out)
 	}
 
 	// run: the same rule on the tool that changes something.
@@ -145,9 +145,9 @@ func TestSystemPrompt_IsAFunctionOfItsFacts(t *testing.T) {
 			facts: SystemPromptFacts{
 				SessionID: "s-4", Cwd: "/repo",
 				Env: content.Environment{Kind: content.EnvLocal}, OS: "linux",
-				AttachedContent: true,
+				AttachedContent: []AttachedContentItem{{ItemID: "item-1", Command: "git status", State: "exited"}},
 			},
-			want:   []string{"s-4", "attached"},
+			want:   []string{"s-4", "Attached"},
 			unwant: []string{},
 		},
 	}
@@ -172,6 +172,38 @@ func TestSystemPrompt_IsAFunctionOfItsFacts(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_AttachedContentNamesEveryGrantedItem keeps the model's
+// read path explicit: ids are the exact `session.read` item ids, and the
+// metadata tells it what it is about to read without copying any output.
+func TestSystemPrompt_AttachedContentNamesEveryGrantedItem(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		SessionID: "session-1",
+		Cwd:       "/repo",
+		Env:       content.Environment{Kind: content.EnvLocal},
+		OS:        "linux",
+		AttachedContent: []AttachedContentItem{
+			{ItemID: "attempt-1", Command: "git status", State: "running"},
+			{ItemID: "attempt-2", Command: "npm test", State: "exited"},
+		},
+	})
+	for _, want := range []string{
+		"session.read",
+		"id: attempt-1",
+		"command: git status",
+		"state: running",
+		"id: attempt-2",
+		"command: npm test",
+		"state: exited",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "Referenced frame:") || strings.Contains(got, "output text") {
+		t.Fatalf("attached prompt inlined or described frame text:\n%s", got)
+	}
+}
+
 // TestSystemPrompt_AttachedContentSentenceIsConditional keeps the bought
 // rule (nocx-4wtlh): a question with nothing attached must not claim
 // content was attached — the sentence is derived from the facts, never a
@@ -182,13 +214,13 @@ func TestSystemPrompt_AttachedContentSentenceIsConditional(t *testing.T) {
 		Env: content.Environment{Kind: content.EnvLocal}, OS: "linux",
 	}
 	without := SystemPrompt(base)
-	base.AttachedContent = true
+	base.AttachedContent = []AttachedContentItem{{ItemID: "item-1", Command: "git status", State: "exited"}}
 	with := SystemPrompt(base)
 
 	if strings.Contains(without, "attached") {
 		t.Errorf("a zero-reference ask claims attached content:\n%s", without)
 	}
-	if !strings.Contains(with, "attached") {
+	if !strings.Contains(with, "Attached terminal content") {
 		t.Errorf("an ask with references never says the content is attached data:\n%s", with)
 	}
 	if len(with) <= len(without) {
