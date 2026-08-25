@@ -23,12 +23,12 @@
  *               exit status and agent badge (the block IS the account of
  *               the call)
  *     text    — a sentence written from that output
- *     tool    — readScreen, a call that opens NO block: its own child naming
- *               the tool and the argument it ran on
+ *     tool    — session.read, a call that opens NO block: its own child
+ *               naming the tool and the arguments it ran on
  *     text    — the final sentence
  *
  * THE SEAM IS THREE MODEL ROUNDS. The engine re-invokes the model after `run`
- * executes and again after `readScreen` executes, consuming one fake script
+ * executes and again after `session.read` executes, consuming one fake script
  * per round — a real tool-calling run is exactly that interleave
  * (agent-answer-stream.spec.ts and agent-restore.spec.ts each drive one
  * round; this is the first spec to drive TWO in one turn).
@@ -73,7 +73,7 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-/* `run` is mutate-destructive and readScreen observe (registry.go). */
+/* `run` is mutate-destructive and session.read observe (registry.go). */
 const DESTRUCTIVE_ROW = '.st-policy__row[data-effect="mutate-destructive"]'
 const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 const APPROVAL_TITLE = 'This action needs your approval'
@@ -86,9 +86,10 @@ const ENDPOINT_NAME = `E2E Turn ${nonce}`
 const RUN_CMD = `echo ran-${nonce}`
 /** What the command prints — the marker the block's real output must show. */
 const RUN_MARKER = `ran-${nonce}`
-/** The region readScreen is asked for — its argument, so the tool child's
- *  header asserts more than a bare tool name. */
-const REGION = { start: 0, end: 24 }
+/** The window session.read is asked for — its arguments, so the tool child's
+ *  header asserts more than a bare tool name. `start`/`count` is the tool's
+ *  own vocabulary (contracts/tools/session.read.schema.json). */
+const READ_WINDOW = { start: 0, count: 24 }
 const PROSE_BEFORE = `Let me check the disk, ${nonce}.`
 const PROSE_MIDDLE = `The command printed its marker.`
 const PROSE_AFTER = `The screen reads clear.`
@@ -96,7 +97,7 @@ const PROSE_AFTER = `The screen reads clear.`
  *  scoped to it, because the confirming turn below also lives in the pane. */
 const QUESTION = `What is on the disk, ${nonce}?`
 /** A one-turn dialogue asked FIRST purely to learn the session id the
- *  product's own mechanics spell (AD-7): the run/readScreen scripts must name
+ *  product's own mechanics spell (AD-7): the run/session.read scripts must name
  *  it exactly, and a made-up id is refused for identity before the call can
  *  run. Scripted before the real turn, so the id is a fact already when the
  *  real turn's tools are proposed. */
@@ -300,7 +301,7 @@ async function childTops(page: Page, question: string): Promise<number[]> {
 }
 
 /** The assistant is usable end to end: endpoint, default model, and both
- *  rows Allowed so the proposed run and readScreen execute rather than ask. */
+ *  rows Allowed so the proposed run and session.read execute rather than ask. */
 async function configureAssistant(page: Page): Promise<void> {
   await openSettings(page, SETTINGS_AI_NAV)
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
@@ -357,7 +358,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     fake.setScript({
       chunks: [PROSE_MIDDLE],
       toolCalls: [
-        { name: 'readScreen', id: 'call_read', arguments: { sessionId, region: REGION } },
+        { name: 'session.read', id: 'call_read', arguments: { sessionId, ...READ_WINDOW } },
       ],
     })
     fake.setScript({ chunks: [PROSE_AFTER] })
@@ -372,7 +373,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     expect(liveRows[0]).toBe(`text:${PROSE_BEFORE}`)
     expect(liveRows[1]).toBe(`command:${RUN_CMD}`)
     expect(liveRows[2]).toBe(`text:${PROSE_MIDDLE}`)
-    expect(liveRows[3]).toMatch(/^tool:readScreen/)
+    expect(liveRows[3]).toMatch(/^tool:session\.read/)
     expect(liveRows[4]).toBe(`text:${PROSE_AFTER}`)
 
     // ── 2. The `run` child is a REAL command block: its own header, its
@@ -390,12 +391,15 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     //       it ran; the read-only tool child says the tool and its argument.
     //       (They are different tools; ADR-0040's same-tool-two-args is the
     //       unit suite's acceptance 2.) The argument that makes THIS call
-    //       distinguishable is `region`, and its header must show it.
+    //       distinguishable is the WINDOW it asked for, and its header must
+    //       show it.
     const toolBlock = children.nth(3)
     await expect(toolBlock).toHaveAttribute('data-block-kind', 'tool')
-    await expect(toolBlock.locator('.cmd-header-text')).toContainText('readScreen')
+    await expect(toolBlock).toHaveAttribute('data-tool', 'session.read')
+    await expect(toolBlock.locator('.cmd-header-text')).toContainText('session.read')
     const toolHeader = await toolBlock.locator('.cmd-header-text').innerText()
-    expect(toolHeader).toContain('region')
+    expect(toolHeader).toContain(`start=${READ_WINDOW.start}`)
+    expect(toolHeader).toContain(`count=${READ_WINDOW.count}`)
     // And it is NOT a command block pretending: no output, no exit chip.
     await expect(toolBlock.locator('.cmd-output')).toHaveCount(0)
 
@@ -441,7 +445,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
       { kind: 'action', intent: 'run' },
       { kind: 'shell' },
       { kind: 'text' },
-      { kind: 'action', intent: 'readScreen' },
+      { kind: 'action', intent: 'session.read' },
       { kind: 'text' },
     ])
 
@@ -458,15 +462,15 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     //      The TOOL child is normalized: its live header names the session by
     //      the pane's display title, and after a restart that session is
     //      gone (D5), so the renderer drops the unnameable id — the call's
-    //      OTHER argument, `region`, is what survives, and the row must still
-    //      read as the tool at its seat. Every other child must match
+    //      OTHER arguments, the window, are what survive, and the row must
+    //      still read as the tool at its seat. Every other child must match
     //      byte-for-byte.
     const restoredRows = await turnRows(page, QUESTION)
     expect(restoredRows[0]).toBe(liveRows[0])
     expect(restoredRows[1]).toBe(liveRows[1])
     expect(restoredRows[2]).toBe(liveRows[2])
-    expect(restoredRows[3]).toMatch(/^tool:readScreen/)
-    expect(restoredRows[3]).toContain('region')
+    expect(restoredRows[3]).toMatch(/^tool:session\.read/)
+    expect(restoredRows[3]).toContain(`count=${READ_WINDOW.count}`)
     expect(restoredRows[4]).toBe(liveRows[4])
     const restoredTops = await childTops(page, QUESTION)
     expect(restoredTops).toHaveLength(5)

@@ -6,7 +6,7 @@
  * nothing else — so no e2e had ever driven a tool call and the approval
  * prompt had no end-to-end coverage at all (`grep -rn "approv" e2e/*.ts`
  * answered nothing). This spec is the check that the new facility is real:
- * a scripted `readScreen` proposal, made by the fake model, reaching the
+ * a scripted `session.read` proposal, made by the fake model, reaching the
  * policy gate and raising the question a person answers.
  *
  * The seam, named where each half is decided:
@@ -20,13 +20,13 @@
  *   streamToolCallChunk), because eino's openai adapter is the single
  *   consumer of all three and a drift would be a second protocol variant
  *   with a delay fuse.
- * - The TOOL. `readScreen`, declared in `internal/agenttools/registry.go`
+ * - The TOOL. `session.read`, declared in `internal/agenttools/registry.go`
  *   with `Effect: observe`, `Resources: [session]` and
  *   `ResourceArg: "sessionId"`.
  * - The GRANT. `WSServer.runGrantFor` mints one grant per run from the
  *   global policy (`internal/app/app.go` wires the store), with the run's
  *   OWN session as the base scope of every row. An unset policy IS a policy
- *   — the zero matrix, which ASKS — so a proposed `readScreen` on the run's
+ *   — the zero matrix, which ASKS — so a proposed `session.read` on the run's
  *   own session suspends the run and the backend sends
  *   `agent.approvalRequested` (`internal/transport/ws_agent.go`
  *   suspendForApproval), which `main.tsx` renders as AgentApprovalPrompt.
@@ -150,7 +150,9 @@ async function askFromPrompt(page: Page, question: string): Promise<void> {
 test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
-  test('a scripted readScreen proposal suspends the run and asks the person', async ({ page }) => {
+  test('a scripted session.read proposal suspends the run and asks the person', async ({
+    page,
+  }) => {
     const asks = recordAsks(page)
     await openApp(page)
 
@@ -196,24 +198,24 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     const sessionId = (JSON.parse(asks[0]) as { params: { sessionId: string } }).params.sessionId
     expect(sessionId).not.toBe('')
 
-    // ── Ask two: the model PROPOSES readScreen on that session. The
+    // ── Ask two: the model PROPOSES session.read on that session. The
     // default policy asks for every effect, so the gate suspends the run
     // and the question reaches the person.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'readScreen', arguments: { sessionId } }],
+      toolCalls: [{ name: 'session.read', arguments: { sessionId } }],
     })
     await askFromPrompt(page, 'Read the screen and tell me what is there.')
 
     // The request that carried the proposal was answered, and the tool was
-    // genuinely OFFERED to the model — the grant declares readScreen
+    // genuinely OFFERED to the model — the grant declares session.read
     // because its session scope is the run's own session.
     const proposal = await fake.waitForRequests(before + 2)
-    expect(proposal[before + 1].body).toContain('readScreen')
+    expect(proposal[before + 1].body).toContain('session.read')
 
     // THE POINT: the prompt is on screen and it names the tool.
     const prompt = page.getByRole('dialog', { name: APPROVAL_TITLE })
     await expect(prompt).toBeVisible({ timeout: 20_000 })
-    await expect(prompt).toContainText('readScreen')
+    await expect(prompt).toContainText('session.read')
   })
 })

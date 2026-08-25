@@ -3,12 +3,12 @@
  * (nocx-shxv0, nocx-bshm2).
  *
  * WHAT THIS FILE IS FOR. On 2026-08-22 the owner asked the assistant "what
- * command did I run?". It called readScreen, got an empty screen, ran a
- * command through the run tool and answered from its output. On screen: the
- * readScreen call left NO TRACE AT ALL; the run tool's block sat BELOW the
- * finished answer written from it, so the flow read "answered first, ran the
- * command afterwards"; and the only sign a tool had run was a raw JSON blob
- * rendered inside the answer as though the assistant had spoken it.
+ * command did I run?". It read the screen, got an empty one, ran a command
+ * through the run tool and answered from its output. On screen: the
+ * screen-reading call left NO TRACE AT ALL; the run tool's block sat BELOW
+ * the finished answer written from it, so the flow read "answered first, ran
+ * the command afterwards"; and the only sign a tool had run was a raw JSON
+ * blob rendered inside the answer as though the assistant had spoken it.
  *
  * Every unit around that was green. This is the check that watches a person
  * see it fixed, which is the only kind that could have reported it
@@ -17,9 +17,14 @@
  * The seam, and where each half is decided:
  *
  * - The PROPOSAL is scripted by e2e/fake-openai.ts: one `delta.tool_calls`
- *   frame naming `readScreen`, then a SECOND scripted response carrying the
- *   answer written from the result. Two scripts, because that is what a real
- *   tool-calling run is — the model is called again with the tool's result.
+ *   frame naming `session.read`, then a SECOND scripted response carrying
+ *   the answer written from the result. Two scripts, because that is what a
+ *   real tool-calling run is — the model is called again with the tool's
+ *   result. `session.read` with no item id is "the screen now"
+ *   (contracts/tools/session.read.schema.json): the tool that replaced the
+ *   deleted screen reader in nocx-2ryxf.1, and a name the registry does not
+ *   hold is not a failing call but a run that cannot start (policy.go's
+ *   ErrMalformedModelOutput).
  * - The GATE is set to Allowed for the `observe` row through Settings →
  *   Agent policy, the surface a person uses, so the call EXECUTES rather
  *   than suspending. This spec is about what a completed call looks like;
@@ -28,11 +33,12 @@
  *   agent-tool-approval.spec.ts records at length: the policy's scope check
  *   compares a session resource for exact identity against the run's grant
  *   scope, so a made-up id is refused before the call can run at all.
- * - The ORDER is read off the DOM, not off a screenshot: the answer block's
- *   body children in document order. `ui-tool-call` is the kit component the
- *   flow places (frontend/src/ui/tool-call-line.ts) and `.term-line` is the
- *   answer's own text row, so "the call precedes the text written from it"
- *   is an index comparison.
+ * - The ORDER is read off the DOM, not off a screenshot: the TURN's own
+ *   children in document order. Since ADR-0040 a turn carries what it did as
+ *   `.cmd-children`, each child declaring its `data-block-kind` — a call that
+ *   opens no block is a `tool` child naming the tool and the arguments it ran
+ *   on, and a run of prose is a `text` child. So "the call precedes the text
+ *   written from it" is an index comparison over those kinds.
  *
  * NOTHING HERE WAITS OUT A DURATION. The synchronisation point is the
  * answer's `completed` chip — the run reached a terminal state, so the call
@@ -159,7 +165,7 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
     await configureAssistant(page, ENDPOINT_NAME)
 
     // The `observe` row is set to Allowed through the page a person uses, so
-    // the proposed readScreen EXECUTES instead of asking. (An unset row asks
+    // the proposed session.read EXECUTES instead of asking. (An unset row asks
     // — the zero matrix is a policy — which is agent-policy.spec.ts's
     // subject, not this file's.)
     await page.locator(SETTINGS_POLICY_NAV).click()
@@ -172,7 +178,7 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
     await backToTerminal(page)
 
     // The session the question is asked in, learned from the product's own
-    // frame — a scripted readScreen must name it exactly (AD-7).
+    // frame — a scripted session.read must name it exactly (AD-7).
     const before = asks.length
     const FIRST = 'Is anything on the screen?'
     await askFromPrompt(page, FIRST)
@@ -183,7 +189,7 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
 
     // A real tool-calling run is TWO model responses: the proposal, then the
     // answer written from the result.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     fake.setScript({ chunks: ['The screen ', 'is empty.'] })
 
     const QUESTION = 'What command did I run?'
@@ -194,40 +200,46 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
     // about the product rather than a race the test wins at t=0.
     await expect(page.getByRole('dialog', { name: APPROVAL_TITLE })).toHaveCount(0)
 
-    const body = answerBlock(page, QUESTION).locator('[data-answer-body]')
+    // THE TURN'S OWN CHILDREN, in the seats the run put them in (ADR-0040).
+    const turn = answerBlock(page, QUESTION)
+    const children = turn.locator(':scope > .cmd-children > .cmd-block')
 
-    // 1. The call left a trace at all — the defect was that readScreen left
-    //    none.
-    const call = body.locator('.ui-tool-call')
+    // 1. The call left a trace at all — the defect was that the screen read
+    //    left none. A call that opens no block is drawn as its own `tool`
+    //    child, named by the tool and the arguments it ran on.
+    const call = turn.locator(':scope > .cmd-children > .cmd-block[data-block-kind="tool"]')
     await expect(call).toHaveCount(1)
-    await expect(call.locator('.ui-tool-call__tool')).toHaveText('readScreen')
-    // The resource is the PANE'S OWN NAME, never the session id (nocx-vnzek):
-    // a 32-hex handle says nothing to a person. The name is asserted against
-    // the tab strip's, because that is the point — one derivation for "what
-    // is this session called", read by both surfaces, so they cannot drift
-    // apart the way two copies would.
-    const resource = call.locator('.ui-tool-call__resource')
-    await expect(resource).not.toHaveText(sessionId)
-    await expect(resource).toHaveText(await page.locator(TITLE).first().innerText())
+    await expect(call).toHaveAttribute('data-tool', 'session.read')
+    const title = call.locator('.cmd-header-text')
+    await expect(title).toContainText('session.read')
+    // The session is NAMED, never numbered (nocx-vnzek): a 32-hex handle
+    // says nothing to a person. The name is asserted against the tab strip's,
+    // because that is the point — one derivation for "what is this session
+    // called", read by both surfaces, so they cannot drift apart the way two
+    // copies would.
+    await expect(title).not.toContainText(sessionId)
+    await expect(title).toContainText(await page.locator(TITLE).first().innerText())
+    // And it is not a command block pretending: a call that opened no block
+    // has no output of its own — the run tool's block is the other case, and
+    // agent-turn.spec.ts owns it.
+    await expect(call.locator('.cmd-output')).toHaveCount(0)
 
     // 2. It precedes the answer written from it. Read off the DOM order of
-    //    the body's children, which is what a person sees top to bottom.
-    const order = await body.evaluate((el) =>
-      Array.from(el.children).map((c) =>
-        c.classList.contains('ui-tool-call')
-          ? 'call'
-          : c.classList.contains('term-line')
-            ? 'text'
-            : 'other',
-      ),
+    //    the turn's children, which is what a person sees top to bottom.
+    const order = await children.evaluateAll((els) =>
+      els.map((el) => (el as HTMLElement).dataset.blockKind ?? 'other'),
     )
-    expect(order.indexOf('call')).toBeGreaterThanOrEqual(0)
-    expect(order.indexOf('text')).toBeGreaterThan(order.indexOf('call'))
+    expect(order.indexOf('tool')).toBeGreaterThanOrEqual(0)
+    expect(order.indexOf('text')).toBeGreaterThan(order.indexOf('tool'))
 
     // 3. And the tool's raw return is not in the answer's words. The
-    //    readScreen result is a JSON object with a "sessionId" key and a
+    //    session.read result is a JSON object with a "sessionId" key and a
     //    "text" key; the answer is the model's sentence.
-    const text = (await body.locator('.term-line').allTextContents()).join('\n')
+    const text = (
+      await turn
+        .locator(':scope > .cmd-children > .cmd-block[data-block-kind="text"] .term-line')
+        .allTextContents()
+    ).join('\n')
     expect(text).toContain('The screen is empty.')
     expect(text).not.toContain('"sessionId"')
     expect(text).not.toContain('"window"')

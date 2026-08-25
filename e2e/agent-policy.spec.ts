@@ -20,7 +20,7 @@
  * The seam, and where each half is decided:
  *
  * - The PROPOSAL is scripted: `e2e/fake-openai.ts` writes one
- *   `delta.tool_calls` frame naming `readScreen`. `readScreen` is declared
+ *   `delta.tool_calls` frame naming `session.read`. `session.read` is declared
  *   with `Effect: observe` and `ResourceArg: "sessionId"`
  *   (internal/agenttools/registry.go), so the escalation is a POLICY ask
  *   over the `observe` row — which is the row Settings → Agent policy draws
@@ -77,7 +77,7 @@ const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
  *  dialogs too, and "no dialog is open" is not the claim being made — "the
  *  person was not asked to approve" is. */
 const APPROVAL_TITLE = 'This action needs your approval'
-/** The row of the matrix `readScreen` is classified under. */
+/** The row of the matrix `session.read` is classified under. */
 const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 
 const test = base
@@ -182,7 +182,7 @@ async function answerFinished(page: Page, question: string): Promise<void> {
  * Ask a content-only question and hand back the session id it was asked in.
  *
  * Two jobs in one gesture, and the second is why it exists: a scripted
- * `readScreen` must name the run's OWN session, and that id is
+ * `session.read` must name the run's OWN session, and that id is
  * server-authoritative (AD-7), so the only honest source is a frame the
  * product itself sent. The fake has no script queued for this one, so it
  * answers with its default single 'ok' chunk.
@@ -254,7 +254,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
 
     // ── 1. The first question escalates: nothing has been decided about
     // `observe`, and an unstated row asks.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     await askFromPrompt(page, 'What went wrong in that build?')
     const prompt = approvalPrompt(page)
     await expect(prompt).toBeVisible({ timeout: 30_000 })
@@ -262,7 +262,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // ── 2. It names the effect in the PRODUCT's words, not the tool's — the
     // words the standing answer will later be shown in.
     await expect(prompt).toContainText('read and inspect')
-    await expect(prompt).toContainText('readScreen')
+    await expect(prompt).toContainText('session.read')
 
     // ── 3. Allow always. The suspended run resumes on the same binding, the
     // tool runs, and the answer finishes.
@@ -274,7 +274,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // decides it this time. The chip is waited for FIRST — the run reached a
     // terminal state, so the gate was passed and not merely not-yet-reached
     // — and only then is the prompt's absence a fact about the product.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     await askFromPrompt(page, 'And if I fix the type?')
     await answerFinished(page, 'And if I fix the type?')
     await expect(approvalPrompt(page)).toHaveCount(0)
@@ -301,7 +301,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
 
     // ── 7. And the question comes back on the next one.
     await backToTerminal(page)
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     await askFromPrompt(page, 'And now what should I try?')
     await expect(approvalPrompt(page)).toBeVisible({ timeout: 30_000 })
     // Left answered rather than hanging: the run is terminalized by the
@@ -321,7 +321,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // time" and nothing else has been decided.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'readScreen', arguments: { sessionId: sessionA } }],
+      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionA } }],
     })
     await askFromPrompt(page, 'Why did that command fail?')
     const prompt = approvalPrompt(page)
@@ -335,7 +335,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // ── In force for the rest of THIS session.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'readScreen', arguments: { sessionId: sessionA } }],
+      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionA } }],
     })
     await askFromPrompt(page, 'What about the second error?')
     await answerFinished(page, 'What about the second error?')
@@ -371,7 +371,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // never answered for.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'readScreen', arguments: { sessionId: sessionB } }],
+      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionB } }],
     })
     await askFromPrompt(page, 'Why did that command fail again?')
     await expect(approvalPrompt(page)).toBeVisible({ timeout: 30_000 })

@@ -5,7 +5,8 @@
  * WHAT THIS FILE IS FOR, AND WHY THE GO TEST BESIDE IT IS NOT ENOUGH.
  * internal/transport/ws_agent_locates_itself_test.go already watches the
  * whole loop over the real socket: the model reads the session id out of the
- * system prompt, calls readScreen with it, and the answer reaches the block.
+ * system prompt, calls session.read with it, and the answer reaches the
+ * block.
  * But in that test THE RENDERER IS THE TEST — it answers
  * agent.readScreenRequest with a frame it built itself, because a Go test
  * has no grid. So the one thing it cannot report is the one thing the epic's
@@ -43,7 +44,7 @@
  *   has frozen and the editor is back — and those are the same event:
  *   _settleFrozen runs clearViewport and setIdle in ONE callback, so an
  *   editor that has the line again is an editor whose clear has happened.
- * - THE ASK MUST HAPPEN AFTER IT LANDS, or readScreen reads a blank grid.
+ * - THE ASK MUST HAPPEN AFTER IT LANDS, or the read returns a blank grid.
  *   The job writes the marker and then an OSC 9, on the same byte stream,
  *   through the same parser: the notify.raise the renderer sends for that
  *   OSC cannot precede the cells it follows. So the raise is the signal that
@@ -165,7 +166,7 @@ declare global {
  * script so no frame is missed.
  *
  * - agent.ask carries the session the question was asked in, which is the id
- *   a scripted readScreen must name (an invented one is refused for identity
+ *   a scripted session.read must name (an invented one is refused for identity
  *   before the call can run — fake-openai.ts records why at length).
  * - notify.raise is the OSC 9 the background job writes after the marker.
  * - agent.readScreenResolved is the RENDERER'S FRAME. It is the evidence the
@@ -278,7 +279,7 @@ async function configureAssistant(page: Page): Promise<void> {
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
   // The `observe` row is set to Allowed through the page a person uses, so
-  // the proposed readScreen EXECUTES rather than suspending on an approval.
+  // the proposed session.read EXECUTES rather than suspending on an approval.
   // The asking is agent-policy.spec.ts's subject, not this file's.
   await page.locator(SETTINGS_POLICY_NAV).click()
   const observeRow = page.locator(OBSERVE_ROW)
@@ -332,7 +333,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     await backToTerminal(page)
 
     // ── The session the question is asked in ─────────────────────────────
-    // Learned from the product's own frame, never invented: readScreen's
+    // Learned from the product's own frame, never invented: session.read's
     // sessionId is matched for exact identity against the run's grant, so an
     // invented id is refused before the call can run at all.
     const FIRST = 'Are you there?'
@@ -380,7 +381,10 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // Two model responses, because a real tool-calling run is two: the
     // proposal, then the answer written from the result. The second is
     // DERIVED — it can only name the marker if the marker reached the model.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    // `session.read` with no item id is "the screen now" (contracts/tools/
+    // session.read.schema.json) — the tool that replaced the deleted screen
+    // reader in nocx-2ryxf.1.
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     fake.setScript({ chunks: answerFromWhatTheModelWasSent })
 
     const QUESTION = 'What is on my screen right now?'
@@ -400,17 +404,23 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
 
     // 2. It got there by READING THE SCREEN, and the call is visible where
     //    it happened, aimed at this pane's session.
-    const call = body.locator('.ui-tool-call')
+    // Since ADR-0040 the call is a `tool` CHILD of the turn — the block is
+    // the account of the call — named by the tool and the arguments it ran
+    // on (scrollback/tool-call-title.ts).
+    const call = answerBlock(page, QUESTION).locator(
+      ':scope > .cmd-children > .cmd-block[data-block-kind="tool"]',
+    )
     await expect(call).toHaveCount(1)
-    await expect(call.locator('.ui-tool-call__tool')).toHaveText('readScreen')
-    // The resource is the PANE'S OWN NAME, never the session id (nocx-vnzek):
-    // a 32-hex handle says nothing to a person. Asserted against the tab
+    await expect(call).toHaveAttribute('data-tool', 'session.read')
+    // The session is the PANE'S OWN NAME, never the id (nocx-vnzek): a
+    // 32-hex handle says nothing to a person. Asserted against the tab
     // strip's own text, because that is the point — one derivation for "what
     // is this session called", read by both surfaces, so they cannot drift
     // apart the way two copies would.
-    const resource = call.locator('.ui-tool-call__resource')
-    await expect(resource).not.toHaveText(sessionId)
-    await expect(resource).toHaveText(await page.locator(TITLE).first().innerText())
+    const title = call.locator('.cmd-header-text')
+    await expect(title).toContainText('session.read')
+    await expect(title).not.toContainText(sessionId)
+    await expect(title).toContainText(await page.locator(TITLE).first().innerText())
 
     // 3. AND THE FRAME WAS THE REAL RENDERER'S — the half the Go test
     //    (ws_agent_locates_itself_test.go) cannot report, because there the

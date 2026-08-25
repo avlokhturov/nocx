@@ -256,7 +256,7 @@ async function configureAssistant(page: Page): Promise<void> {
   await page.locator(SETTINGS_ROLES_NAV).click()
   await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
   // The `observe` row is set to Allowed through the page a person uses, so
-  // the proposed readScreen EXECUTES rather than suspending on an approval.
+  // the proposed session.read EXECUTES rather than suspending on an approval.
   // The asking is agent-policy.spec.ts's subject, not this file's.
   await page.locator(SETTINGS_POLICY_NAV).click()
   const observeRow = page.locator(OBSERVE_ROW)
@@ -307,7 +307,7 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     await backToTerminal(page)
 
     // ── The session the question is asked in ─────────────────────────────
-    // Learned from the product's own frame, never invented: readScreen's
+    // Learned from the product's own frame, never invented: session.read's
     // sessionId is matched for exact identity against the run's grant, so an
     // invented id is refused before the call can run at all.
     const FIRST = 'Are you there?'
@@ -354,7 +354,11 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     // Two model responses, because a real tool-calling run is two: the
     // proposal, then the answer written from the result. The second is
     // DERIVED — it can only name the marker if the marker reached the model.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'readScreen', arguments: { sessionId } }] })
+    // NO ITEM ID, and that is the whole point of this file: `session.read`
+    // without one is "the screen now" (contracts/tools/session.read.schema
+    // .json), which for a RUNNING command is its live grid rather than a
+    // transcript of something finished.
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
     fake.setScript({ chunks: answerFromWhatTheModelWasSent })
 
     const QUESTION = 'What is this command showing right now?'
@@ -380,9 +384,14 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     // 3. It got there by READING THE SCREEN, and the frame was the real
     //    renderer's — the app's own answer to the broker, off its own
     //    socket, carrying the marker in its cells.
-    const call = body.locator('.ui-tool-call')
+    // Since ADR-0040 the call is a `tool` CHILD of the turn, named by the
+    // tool and the arguments it ran on (scrollback/tool-call-title.ts).
+    const call = answerBlock(page, QUESTION).locator(
+      ':scope > .cmd-children > .cmd-block[data-block-kind="tool"]',
+    )
     await expect(call).toHaveCount(1)
-    await expect(call.locator('.ui-tool-call__tool')).toHaveText('readScreen')
+    await expect(call).toHaveAttribute('data-tool', 'session.read')
+    await expect(call.locator('.cmd-header-text')).toContainText('session.read')
     const { resolved } = await recorded(page)
     expect(resolved.length).toBe(1)
     const frame = resolved[0]
