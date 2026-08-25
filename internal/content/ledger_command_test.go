@@ -91,6 +91,74 @@ func TestRecordCompleted_WritesAClosedEntryWithItsExecution(t *testing.T) {
 	}
 }
 
+func TestRecordCompleted_UpdatesLifecycleAttemptWithoutMintingRow(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	const id = "att-0000000000000001"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "test-client", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "masked --token=sk-a...GHIJ", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	executionID, err := led.StartExecution(ctx, content.StartExecution{EntryID: id})
+	if err != nil {
+		t.Fatalf("StartExecution: %v", err)
+	}
+	endedAt := int64(1234)
+	in := aCompletedCommand("raw --token=sk-a...GHIJ")
+	in.AttemptID = id
+	in.EndedAt = &endedAt
+	gotID, err := led.RecordCompleted(ctx, in)
+	if err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+	if gotID != id {
+		t.Fatalf("RecordCompleted id = %q, want existing attempt %q", gotID, id)
+	}
+	got, err := led.Entry(ctx, id)
+	if err != nil || got == nil {
+		t.Fatalf("Entry(%q) = %+v, %v", id, got, err)
+	}
+	if got.Phase != content.PhaseClosed || len(got.Executions) != 1 || got.Executions[0].ID != executionID || got.Executions[0].EndedAt == nil {
+		t.Fatalf("completed lifecycle entry = %+v, want one closed execution", got)
+	}
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].ID != id {
+		t.Fatalf("entries = %+v, want one row under %q", page.Entries, id)
+	}
+}
+
+func TestRecordCompleted_RejectsLifecycleAttemptOwnedByAnotherClient(t *testing.T) {
+	ctx := context.Background()
+	_, led := newLedger(t)
+	envReady(t, led, "local")
+	const id = "att-0000000000000002"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: id, Client: "client-a", EnvironmentID: "local", Cwd: "/repo",
+		Kind: content.EntryShell, Source: content.SourceUser, Intent: "echo hi", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("Submit: %v", err)
+	}
+	in := aCompletedCommand("echo hi")
+	in.AttemptID = id
+	in.Client = "client-b"
+	if _, err := led.RecordCompleted(ctx, in); err == nil {
+		t.Fatal("RecordCompleted accepted an attempt owned by another client")
+	}
+	row, err := led.Entry(ctx, id)
+	if err != nil || row == nil {
+		t.Fatalf("Entry(%q) = %+v, %v", id, row, err)
+	}
+	if row.Phase != content.PhaseOpen {
+		t.Fatalf("foreign completion changed phase to %q, want open", row.Phase)
+	}
+}
+
 // The anchor arrives with the command when the pane is real (nocx-rtg0.28).
 func TestRecordCompleted_AnchorsOnAPaneThatExists(t *testing.T) {
 	ctx := context.Background()

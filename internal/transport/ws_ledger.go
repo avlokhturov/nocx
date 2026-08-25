@@ -54,7 +54,6 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/masking"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -344,10 +343,11 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 	// the second durable writer of the same product object, so it masks
 	// through the SAME owner rather than growing a second policy. A detection
 	// failure fails CLOSED — the raw text must not reach a row.
-	masked, findings, segs, err := masking.MaskWithSegments(e.Intent)
+	maskedResult, err := maskLedgerCommand(e.Intent)
 	if err != nil {
 		return ledgerCommand{}, "intent could not be screened for secrets; not recorded"
 	}
+	masked, findings, segs := maskedResult.text, maskedResult.findings, maskedResult.segments
 
 	// And keep the RECEIPT, which this method used to throw away
 	// (`masked, _, _, err`): how many secrets were taken out, of which kinds,

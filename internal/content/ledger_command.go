@@ -22,16 +22,12 @@ package content
 // shape is CaptureFrame's (ledger_agent_sqlite.go), which does the same thing
 // for the same reason, down to sharing ensureLedgerContext.
 //
-// # Why the backend mints the id here
+// # Why the backend mints an id when no lifecycle attempt exists
 //
-// Every other entry id is a client-minted UUIDv7 and an idempotency key
-// (design §7). history.record carries none — it never has — so the backend
-// mints one, exactly as CaptureFrame mints a frame's. The consequence is
-// stated rather than hidden: a retried history.record writes a SECOND row,
-// because there is no key to recognise the first by. That is unchanged from
-// command_history, which had no idempotency either, and closing it belongs to
-// nocx-rtg0.7, where the renderer starts sending the lifecycle it already
-// tracks.
+// history.record traditionally carried no id, so the backend minted one for
+// completed-only callers. A lifecycle submit now carries AttemptID; that
+// path updates the already-open row and returns its id instead. RecordCompleted
+// remains for callers that have no authenticated lifecycle attempt.
 
 import (
 	"context"
@@ -47,6 +43,9 @@ import (
 type CompletedCommand struct {
 	// Client binds the row to who wrote it, as every entry's does.
 	Client string
+	// AttemptID is the lifecycle attempt row opened at submit. When present,
+	// this completion updates that row instead of minting a second identity.
+	AttemptID string
 	// Env is the environment the command ran in, derived from the facts the
 	// caller holds and never from a session (design §3.1). Ensured here.
 	Env Environment
@@ -95,9 +94,8 @@ type CompletedCommand struct {
 	Source Source
 }
 
-// RecordCompleted writes one finished command and returns the entry id the
-// backend minted for it. That id is the handle every later reference uses —
-// the capture rewrite, provenance detail, and history.query's page.
+// RecordCompleted closes the lifecycle row named by AttemptID when supplied.
+// Without it, the completed-only path mints and returns a new entry id.
 func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand) (string, error) {
 	if in.Client == "" {
 		return "", fmt.Errorf("content: record: client is required — it binds the row to who wrote it")
@@ -143,6 +141,47 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
+
+		if in.AttemptID != "" {
+			var phase, client string
+			err := tx.QueryRowContext(ctx, `SELECT phase, client FROM entries WHERE id = ?`, in.AttemptID).Scan(&phase, &client)
+			if err == nil {
+				if client != in.Client {
+					return fmt.Errorf("content: record: attempt %q belongs to another client", in.AttemptID)
+				}
+				if phase == string(PhaseClosed) {
+					id = in.AttemptID
+					return tx.Commit()
+				}
+				var executionID int64
+				if err := tx.QueryRowContext(ctx,
+					`SELECT id FROM executions WHERE entry_id = ? ORDER BY attempt DESC LIMIT 1`,
+					in.AttemptID).Scan(&executionID); err != nil {
+					return fmt.Errorf("content: record: find attempt execution: %w", err)
+				}
+				now := time.Now().UnixMilli()
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE executions SET ended_at = ?, termination_reason = ? WHERE id = ?`,
+					coalesceTime(in.EndedAt, now), string(in.TerminationReason), executionID); err != nil {
+					return err
+				}
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE entries SET phase = 'closed', status = ?,
+					   started_at = COALESCE(started_at, ?),
+					   ended_at = ?, duration_ms = COALESCE(?, duration_ms),
+					   payload = json_patch(payload, ?)
+					 WHERE id = ?`,
+					string(in.Status), in.StartedAt, coalesceTime(in.EndedAt, now),
+					in.DurationMs, in.Payload, in.AttemptID); err != nil {
+					return err
+				}
+				id = in.AttemptID
+				return tx.Commit()
+			}
+			if err != sql.ErrNoRows {
+				return err
+			}
+		}
 
 		// The anchor is RESOLVED before the write, never left to the foreign
 		// key — the same rule Submit follows — but its failure is NOT fatal
