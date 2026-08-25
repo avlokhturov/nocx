@@ -7,6 +7,7 @@ import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
 import type { BadgeTone } from './ui/badge'
 import { createModeIndicator } from './ui/mode-indicator'
+import { blockKindRules, type BlockKind } from './scrollback/blocks'
 
 export interface GrantBlock {
   readonly itemId: string
@@ -27,13 +28,11 @@ function blockOf(node: Node | null): HTMLElement | null {
 export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
   const itemId = blockEl.dataset.entryId
   if (!itemId) return null
+  const kind = (blockEl.dataset.blockKind ?? 'command') as BlockKind
   return {
     itemId,
     blockEl,
-    command:
-      blockEl.dataset.recordedCommand ??
-      blockEl.querySelector('.cmd-header-text')?.textContent ??
-      '',
+    command: blockKindRules(kind).label(blockEl),
     state: blockEl.classList.contains('cmd-block-running') ? 'running' : 'exited',
   }
 }
