@@ -98,7 +98,6 @@ describe('whole-block grants', () => {
     expect(grant).not.toHaveProperty('count')
   })
 
-
   it('marks one block when selection crosses answer prose into a nested fenced row', () => {
     const { block, output } = blockOf('item-9', 'explain the failure')
     output.replaceChildren()

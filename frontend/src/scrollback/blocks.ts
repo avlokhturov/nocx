@@ -299,7 +299,8 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     header: false,
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
-    label: (blockEl) => nonEmptyLabel(blockEl.querySelector('.cmd-output')?.textContent, '(empty answer)'),
+    label: (blockEl) =>
+      nonEmptyLabel(blockEl.querySelector('.cmd-output')?.textContent, '(empty answer)'),
     statusChips: null,
     headerRight: { chips: [], terminal: () => null },
   },

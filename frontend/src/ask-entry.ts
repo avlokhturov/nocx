@@ -19,7 +19,10 @@ export interface GrantBlock {
   readonly count?: number
 }
 
-function selectedWindow(blockEl: HTMLElement, range: Range): { start: number; count: number } | null {
+function selectedWindow(
+  blockEl: HTMLElement,
+  range: Range,
+): { start: number; count: number } | null {
   const rows = Array.from(blockEl.querySelectorAll<HTMLElement>('.term-line'))
   const selected = rows
     .map((row, index) => (range.intersectsNode(row) ? index : -1))

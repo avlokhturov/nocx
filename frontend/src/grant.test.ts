@@ -107,7 +107,6 @@ describe('GrantController', () => {
     expect(css).not.toMatch(/\.cmd-block\[data-granted\]::before/)
   })
 
-
   it('shows the default grant as a chip and changes it when a person marks a block', () => {
     const controller = new GrantController()
     controller.mount(document.body)
@@ -158,7 +157,6 @@ describe('GrantController', () => {
     )
     controller.destroy()
   })
-
 
   it('opens a block list, dismisses one row, and dismisses all', () => {
     const onChange = vi.fn()

@@ -4977,7 +4977,9 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Agent')
       block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      document.querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!.click()
+      document
+        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .click()
 
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
       expect(chip.textContent).toContain('1')
@@ -5055,9 +5057,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       })
       const params = recordedParams(dispatcherCalls, 'agent.ask')
       expect(params).toMatchObject({
-        attachedContent: [
-          { itemId: block.dataset.entryId, command: 'ls', state: 'exited' },
-        ],
+        attachedContent: [{ itemId: block.dataset.entryId, command: 'ls', state: 'exited' }],
       })
       const attached = params.attachedContent
       if (!Array.isArray(attached)) throw new Error('ask payload missing attachedContent')
@@ -6720,7 +6720,9 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
       const visibleModels = chipEls(content)
       expect(visibleModels).toHaveLength(2)
-      expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(true)
+      expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(
+        true,
+      )
       const chips = children.filter((child) => child.classList.contains('nocx-chip'))
       expect(chips[chips.length - 1]).toBe(grant)
     } finally {
