@@ -1,6 +1,44 @@
 // @vitest-environment jsdom
+import { readFileSync, readdirSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { GrantController, type GrantBlock } from './grant'
+
+const SRC_ROOT = resolve(import.meta.dirname ?? new URL('.', import.meta.url).pathname)
+const SOURCE_EXTENSIONS: Record<string, true> = {
+  '.js': true,
+  '.jsx': true,
+  '.ts': true,
+  '.tsx': true,
+  '.mjs': true,
+  '.cjs': true,
+}
+const GRANT_LABEL = 'marked for the question'
+
+function productionModules(dir: string): string[] {
+  const modules: string[] = []
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name)
+    if (entry.isDirectory()) {
+      modules.push(...productionModules(path))
+      continue
+    }
+    if (
+      SOURCE_EXTENSIONS[path.slice(path.lastIndexOf('.'))] === true &&
+      !/(?:\.test|\.spec|\.bench)\./.test(entry.name)
+    ) {
+      modules.push(path)
+    }
+  }
+  return modules
+}
+
+it('keeps the grant chip label in one production module', () => {
+  const owners = productionModules(SRC_ROOT).filter((file) =>
+    readFileSync(file, 'utf8').includes(GRANT_LABEL),
+  )
+  expect(owners).toEqual([resolve(SRC_ROOT, 'grant.ts')])
+})
 
 const block = (itemId: string, command: string, running = false): GrantBlock => {
   const blockEl = document.createElement('div')

@@ -340,10 +340,6 @@ export class CommandEditor {
     this.grantChip = document.createElement('button')
     this.grantChip.type = 'button'
     this.grantChip.className = 'nocx-chip nocx-editor-grant'
-    this.grantChip.dataset.state = 'default'
-    this.grantChip.textContent = 'marked for the question · 0'
-    this.grantChip.title = 'Open the marked blocks'
-    this.grantChip.setAttribute('aria-label', 'marked for the question · 0')
     this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
@@ -1144,13 +1140,6 @@ export class CommandEditor {
   /** Install the host's grant-popover opener once. */
   onGrantChipClick(handler: () => void): void {
     this._onGrantChipClick = handler
-  }
-
-  /** Render the permanent grant chip; its state is a typed data attribute. */
-  setGrantCount(count: number): void {
-    this.grantChip.dataset.state = count === 0 ? 'default' : 'chosen'
-    this.grantChip.textContent = `marked for the question · ${count}`
-    this.grantChip.setAttribute('aria-label', `marked for the question · ${count}`)
   }
 
   dispose(): void {
