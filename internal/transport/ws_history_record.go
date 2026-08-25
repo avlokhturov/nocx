@@ -74,6 +74,23 @@ type redactionWire struct {
 	Suffix string `json:"suffix"`
 }
 
+// maskedLedgerCommand is the durable command text and its receipt from the
+// one masking owner. Callers may adjust the text to an existing secret
+// reference, but every durable writer starts from this result.
+type maskedLedgerCommand struct {
+	text     string
+	findings []secrets.Finding
+	segments []secrets.Segment
+}
+
+func maskLedgerCommand(command string) (maskedLedgerCommand, error) {
+	masked, findings, segments, err := masking.MaskWithSegments(command)
+	if err != nil {
+		return maskedLedgerCommand{}, err
+	}
+	return maskedLedgerCommand{text: masked, findings: findings, segments: segments}, nil
+}
+
 // captureWire is the non-secret display metadata for one pending capture:
 // the opaque id, the row it first attached to, this entry's redaction
 // segment, the backend-derived suggested vault name, and the capture's
@@ -191,7 +208,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	// live viewport is untouched (xterm renders what the program printed,
 	// AD-6). The pass itself is the masking service's — the one owner of
 	// detection, shared with the egress gate (ADR-0021, nocx-a21v).
-	masked, findings, segs, err := masking.MaskWithSegments(p.Command)
+	maskedResult, err := maskLedgerCommand(p.Command)
 	if err != nil {
 		// Fail closed: the raw command must not reach the row, and the
 		// pane's pending captures die with the failed record.
@@ -204,6 +221,7 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: "history.record: detection failed; command not recorded"})
 		return
 	}
+	masked, findings, segs := maskedResult.text, maskedResult.findings, maskedResult.segments
 
 	// The row's segments: one per finding, byte offsets into the masked
 	// command. Offsets are stored in bytes (the store slices bytes); the

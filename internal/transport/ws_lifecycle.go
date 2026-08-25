@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/session"
@@ -187,6 +188,12 @@ func (s *WSServer) unregisterLifecycleLanes(sid session.ID) {
 	}
 }
 
+// PublishLifecycleProjection updates server-owned projections without
+// emitting a duplicate lifecycle notification to the renderer.
+func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
+	s.syncLifecycleLedger(f)
+}
+
 // PublishLifecycle routes one published fact to the lane's session's current
 // subscriber and writes the notification. This is the Emitter half of
 // internal/lifecyclepub.Emitter: the composition root binds the server as the
@@ -199,9 +206,11 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	sid, ok := s.lifecycleLanes[lane]
 	s.lifecycleMu.Unlock()
 	if !ok {
+
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
+	s.syncLifecycleLedger(f)
 	// Session death wins, and it wins BEFORE the wire (protocol §12.1).
 	// When the pty/SSH channel's Done() has closed, the session's whole
 	// remaining contract is `exit`: "emit exit, cancel any pending
@@ -289,6 +298,101 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	}
 }
 
+// syncLifecycleLedger projects authenticated attempt facts onto the same
+// entry the submit handler opened. It runs synchronously in the publisher's
+// emitter callback, so a lifecycle fact cannot outrun its store transition.
+// The lifecycle publisher is the authority for state; this function only
+// advances the ledger's existing Submit → StartExecution → FinishExecution
+// lifecycle and never invents a second phase machine.
+func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
+	if s.contentDB == nil || f.Attempt == nil {
+		return
+	}
+	// Owner: lifecycle publisher. Closing event: session close, after which
+	// no lifecycle facts are emitted.
+	ctx := context.Background()
+	ledger := s.contentDB.Ledger()
+	row, err := ledger.Entry(ctx, f.Attempt.ID)
+	if err != nil {
+		s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
+		return
+	}
+	if row == nil {
+		// Shell-originated attempts have no app-opened row. Only the
+		// submit path has the authenticated app identity this projection
+		// is allowed to carry.
+		return
+	}
+	start := func() (int64, error) {
+		execID, err := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
+		if err == nil {
+			return execID, nil
+		}
+		env := content.Environment{ID: row.EnvironmentID}
+		if row.Environment != nil {
+			env = *row.Environment
+		}
+		if ensureErr := ledger.EnsureEnvironment(ctx, env); ensureErr != nil {
+			return 0, ensureErr
+		}
+		if _, observeErr := ledger.RecordObservation(ctx, content.Observation{
+			EnvironmentID: row.EnvironmentID,
+			Confidence:    "{}",
+			Criticality:   content.CriticalityRoutine,
+			Payload:       "{}",
+		}); observeErr != nil {
+			return 0, observeErr
+		}
+		return ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
+	}
+	if f.Attempt.State == lifecyclepub.AttemptOpen {
+		if row.Phase == content.PhaseOpen {
+			if _, err := start(); err != nil {
+				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", err)
+			}
+		}
+		return
+	}
+	if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+		return
+	}
+	if row.Phase == content.PhaseClosed {
+		return
+	}
+	execID, ok := liveExecutionOf(row)
+	if !ok {
+		execID, err = start()
+		if err != nil {
+			s.log.Warn("lifecycle ledger recovery start failed", "attempt", row.ID, "error", err)
+			return
+		}
+	}
+	end := content.FinishExecution{
+		EndedAt:           time.Now().UnixMilli(),
+		Status:            content.EntryUnknown,
+		TerminationReason: content.TermTransportGone,
+	}
+	if f.Attempt.State == lifecyclepub.AttemptCompleted {
+		end.TerminationReason = content.TermCompleted
+		end.Status = content.EntryFailure
+		if f.Attempt.ExitCode != nil && *f.Attempt.ExitCode == 0 {
+			end.Status = content.EntrySuccess
+		}
+		if f.Attempt.CompletedAt != nil {
+			end.EndedAt = f.Attempt.CompletedAt.UnixMilli()
+		}
+		payload := content.ShellPayloadJSON(f.Attempt.ExitCode)
+		end.Payload = &payload
+	}
+	if !f.Attempt.StartedAt.IsZero() {
+		startedAt := f.Attempt.StartedAt.UnixMilli()
+		end.StartedAt = &startedAt
+	}
+	if err := ledger.FinishExecution(ctx, execID, end); err != nil {
+		s.log.Warn("lifecycle ledger finish failed", "attempt", row.ID, "error", err)
+	}
+}
+
 // replayLifecycleFacts re-emits the current lifecycle projection of every
 // lane bound to the session. It runs after both open and attach results: the
 // renderer first learns or resumes the server-authoritative session id, then
@@ -355,7 +459,7 @@ type lifecycleSubmitAttemptResult struct {
 // lane must be registered to a session THIS connection opened or reattached
 // to. This is a mutating call, and it must not be addressable by a domain
 // id guessed from another session.
-func (s *WSServer) handleLifecycleSubmitAttempt(r Responder, state *connState, req jsonrpcRequest) {
+func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	if s.lifecyclePub == nil {
 		_ = r.TryError(req.ID, RPCError{Code: -32601, Message: "lifecycle not available"})
 		return
@@ -366,6 +470,18 @@ func (s *WSServer) handleLifecycleSubmitAttempt(r Responder, state *connState, r
 		// opens an attempt (an unstarted attempt would hold the domain
 		// and poison the next attach).
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
+		return
+	}
+	if s.contentDB == nil {
+		// The renderer fails open and still writes the command bytes, but
+		// without a durable ledger there is no honest block identity to
+		// return. Refuse before mutating the lifecycle kernel.
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle ledger unavailable"})
+		return
+	}
+	masked, err := maskLedgerCommand(params.Command)
+	if err != nil {
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: detection failed; command not recorded"})
 		return
 	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
@@ -380,10 +496,64 @@ func (s *WSServer) handleLifecycleSubmitAttempt(r Responder, state *connState, r
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
+	sess, ok := state.get(sid)
+	if !ok {
+		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
+		return
+	}
+	ledger := s.contentDB.Ledger()
+	env := environmentForSession(sess)
+	if err := ledger.EnsureEnvironment(ctx, env); err != nil {
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: ensure environment: " + err.Error()})
+		return
+	}
 	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
 	if err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
+	}
+	startedAt := att.StartedAt.UnixMilli()
+	payload, err := content.WithEntryMasking("{}", content.EntryMasking{
+		MaskedCount: len(masked.findings),
+		MaskedKinds: maskedKindsOf(masked.findings),
+		Redactions:  redactionsOf(masked.findings, masked.segments),
+	})
+	if err != nil {
+		_ = s.lifecyclePub.AbandonAttempt(att.ID)
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: masking receipt failed"})
+		return
+	}
+	_, err = ledger.Submit(ctx, content.SubmitEntry{
+		ID:            string(att.ID),
+		Client:        fmt.Sprintf("%d", wconn.id),
+		EnvironmentID: env.ID,
+		PaneID:        panePtr(sess.PaneID()),
+		Cwd:           att.Cwd,
+		Kind:          content.EntryShell,
+		Source:        content.SourceUser,
+		Intent:        masked.text,
+		StartedAt:     &startedAt,
+		Sensitivity:   content.SensitivityNormal,
+		Payload:       payload,
+	})
+	if err != nil {
+		// The kernel minted the authoritative id before the store could
+		// accept its row. Contain that half-open attempt rather than
+		// leaving a live lifecycle with no ledger identity.
+		if abandonErr := s.lifecyclePub.AbandonAttempt(att.ID); abandonErr != nil {
+			s.log.Warn("lifecycle submit cleanup failed", "attempt", att.ID, "error", abandonErr)
+		}
+		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: record open entry: " + err.Error()})
+		return
+	}
+	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
+		// The shell can authenticate its Start concurrently with the
+		// store insert. The publisher emitted that fact before this row
+		// existed, so reconcile the kernel's current state once the row
+		// is durable.
+		s.syncLifecycleLedger(lifecyclepub.Fact{
+			Attempt: &lifecyclepub.Attempt{ID: string(current.ID), State: lifecyclepub.AttemptOpen},
+		})
 	}
 	_ = r.TryResult(req.ID, mustMarshal(lifecycleSubmitAttemptResult{
 		ID:        string(att.ID),
@@ -450,7 +620,7 @@ func (s *WSServer) lifecycleSpecs() []methodSpec {
 	sub := control.NewOrderedSubmission("lifecycle", lifecycleQueueDepth)
 	return []methodSpec{
 		reg(sub, "lifecycle.submitAttempt", params(validateLifecycleSubmitAttemptRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(r, state, req) }
+			return func(ctx context.Context, req jsonrpcRequest) { s.handleLifecycleSubmitAttempt(ctx, w, r, state, req) }
 		}),
 		reg(sub, "lifecycle.recoverAck", params(validateLifecycleRecoverAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			return func(_ context.Context, req jsonrpcRequest) { s.handleLifecycleRecoverAck(r, state, req) }
