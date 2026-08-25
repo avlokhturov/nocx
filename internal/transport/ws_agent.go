@@ -1207,7 +1207,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, nil, egErr.Request)
 			return
 		}
-		reason, sentence := classifyAskFailure(err)
+		reason, sentence := classifyAskFailure(err, rc.model)
 		// This is the boundary that catches the framework's error, so this
 		// is where its text is kept — once, with the run id, and nowhere
 		// else (nocx-avogl.3). The wire carries the sentence; the log
@@ -1757,7 +1757,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 // string match against the framework's text — the typed chain survives eino.
 // A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
 // result, not an error, so it never reaches this function at all.
-func classifyAskFailure(err error) (content.TerminationReason, string) {
+func classifyAskFailure(err error, model string) (content.TerminationReason, string) {
 	// The engine's own failure sentence: the endpoint answered, and did not
 	// answer (a StreamError is nocx's type, never the framework's). It is
 	// the FIRST arm because it is the most specific thing Ask can return
@@ -1808,6 +1808,9 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	case errors.Is(err, context.DeadlineExceeded):
 		return content.TermTimeout, "the model did not answer in time"
 	}
+	if sentence, ok := assistant.EndpointErrorSentence(err, model); ok {
+		return content.TermFailed, sentence
+	}
 	// Cause 3: the request to the model endpoint never completed — a dial
 	// that failed, a TLS handshake that did not, a connection that dropped
 	// mid-request. Checked AFTER context.Canceled and context.DeadlineExceeded
@@ -1821,7 +1824,7 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	}
 	// Anything else. It still says nothing eino wrote: the trace is in the
 	// log, named there so a person can find it.
-	return content.TermFailed, "the model failed to answer. The details are in nocx's log."
+	return content.TermFailed, assistant.UnexplainedFailureSentence
 }
 
 // runLeaseSentence is the human-readable statement of one lease bound, for
