@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer's answer to an agent.readScreenRequest — a closed outcome. outcome=frame carries the captured live frame (cells rows, cursor, capture identity, buffer row range — the same frame vocabulary the agent.captureFrame push uses, per design §2.4's one-frame-shape rule); outcome=failed carries why, so a renderer that cannot produce the frame (a session it does not know, a capture aborted by disposal) answers honestly instead of hanging the run. requestId is the broker-minted id from the request, echoed back.
+ * Params of the agent.readScreenResolved RPC (nocx-ljfwz, design §2.4): the renderer answers an agent.readScreenRequest with a closed outcome. outcome=frame carries renderer-owned rows, cells, cursor, buffer identity and range; outcome=failed carries why the frame could not be produced, so the run receives an honest answer instead of hanging. requestId is the broker-minted id from the request, echoed back.
  */
 export type AgentReadScreenResolved = {
   [k: string]: unknown

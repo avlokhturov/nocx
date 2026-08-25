@@ -526,3 +526,36 @@ func TestEndpointGet_MissingIDIsANamedSentinel(t *testing.T) {
 		t.Fatalf("GetEndpoint for a missing id = %v, want profile.ErrEndpointNotFound", err)
 	}
 }
+
+func TestEndpointUpdate_NoKeyDeclarationClearsExistingCredential(t *testing.T) {
+	secrets := &fakeEndpointSecrets{}
+	op, store, _ := newEndpointEnv(t, secrets)
+	existing := testEndpoint()
+	existing.CredentialRef = "sec:v1:existing"
+	if err := store.CreateEndpoint(existing); err != nil {
+		t.Fatalf("seed endpoint: %v", err)
+	}
+	updated := existing
+	updated.Name = "Local"
+	updated.NoKey = true
+	updated.CredentialRef = ""
+
+	var got profile.Endpoint
+	if err := runConfig(t, op, func(ctx context.Context, svc capability.ConfigService) error {
+		var err error
+		got, err = svc.UpdateEndpoint(ctx, updated, nil)
+		return err
+	}); err != nil {
+		t.Fatalf("UpdateEndpoint: %v", err)
+	}
+	if got.CredentialRef != "" {
+		t.Fatalf("updated credential reference = %q, want empty", got.CredentialRef)
+	}
+	stored, err := store.LoadEndpoints()
+	if err != nil {
+		t.Fatalf("LoadEndpoints: %v", err)
+	}
+	if len(stored) != 1 || stored[0].CredentialRef != "" || !stored[0].NoKey {
+		t.Fatalf("stored endpoint = %+v, want noKey with no credential", stored)
+	}
+}

@@ -780,16 +780,23 @@ func (h agentHandlers) resolveEndpointMaterial(
 	ctx context.Context,
 	endpoint profile.Endpoint,
 ) (credential.Secret, []assistant.Header, error) {
-	secret, err := h.credentials.Resolve(
-		ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
-	if err != nil {
-		if errors.Is(err, vault.ErrVaultSealed) {
-			return credential.Secret{}, nil, err
+	secret := credential.Secret{}
+	if endpoint.NeedsCredential() {
+		if h.credentials == nil {
+			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
 		}
-		return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
-	}
-	if secret.IsEmpty() {
-		return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+		resolved, err := h.credentials.Resolve(
+			ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
+		if err != nil {
+			if errors.Is(err, vault.ErrVaultSealed) {
+				return credential.Secret{}, nil, err
+			}
+			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+		}
+		if resolved.IsEmpty() {
+			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+		}
+		secret = resolved
 	}
 
 	headers := make([]assistant.Header, 0, len(endpoint.Headers))
@@ -797,6 +804,10 @@ func (h agentHandlers) resolveEndpointMaterial(
 		if hd.Value != nil {
 			headers = append(headers, assistant.Header{Name: hd.Name, Value: *hd.Value})
 			continue
+		}
+		if h.credentials == nil {
+			return credential.Secret{}, nil,
+				fmt.Errorf("the header %q references a missing secret", hd.Name)
 		}
 		hSecret, hErr := h.credentials.Resolve(
 			ctx, credential.SecretID(hd.ValueRef), credential.ForOperation)

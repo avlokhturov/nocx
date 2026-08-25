@@ -674,7 +674,7 @@ describe('AgentApprovalPrompt', () => {
 
   it('states each answer coverage by the control name, using the effect vocabulary', () => {
     const effect = 'mutate-destructive'
-    const { container, getByRole, queryByRole } = renderPrompt({
+    const view = renderPrompt({
       ask: { ...POLICY_ASK, effect },
     })
     const coverage = [
@@ -685,14 +685,14 @@ describe('AgentApprovalPrompt', () => {
       `Deny in this session — every ${EFFECT_LABEL[effect]} call in this session`,
       `Deny always — every ${EFFECT_LABEL[effect]} call, in every session, from now on`,
     ]
-    for (const name of coverage) expect(getByRole('button', { name })).toBeTruthy()
+    for (const name of coverage) expect(view.getByRole('button', { name })).toBeTruthy()
 
     const egress = renderPrompt({ ask: { ...EGRESS_ASK, effect } })
     expect(egress.queryByRole('button', { name: /every .* call in this session/ })).toBeNull()
     expect(
       egress.queryByRole('button', { name: /every .* call, in every session, from now on/ }),
     ).toBeNull()
-    expect(queryByRole('button', { name: 'Allow once' })).toBeNull()
-    expect(container.textContent).toContain(EFFECT_LABEL[effect])
+    expect(view.queryByRole('button', { name: 'Allow once' })).toBeNull()
+    expect(view.container.textContent).toContain(EFFECT_LABEL[effect])
   })
 })

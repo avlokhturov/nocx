@@ -168,6 +168,7 @@ type endpointCreateParams struct {
 	Name    string                 `json:"name"`
 	BaseURL string                 `json:"baseUrl"`
 	Schema  profile.EndpointSchema `json:"schema"`
+	NoKey   bool                   `json:"noKey"`
 	Key     string                 `json:"key"`
 	Models  []endpointModelInput   `json:"models"`
 	// Credential is the renderer's row handle when the form chose "use an
@@ -201,6 +202,7 @@ func (p endpointCreateParams) toEndpoint() profile.Endpoint {
 		Name:          p.Name,
 		BaseURL:       p.BaseURL,
 		Schema:        resolveEndpointSchema(p.Schema),
+		NoKey:         p.NoKey,
 		CredentialRef: p.Credential,
 		Models:        wireModelsToStored(p.Models),
 		Headers:       wireHeadersToStored(p.Headers),
@@ -228,6 +230,7 @@ type endpointUpdateParams struct {
 	ID         string                 `json:"id"`
 	Name       string                 `json:"name"`
 	BaseURL    string                 `json:"baseUrl"`
+	NoKey      bool                   `json:"noKey"`
 	Schema     profile.EndpointSchema `json:"schema"`
 	Key        string                 `json:"key"`
 	Credential string                 `json:"credential"`
@@ -241,6 +244,7 @@ func (p endpointUpdateParams) toEndpoint() profile.Endpoint {
 		Name:          p.Name,
 		BaseURL:       p.BaseURL,
 		Schema:        resolveEndpointSchema(p.Schema),
+		NoKey:         p.NoKey,
 		CredentialRef: p.Credential,
 		Models:        wireModelsToStored(p.Models),
 		Headers:       wireHeadersToStored(p.Headers),
@@ -279,6 +283,7 @@ func wireEndpoint(e profile.Endpoint) profile.EndpointDTO {
 		Name:    e.Name,
 		BaseURL: e.BaseURL,
 		Schema:  e.Schema,
+		NoKey:   e.NoKey,
 		Models:  wireModelsToDTO(e.Models),
 		Headers: make([]profile.EndpointHeaderDTO, 0, len(e.Headers)),
 	}

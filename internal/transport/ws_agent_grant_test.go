@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/shady2k/nocx/internal/assistant"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/assistant"
 )
 
 type grantPromptClient struct {

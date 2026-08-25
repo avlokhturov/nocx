@@ -132,13 +132,6 @@ const rendererOf = (content: TerminalContent): RendererMock => {
   return withRenderer.renderer
 }
 
-/** The live scrollback controller behind TerminalContent's private field —
- *  used by the affordance tests to drive the real copy and scroll seams. */
-const scrollbackOf = (content: TerminalContent): ScrollbackController => {
-  const withScrollback = content as unknown as { scrollback: ScrollbackController }
-  return withScrollback.scrollback
-}
-
 /** The live session mock behind TerminalContent's private field — the same
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>

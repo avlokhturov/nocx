@@ -67,7 +67,7 @@ describe('whole-block grants', () => {
 
     const range = document.createRange()
     range.setStart(prose.firstChild!, 4)
-    range.setEnd(code.firstChild!, code.textContent!.length)
+    range.setEnd(code.firstChild!, code.textContent.length)
     const selection = window.getSelection()!
     selection.removeAllRanges()
     selection.addRange(range)

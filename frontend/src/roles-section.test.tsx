@@ -42,6 +42,7 @@ function ep(id: string, name: string, models: string[]): Endpoint {
     name,
     baseUrl: `https://${name}.example.com/v1`,
     schema: 'openai-compatible',
+    noKey: false,
     credential: null,
     models: models.map((m) => ({ name: m, alias: null })),
     headers: [],

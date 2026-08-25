@@ -707,7 +707,7 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 		}
 		d, exists := p.kernel.Domain(st.Domain)
 		if exists && d.Transport == t {
-			attempts[l] = lifecycle.AttemptID(st.Attempt)
+			attempts[l] = st.Attempt
 		}
 	}
 	// Cancel every pending establishment whose domain rides the lost

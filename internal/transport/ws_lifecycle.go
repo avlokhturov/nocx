@@ -324,8 +324,8 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 		return
 	}
 	start := func() (int64, error) {
-		execID, err := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
-		if err == nil {
+		execID, startErr := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
+		if startErr == nil {
 			return execID, nil
 		}
 		env := content.Environment{ID: row.EnvironmentID}
@@ -347,8 +347,8 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) {
 	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
 		if row.Phase == content.PhaseOpen {
-			if _, err := start(); err != nil {
-				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", err)
+			if _, startErr := start(); startErr != nil {
+				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", startErr)
 			}
 		}
 		return

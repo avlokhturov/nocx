@@ -108,6 +108,7 @@ describe('recordCommand', () => {
     expect(params).not.toHaveProperty('disposed')
     expect(params).not.toHaveProperty('output')
     expect(Object.keys(params as object).sort()).toEqual([
+      'attemptId',
       'command',
       'cwd',
       'endedAt',

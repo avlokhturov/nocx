@@ -94,6 +94,7 @@ const (
 	credDeleted     = "deleted"
 	credSealed      = "sealed"
 	credUnavailable = "unavailable"
+	credNotRequired = "not-required"
 )
 
 // endpointProbeParams are the form's DRAFT values (design §4.5) plus the
@@ -101,27 +102,23 @@ const (
 // input that rides the params once and never crosses back (ADR-0030).
 // Params are not contracted (contracts/README.md) — the handler validates
 // what it parses.
-//
 // The credential resolution rule, in code:
 //
-//  1. A non-empty key WINS — the user typed a key to test it before saving
-//     it (the other half of what this button is for), so the stored
-//     credential must not be consulted at all. The other order would
-//     silently test the credential the user is actively replacing.
-//  2. Else, endpointId names the record and the BACKEND resolves the
-//     credential that record owns — exactly how connections.test resolves
-//     a profile by its id (the renderer never re-fetches the material,
-//     which ADR-0030 forbids crossing back). A sealed or unavailable vault
-//     is a probe RESULT naming that, never a Go error and never a
-//     no-key dial (which would 401 and lie about a working endpoint).
-//  3. Else (no key, no id, or a saved endpoint with no credential) the
-//     probe runs without one — the local-model case.
+//  1. A non-empty key wins when the draft declares that a credential is
+//     required — the user typed a key to test before saving it.
+//  2. A draft declaring noKey never resolves the endpoint credential. The
+//     declaration is explicit; no URL heuristic or empty-key inference is
+//     allowed.
+//  3. Otherwise endpointId names the record and the backend resolves the
+//     credential that record owns. A missing credential is a refusal, not an
+//     unauthenticated dial.
 //
-// The baseUrl and model stay the form's: the button sits on the form, so
-// the form's target is what is tested; only the credential is resolved.
+// The baseUrl and model stay the form's: the button sits on the form, so the
+// form's target is what is tested; only the credential is resolved.
 type endpointProbeParams struct {
 	Name       string `json:"name"`
 	BaseURL    string `json:"baseUrl"`
+	NoKey      bool   `json:"noKey"`
 	Key        string `json:"key"`
 	Model      string `json:"model"`
 	EndpointID string `json:"endpointId"`
@@ -178,7 +175,7 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 			// THE CREDENTIAL OF THE ENDPOINT THAT WILL ANSWER, and of no
 			// other. Fleet-wide endpoint health belongs on the Endpoints
 			// page; here the question is about one endpoint.
-			cred := h.credentialStateFor(ctx, ep.CredentialRef)
+			cred := h.credentialStateFor(ctx, ep)
 			res.Credential = &cred
 			// A probe describes ONE endpoint and one model. Reported only
 			// when it describes this one; otherwise "Last test ok" is about
@@ -229,17 +226,19 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	_ = h.r.TryResult(req.ID, mustMarshal(res))
 }
 
-// credentialStateFor classifies one endpoint's credential reference into the
-// wire's facts: 'resolvable' when the vault answers, 'none' when the
-// endpoint has no reference (or no store is wired), 'deleted' when the
-// referenced secret is gone, 'sealed' when the vault cannot answer right
-// now, and 'unavailable' for a store failure that is none of those — it is
-// never mislabelled as one of the three.
+// credentialStateFor classifies one endpoint's authentication fact into the
+// wire vocabulary. The endpoint's NeedsCredential method is the one
+// derivation shared with the ask and probe paths: not-required is a quiet
+// completed state, while none means a credential is expected but missing.
 //
 // This is a read that REPORTS: it swallows the sealed condition instead of
 // surfacing it, so agent.status never raises the unlock prompt while
 // somebody is looking at a settings page (asserted by assertNoPendingAsk).
-func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref string) string {
+func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ep profile.Endpoint) string {
+	if !ep.NeedsCredential() {
+		return credNotRequired
+	}
+	ref := ep.CredentialRef
 	if ref == "" || h.secrets == nil {
 		return credNone
 	}
@@ -487,47 +486,46 @@ func refusedProbeHeadersResult(params endpointProbeParams, headers []endpointHea
 //  2. Else, endpointId names the record; its OWN credential is resolved
 //     from the vault. Unavailable (sealed vault, deleted secret, missing
 func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, params endpointProbeParams) (credential.Secret, *assistant.ProbeResult, error) {
+	draft := profile.Endpoint{NoKey: params.NoKey}
+	if !draft.NeedsCredential() {
+		if params.Key != "" {
+			return credential.Secret{}, nil, errors.New("endpoint declaring noKey cannot accept a key")
+		}
+		return credential.Secret{}, nil, nil
+	}
 	typed := credential.NewSecret(params.Key)
 	if !typed.IsEmpty() {
 		return typed, nil, nil
 	}
 	if params.EndpointID == "" {
-		return credential.Secret{}, nil, nil
+		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 
-	var ref string
+	var endpoint profile.Endpoint
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-		ep, err := svc.GetEndpoint(params.EndpointID)
-		if err != nil {
-			return err
-		}
-		ref = ep.CredentialRef
-		return nil
+		var err error
+		endpoint, err = svc.GetEndpoint(params.EndpointID)
+		return err
 	})
 	if err != nil {
 		return credential.Secret{}, nil, err
 	}
-	if ref == "" {
-		// The endpoint honestly has no credential (created without one, or
-		// its key was deleted on the Secrets page): probe without one.
+	if !endpoint.NeedsCredential() {
 		return credential.Secret{}, nil, nil
+	}
+	if endpoint.CredentialRef == "" {
+		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 	if h.secrets == nil {
 		// No store to resolve with: the probe must not dial without the
-		// credential (a no-key dial would 401 and lie about a working
-		// endpoint). This is a build-configuration state, not the sealed
-		// vault, so it stays a refused result with the honest sentence.
+		// credential, so it stays a refused result with the honest sentence.
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
-	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.ForOperation)
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
 	if err != nil {
 		if errors.Is(err, vault.ErrVaultSealed) {
-			// The vault is sealed: this is a sealed-vault failure. The
-			// dispatcher's seam normalizes it to the canonical error, the
-			// renderer raises the unlock and re-sends the probe — the call
-			// completes once the vault answers (ADR-0032). Never a probe
-			// RESULT naming the sealed state: that was the dead end this
-			// bead exists to delete.
+			// The dispatcher normalizes this into the canonical unlock
+			// request; the probe is retried once the vault answers.
 			return credential.Secret{}, nil, vault.ErrVaultSealed
 		}
 		return credential.Secret{}, refusedProbeResult(params), nil
@@ -604,6 +602,9 @@ func validateProbeParams(p endpointProbeParams) string {
 	}
 	if utf8.RuneCountInString(p.Key) > maxProbeKeyRunes {
 		return fmt.Sprintf("key exceeds %d characters", maxProbeKeyRunes)
+	}
+	if p.NoKey && p.Key != "" {
+		return "endpoint declaring noKey cannot accept a key"
 	}
 	if utf8.RuneCountInString(p.EndpointID) > maxProbeIDRunes {
 		return fmt.Sprintf("endpointId exceeds %d characters", maxProbeIDRunes)
