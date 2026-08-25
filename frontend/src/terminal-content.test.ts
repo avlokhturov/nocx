@@ -4961,6 +4961,42 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       teardown()
     }
   })
+  it('keeps an Ask mark and its count through a Run round trip', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'git status', ['clean'])
+
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      document.querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!.click()
+
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBe('true')
+
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Shell')
+      expect(chip.style.display).toBe('none')
+      expect(block.dataset.granted).toBe('true')
+
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(chip.style.display).toBe('')
+      expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBe('true')
+    } finally {
+      teardown()
+    }
+  })
 
   it('marks the same whole block once from a selection and from its menu', async () => {
     const { client } = agentDispatcher()
@@ -6645,6 +6681,42 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
       switchToAsk(content) // the switch is a toggle
       expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+  it('shows the grant chip only while the target is Ask', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const grant = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-grant')!
+      expect(grant.style.display).toBe('none')
+
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      expect(grant.style.display).toBe('')
+
+      switchToAsk(content)
+      expect(grant.style.display).toBe('none')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the visible Ask chips ordered with the grant last', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
+      const children = [...left.children]
+      const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const visibleModels = chipEls(content)
+      expect(visibleModels).toHaveLength(2)
+      expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(true)
+      const chips = children.filter((child) => child.classList.contains('nocx-chip'))
+      expect(chips[chips.length - 1]).toBe(grant)
     } finally {
       teardown()
     }

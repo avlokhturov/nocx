@@ -1416,7 +1416,7 @@ export class TerminalContent extends BasePaneContent {
       const agentClient = new AgentClient(this.client.dispatcher)
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
-      this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
+      this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
 
       this.inputTargets = createRegistry((target) => {
         // The per-target draft swap (nocx-4ff.7): snapshot the editor
@@ -1463,7 +1463,7 @@ export class TerminalContent extends BasePaneContent {
         // repaint a fact that may be minutes old. Leaving Ask only
         // repaints — a Run pane pays no readiness call.
         if (target.id === this.agentTarget?.id) this.refreshReadiness()
-        this.renderModelChip()
+        this.renderTargetChips()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -1786,7 +1786,7 @@ export class TerminalContent extends BasePaneContent {
       })
       // Shell is active at start, so this paints the chip's absence — the
       // state a Run pane is in, and the one the row was built for.
-      this.renderModelChip()
+      this.renderTargetChips()
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -3237,17 +3237,22 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * The model chip's ONE writer in this pane: both facts it needs — which
-   * target Enter goes to, and what the readiness store holds — are read
-   * here, so no other site has to remember to combine them.
+   * The ONE writer in this pane for every chip that depends on which target
+   * Enter reaches. Both the model chip and the grant chip are meaningful only
+   * when a submit reaches the assistant — a Run pane names no model, because
+   * none answers anything, and marks no blocks, because there is no question
+   * for them to be about — so both read `isAsk` here rather than each site
+   * remembering to combine the target with the readiness store.
    *
-   * No chip at all unless the assistant is what a submit reaches: a Run
-   * pane names no model, because none answers anything.
+   * Presentation only. The grant's LIST stays owned by GrantController and is
+   * untouched by this: marks made in Ask survive a flip to Run and are on
+   * screen again on return, which is the criterion a careless fix breaks.
    */
-  private renderModelChip(): void {
+  private renderTargetChips(): void {
     if (!this.editor) return
     const active = this.inputTargets?.active()
     const isAsk = active !== undefined && active.id === this.agentTarget?.id
+    this.editor.setGrantChipVisible(isAsk)
     this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
   }
 
