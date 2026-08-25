@@ -340,6 +340,7 @@ export class CommandEditor {
     this.grantChip = document.createElement('button')
     this.grantChip.type = 'button'
     this.grantChip.className = 'nocx-chip nocx-editor-grant'
+    this.grantChip.style.display = 'none'
     this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
@@ -510,6 +511,11 @@ export class CommandEditor {
    *  setModelChip wrote. */
   onModelChipClick(handler: (page: 'endpoints' | 'roles') => void): void {
     this._onModelChipClick = handler
+  }
+
+  /** Show the grant chip only for the target that can use its marks. */
+  setGrantChipVisible(visible: boolean): void {
+    this.grantChip.style.display = visible ? '' : 'none'
   }
 
   /**
