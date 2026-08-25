@@ -47,7 +47,7 @@
  * same control through `mountCodeBlockCopyButton` so there is one copy
  * vocabulary rather than two.
  */
-import { Show, createSignal } from 'solid-js'
+import { Show, children, createSignal } from 'solid-js'
 import type { JSX } from 'solid-js'
 import { render } from 'solid-js/web'
 import { CopyIcon } from './icons'
@@ -107,12 +107,23 @@ export function mountCodeBlockCopyButton(
 }
 
 export function CodeBlock(props: CodeBlockProps) {
+  // RESOLVED ONCE, because three things now ask what the children are: the
+  // `<pre>` renders them, and the copy control's presence and its payload
+  // both depend on whether they are text. `props.children` is a getter that
+  // re-runs the caller's expression on every read, so a block carrying a
+  // component (`SecretChip` in the API workbench's raw request) would build a
+  // fresh instance per question and throw two of them away. `children()` is
+  // the kit's existing answer to this — Section and Tabs resolve their
+  // `actions` the same way.
+  const held = children(() => props.children)
+
   // The text a copy control would hand over, and `undefined` when there is
-  // none: children widened to a JSX element so a block could carry an inline
-  // component, and an element is not text. Reading it at call time keeps the
-  // control honest about what the block currently holds.
-  const copyText = (): string | undefined =>
-    typeof props.children === 'string' ? props.children : undefined
+  // none: children are a JSX element so that a block CAN carry a component,
+  // and an element is not text.
+  const copyText = (): string | undefined => {
+    const value = held()
+    return typeof value === 'string' ? value : undefined
+  }
 
   return (
     <div
@@ -125,7 +136,7 @@ export function CodeBlock(props: CodeBlockProps) {
         aria-label={props.ariaLabel}
         tabIndex={0}
       >
-        {props.children}
+        {held()}
       </pre>
       <Show when={props.copy && copyText() !== undefined ? props.copy : undefined}>
         {(copy) => <CodeBlockCopyButton getText={() => copyText() ?? ''} copy={copy()} />}
