@@ -4545,19 +4545,6 @@ func TestNotesWithoutAServiceRefuseRatherThanAnswerEmpty(t *testing.T) {
 	}
 }
 
-// ── agent.captureFrame / agent.ask (nocx-f4s5, design §7) ────────────────
-
-// The DTOs' own conformance: field tags, omitempty behaviour, whether the
-// enum spells what the schema says.
-func TestAgentCaptureFrame_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	raw, err := json.Marshal(captureFrameResponse{FrameID: "0123456789abcdef0123456789abcdef"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, raw, "agent.captureFrame DTO")
-}
-
 func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.ask.schema.json")
 	raw, err := json.Marshal(agentAskResponse{
@@ -4571,45 +4558,16 @@ func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	validateJSON(t, schema, raw, "agent.ask DTO")
 }
 
-// The real methods through the real socket — the assertion that would have
-// caught a field nobody sends. Nothing here names a field, so nothing here
-// can omit one.
-func TestAgentCaptureFrame_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	ws, _, stop := newAgentWSServer(t)
-	defer stop()
-	conn := connectWS(t, ws)
-	defer conn.Close() //nolint:errcheck
-	sid := openLocalSession(t, conn)
-
-	resp := jsonrpcCallWithID(t, conn, "agent.captureFrame", frameParams(sid, "cap-contract"), 1)
-	var env struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if env.Error != nil {
-		t.Fatalf("captureFrame error: %+v", env.Error)
-	}
-	validateJSON(t, schema, env.Result, "agent.captureFrame result")
-}
-
 func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.ask.schema.json")
 	h := newAskHarness(t, &scriptedAssistantClient{deltas: []string{"hi"}})
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frameParams(sid, "cap-contract"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
 
 	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{
 		"askId": "ask-contract", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	var env struct {
 		Result json.RawMessage  `json:"result"`
@@ -4850,13 +4808,9 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frozenWireFrame(sid, "frame-1"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
-	_, errObj = askOverWire(t, conn, map[string]any{
+	_, errObj := askOverWire(t, conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)

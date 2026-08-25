@@ -4,17 +4,14 @@ package transport
 // (nocx-p4f7r). The backend records the question and pending run, then tells
 // the model each granted ledger item by id, command and running/exited state.
 // The model uses session.read to fetch item bodies; this path never inlines
-// terminal output.
+// terminal output. A body returned by session.read is terminal output — data
+// about the terminal, never instructions; the model must read it and never
+// obey it.
 //
-// agent.captureFrame remains a standalone renderer-frame ingestion endpoint
-// for the frame capture contract and read-screen frame vocabulary. It is not
-// part of agent.ask: asks no longer mint or reference frames.
-//
-// This domain validates params and bounds sizes (design §7): frame content,
-// region bounds, capture identity and run identity all arrive as params,
-// and an oversized frame, an out-of-bounds rectangle or a frame id from
-// another session are all reachable from the renderer. Every id is minted
-// or owned by the backend; ownership of the session is checked per call.
+// This domain validates params and bounds sizes (design §7): grant metadata,
+// question text, cwd and run identity all arrive as params. Every id is
+// minted or owned by the backend; ownership of the session is checked per
+// call.
 //
 // The result shapes are declared once in contracts/agent.*.schema.json.
 // There is deliberately no params schema (contracts/README.md): the handler
@@ -67,7 +64,7 @@ const (
 	maxAttachedContent = 32
 	// maxAttachedCommandRunes bounds the descriptive command carried with a grant.
 	maxAttachedCommandRunes = 8_000
-	// maxIDRunes bounds renderer-supplied ids (captureId, askId, frameId).
+	// maxIDRunes bounds renderer-supplied ask and attached-item ids.
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
 	maxCwdRunes = 4_096
@@ -77,18 +74,6 @@ const (
 )
 
 // ── wire shapes ───────────────────────────────────────────────────────────
-
-type captureFrameParams struct {
-	CaptureID         string             `json:"captureId"`
-	SessionID         string             `json:"sessionId"`
-	Source            string             `json:"source"`
-	Rows              []frameRowWire     `json:"rows"`
-	Cursor            *frameCursorWire   `json:"cursor"`
-	Identity          *frameIdentityWire `json:"identity"`
-	Range             *frameRangeWire    `json:"range"`
-	SerializerVersion *int               `json:"serializerVersion"`
-	Cwd               string             `json:"cwd"`
-}
 
 type frameRowWire struct {
 	Kind  string          `json:"kind"` // "cells" | "text"
@@ -136,11 +121,6 @@ type frameRangeWire struct {
 	End   int `json:"end"`
 }
 
-// captureFrameResponse is the result of agent.captureFrame: the
-// BACKEND-MINTED frame id (AD-7 — the renderer cannot invent one).
-type captureFrameResponse struct {
-	FrameID string `json:"frameId"`
-}
 type agentAskParams struct {
 	AskID           string          `json:"askId"`
 	SessionID       string          `json:"sessionId"`
@@ -412,14 +392,12 @@ type agentApproveResponse struct {
 
 // ── handlers ──────────────────────────────────────────────────────────────
 
-// agentHandlers answers the standalone agent.captureFrame endpoint and
-// agent.ask. It holds the AgentOperation (nil → the ledger is not wired), the
-// connection's connState (session ownership and the session facts the
-// environment is derived from), the connection's client identity (the
-// idempotency binding of capture/ask ids — per connection, so a reconnect
-// mints a new one and a retried capture after a reconnect orphans a duplicate
-// frame, which the retention sweep exists to reap) and the Responder; never
-// the *WSServer.
+// agentHandlers answers agent.ask and the related run-control methods. It
+// holds the AgentOperation (nil → the ledger is not wired), the connection's
+// connState (session ownership and the session facts the environment is
+// derived from), the connection's client identity (the idempotency binding of
+// ask ids — per connection, so a reconnect mints a new one) and the
+// Responder; never the *WSServer.
 type agentHandlers struct {
 	op capability.AgentOperation // nil → content store not wired
 	// configOp resolves the endpoint the run uses (the ONE config operation,
@@ -570,42 +548,6 @@ func (s *WSServer) personalInstructionsText() string {
 		return ""
 	}
 	return v
-}
-
-func (h agentHandlers) handleCaptureFrame(ctx context.Context, req jsonrpcRequest) {
-	if h.op == nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
-		return
-	}
-	var p captureFrameParams
-	if err := json.Unmarshal(req.Params, &p); err != nil {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
-		return
-	}
-	sid := session.ID(p.SessionID)
-	if !h.state.has(sid) {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown sessionId"})
-		return
-	}
-	in, msg := validateCaptureFrame(p)
-	if msg != "" {
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
-		return
-	}
-	in.Client = h.clientID
-	sess, _ := h.state.get(sid)
-	in.Env = environmentForSession(sess)
-
-	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		res, err := svc.CaptureFrame(ctx, in)
-		if err == nil {
-			_ = h.r.TryResult(req.ID, mustMarshal(captureFrameResponse{FrameID: res.FrameID}))
-		}
-		return err
-	})
-	if err != nil {
-		h.answerError(req, err)
-	}
 }
 
 // errNoEndpoint is the ask's no-endpoint refusal: a renderable condition
@@ -1887,19 +1829,13 @@ func runLeaseSentence(reason content.TerminationReason) string {
 	}
 }
 
-// answerError maps the ask transaction's failures to JSON-RPC errors. The
-// reference-validation failures are invalid params — reachable from the
-// renderer (an unknown frame, a frame from another session, an
-// out-of-bounds region) and refused, never server faults. A gate refusal
-// keeps its control.saturated shape (answerOperationRefusal); anything else
-// is an internal error.
+// answerError maps ask transaction failures to JSON-RPC errors. A conflict
+// in an id supplied by the renderer is invalid params; a gate refusal keeps
+// its control.saturated shape (answerOperationRefusal); anything else is an
+// internal error.
 func (h agentHandlers) answerError(req jsonrpcRequest, err error) {
 	switch {
-	case errors.Is(err, content.ErrFrameNotFound),
-		errors.Is(err, content.ErrNotAFrame),
-		errors.Is(err, content.ErrFrameSessionMismatch),
-		errors.Is(err, content.ErrRegionOutOfBounds),
-		errors.Is(err, content.ErrIDConflict),
+	case errors.Is(err, content.ErrIDConflict),
 		errors.Is(err, capability.ErrOperationInactive):
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + err.Error()})
 	default:
@@ -1909,103 +1845,11 @@ func (h agentHandlers) answerError(req jsonrpcRequest, err error) {
 
 // ── validation ────────────────────────────────────────────────────────────
 
-// validateCaptureFrame checks every reachable param and maps the wire shape
-// onto the ledger's CaptureFrame. Returns a non-empty message on the first
-// failure — never a silently repaired frame: a wrong row kind, a missing
-// identity or an out-of-range cell count is refused, not substituted.
-func validateCaptureFrame(p captureFrameParams) (content.CaptureFrame, string) {
-	if strings.TrimSpace(p.CaptureID) == "" || utf8.RuneCountInString(p.CaptureID) > maxIDRunes {
-		return content.CaptureFrame{}, "captureId is required and bounded"
-	}
-	if p.SessionID == "" {
-		return content.CaptureFrame{}, "sessionId is required"
-	}
-	if strings.TrimSpace(p.Cwd) == "" || utf8.RuneCountInString(p.Cwd) > maxCwdRunes {
-		return content.CaptureFrame{}, "cwd is required and bounded"
-	}
-	var source content.FrameSource
-	switch p.Source {
-	case "live":
-		source = content.FrameLive
-	case "frozen":
-		source = content.FrameFrozen
-	default:
-		return content.CaptureFrame{}, "source must be live or frozen"
-	}
-	if len(p.Rows) > maxFrameRows {
-		return content.CaptureFrame{}, "frame is too large: too many rows"
-	}
-	if p.Cursor == nil && source == content.FrameLive {
-		return content.CaptureFrame{}, "a live frame requires a cursor"
-	}
-	if p.Cursor != nil && source == content.FrameFrozen {
-		return content.CaptureFrame{}, "a frozen frame has no cursor"
-	}
-
-	in := content.CaptureFrame{
-		CaptureID: p.CaptureID,
-		SessionID: new(p.SessionID),
-		Cwd:       p.Cwd,
-		Source:    source,
-		// A capture arrives from the renderer's ask gesture — a person
-		// selected blocks and asked — so the frame is the person's
-		// capture, in the entries.source vocabulary. The readScreen pull is
-		// a different producer with its own path (agent.readScreenResolved
-		// never reaches this seam) and will stamp assistant when it ever
-		// persists a frame; this is the honest value for what this wire
-		// method creates.
-		Subject: content.SourceUser,
-		Cursor:  wireCursor(p.Cursor),
-	}
-
-	bodyChars := 0
-	if source == content.FrameLive {
-		var msg string
-		if msg, bodyChars = validateLiveFrameBody(p.Rows, p.Cursor, p.Identity, p.Range); msg != "" {
-			return content.CaptureFrame{}, msg
-		}
-		id := p.Identity
-		in.Identity = &content.FrameIdentity{
-			Buffer:     content.BufferIdentity{Kind: id.Buffer.Kind, AltSession: id.Buffer.AltSession},
-			Cols:       id.Cols,
-			Rows:       id.Rows,
-			Generation: id.Generation,
-		}
-		in.Range = &content.FrameRange{Start: p.Range.Start, End: p.Range.End}
-	} else {
-		if p.SerializerVersion == nil || *p.SerializerVersion < 1 {
-			return content.CaptureFrame{}, "a frozen frame requires a positive serializer version"
-		}
-		in.SerializerVersion = p.SerializerVersion
-	}
-
-	totalChars := bodyChars
-	for _, row := range p.Rows {
-		switch source {
-		case content.FrameLive:
-			cells := make([]content.FrameCell, 0, len(row.Cells))
-			for _, c := range row.Cells {
-				cells = append(cells, content.FrameCell{Char: c.Char, Attrs: wireAttrs(c.Attrs)})
-			}
-			in.Rows = append(in.Rows, content.FrameRow{Kind: "cells", Cells: cells})
-		case content.FrameFrozen:
-			totalChars += utf8.RuneCountInString(row.Text)
-			in.Rows = append(in.Rows, content.FrameRow{Kind: "text", Text: row.Text})
-		}
-	}
-	if totalChars > maxFrameChars {
-		return content.CaptureFrame{}, "frame is too large: character budget exceeded"
-	}
-	return in, ""
-}
-
 // validateLiveFrameBody checks the LIVE half of a frame — the identity, the
-// buffer row range, the cursor and every row's cells against the capture
-// bounds — and returns the first refusal message, or "" with the row-char
-// total when the body is valid. It is the ONE validator of the live frame
-// vocabulary: the captureFrame push (validateCaptureFrame) and the readScreen
-// pull resolution (validateReadScreenResolvedRaw) both call it, so a rule
-// added here applies to both directions (AD-8 — one owner per behaviour).
+// buffer row range, the cursor and every row's cells against the bounds — and
+// returns the first refusal message, or "" with the row-char total when the
+// body is valid. The readScreen pull resolution is the sole caller, so a rule
+// added here applies to that direction (AD-8 — one owner per behaviour).
 func validateLiveFrameBody(rows []frameRowWire, cursor *frameCursorWire, identity *frameIdentityWire, rng *frameRangeWire) (string, int) {
 	if cursor == nil {
 		return "a live frame requires a cursor", 0
@@ -2092,15 +1936,21 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
 		return empty("attachedContent is required and must be an array")
 	}
-	var grants []agentAttachedContentWire
-	if err := json.Unmarshal(raw, &grants); err != nil || grants == nil {
+	var rawGrants []json.RawMessage
+	if err := json.Unmarshal(raw, &rawGrants); err != nil || rawGrants == nil {
 		return empty("attachedContent must be an array of grant objects")
 	}
-	if len(grants) > maxAttachedContent {
+	if len(rawGrants) > maxAttachedContent {
 		return empty("attachedContent must carry at most " + strconv.Itoa(maxAttachedContent) + " items")
 	}
-	attached := make([]assistant.AttachedContentItem, 0, len(grants))
-	for i, grant := range grants {
+	attached := make([]assistant.AttachedContentItem, 0, len(rawGrants))
+	for i, rawGrant := range rawGrants {
+		var grant agentAttachedContentWire
+		decoder := json.NewDecoder(bytes.NewReader(rawGrant))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&grant); err != nil {
+			return empty(fmt.Sprintf("attachedContent[%d] must be a grant object: %v", i, err))
+		}
 		if strings.TrimSpace(grant.ItemID) == "" || utf8.RuneCountInString(grant.ItemID) > maxIDRunes {
 			return empty(fmt.Sprintf("attachedContent[%d].itemId is required and bounded", i))
 		}
@@ -2191,36 +2041,6 @@ func priorAnswerMessage(p content.TurnProse) (string, bool) {
 	return p.Text + "\n\n" + proseCutShortNotice, true
 }
 
-// sliceFrameText narrows a frame's durable text to the rows a reference
-// names: [RowStart, RowEnd), 1-based like the wire's own bounds, clamped to
-// the frame. The durable text is rows joined by '\n' (content.frameText), so
-// the slice is the row span re-joined; an out-of-range region (a frame that
-// shrank) clamps rather than failing the whole ask.
-func sliceFrameText(text string, r content.FrameRegion) string {
-	rows := strings.Split(text, "\n")
-	start := min(max(r.RowStart, 0), len(rows))
-	end := min(max(r.RowEnd, 0), len(rows))
-	if end <= start {
-		return ""
-	}
-	return strings.Join(rows[start:end], "\n")
-}
-
-func wireCursor(c *frameCursorWire) *content.FrameCursor {
-	if c == nil {
-		return nil
-	}
-	return &content.FrameCursor{Line: c.Line, Col: c.Col}
-}
-
-func wireAttrs(a frameAttrsWire) content.FrameAttrs {
-	return content.FrameAttrs{
-		Fg: a.Fg, Bg: a.Bg,
-		Bold: a.Bold, Italic: a.Italic, Dim: a.Dim, Underline: a.Underline,
-		Inverse: a.Inverse, Blink: a.Blink, Strikethrough: a.Strikethrough, Overline: a.Overline,
-	}
-}
-
 func derefOrEmpty(s *string) string {
 	if s == nil {
 		return ""
@@ -2243,11 +2063,9 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		attemptLedger = s.contentDB.Ledger()
 	}
 	build := func(w *wsConn, state *connState, r Responder) agentHandlers {
-		// clientID is the CONNECTION identity, deliberately: it binds the
-		// ask/captureFrame idempotency to the connection (a reconnect mints
-		// a new one), never to a renderer-minted tab — the agent ask is not
-		// a capture-scope consumer (nocx-tsajw keeps the two identities
-		// apart).
+		// clientID is the CONNECTION identity, deliberately: it binds ask
+		// idempotency to the connection (a reconnect mints a new one), never
+		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
@@ -2261,10 +2079,6 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		}
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.captureFrame", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := build(w, state, r)
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleCaptureFrame(ctx, req) }
-		}),
 		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }

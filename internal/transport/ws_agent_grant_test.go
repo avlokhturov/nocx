@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/shady2k/nocx/internal/assistant"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 type grantPromptClient struct {
@@ -99,6 +103,7 @@ func TestAgentAsk_RejectsMalformedAttachedContent(t *testing.T) {
 		{name: "missing item id", list: []any{map[string]any{"command": "git status", "state": "exited"}}, want: "itemId"},
 		{name: "missing command", list: []any{map[string]any{"itemId": "item-1", "state": "exited"}}, want: "command"},
 		{name: "invalid state", list: []any{map[string]any{"itemId": "item-1", "command": "git status", "state": "done"}}, want: "state"},
+		{name: "unknown field", list: []any{map[string]any{"itemId": "item-1", "command": "git status", "state": "exited", "extra": true}}, want: "attachedContent"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,5 +129,60 @@ func TestAgentAsk_RejectsLegacyReferencesField(t *testing.T) {
 	}, 1)
 	if errObj == nil || errObj.Code != -32602 || !strings.Contains(errObj.Message, "references") {
 		t.Fatalf("error = %+v, want legacy references refusal", errObj)
+	}
+}
+
+type missingGrantProvider struct {
+	session   string
+	missingID string
+}
+
+func (p *missingGrantProvider) serve(w http.ResponseWriter, _ *http.Request) {
+	streamToolCallChunk(w, "session.read", fmt.Sprintf(
+		`{"sessionId":%q,"id":%q,"start":0,"count":20}`, p.session, p.missingID))
+}
+
+func TestAgentAsk_MissingGrantedItemTerminalizesWithReason(t *testing.T) {
+	const missingID = "0198f2b0-0000-7000-8000-0000000000ff"
+	provider := &missingGrantProvider{missingID: missingID}
+	server := httptest.NewServer(http.HandlerFunc(provider.serve))
+	defer server.Close()
+
+	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(autonomousPolicyStore(t)))
+	h.createEndpointAt(server.URL)
+	seedPaneChain(t, h.db, blockPaneThis, blockPaneOther)
+	sid, err := openSessionInPane(t, h.conn, blockPaneThis, 1)
+	if err != nil {
+		t.Fatalf("open session: %v", err)
+	}
+	provider.session = sid
+	waitPastMilli(sessionOpenedAt(t, h.ws, sid))
+
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":     "0198f2b0-0000-7000-8000-0000000000fa",
+		"sessionId": sid,
+		"question":  "what did the cleared command do?",
+		"cwd":       "/repo",
+		"attachedContent": []any{
+			map[string]any{"itemId": missingID, "command": "git status", "state": "exited"},
+		},
+	}, 2); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+
+	readNotification(t, h.conn, "agent.runToolCall", 15*time.Second)
+	raw := readNotification(t, h.conn, "agent.runState", 15*time.Second)
+	var state struct {
+		State string `json:"state"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState: %v\nraw: %s", err, raw)
+	}
+	if state.State != "failed" {
+		t.Fatalf("runState = %#v, want failed after missing session item", state)
+	}
+	if !strings.Contains(state.Error, "session.read") || !strings.Contains(state.Error, "no such item") {
+		t.Fatalf("runState error = %q, want the deliberate missing-item reason", state.Error)
 	}
 }

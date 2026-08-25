@@ -3,12 +3,11 @@ package transport
 // Renderer-backed live screen capture transport: session.read can ask for a
 // session's current screen through the renderer, because the renderer owns the
 // grid (AD-6). The request travels broker → renderer as
-// agent.readScreenRequest; the renderer answers agent.readScreenResolved with
-// the SAME frame shape it pushes for agent.captureFrame — same
-// row/cell/attribute/identity vocabulary, produced by the same renderer code
-// — plus a closed outcome so a renderer that cannot produce the frame (a
-// session it does not know, a capture aborted by disposal) answers honestly
-// instead of hanging the run.
+// agent.readScreenRequest; the renderer answers agent.readScreenResolved.
+// The renderer uses one frame vocabulary for its rows, cursor and identity.
+// A closed outcome lets a renderer that cannot produce the frame (a session
+// it does not know, a capture aborted by disposal) answer honestly instead of
+// hanging the run.
 //
 // The agent.readScreenRequest and agent.readScreenResolved names intentionally
 // remain transport-layer identifiers, distinct from the model-facing
@@ -69,9 +68,9 @@ type readScreenRegion struct {
 }
 
 // readScreenResolvedParams is the renderer's answer: a closed outcome —
-// "frame", carrying the captured frame body, or "failed", carrying why.
-// The frame fields reuse the captureFrame vocabulary (ws_agent.go): one
-// frame shape for the push and the pull, per design §2.4.
+// "frame", carrying the renderer-owned rows, cursor, identity and range, or
+// "failed", carrying why. The same frame shape is used for the live-screen
+// response and validated before the assistant executor consumes it.
 type readScreenResolvedParams struct {
 	Outcome  string             `json:"outcome"` // "frame" | "failed"
 	Error    string             `json:"error,omitempty"`
