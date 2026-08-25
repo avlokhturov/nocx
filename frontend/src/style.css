@@ -204,33 +204,6 @@
   margin-left: auto;
 }
 
-.nocx-editor-reference-count {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--color-text-muted);
-  font: inherit;
-}
-
-.nocx-editor-reference-count__value,
-.nocx-editor-reference-count__drop {
-  border: 0;
-  padding: 1px 4px;
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  cursor: pointer;
-}
-
-.nocx-editor-reference-count__value:hover,
-.nocx-editor-reference-count__drop:hover {
-  color: var(--color-text);
-}
-
-.nocx-editor-reference-count__drop:hover {
-  color: var(--color-danger);
-}
-
 /* ── Chip ────────────────────────────────────────────────────────────── */
 
 .nocx-chip {
@@ -285,6 +258,21 @@
   color: var(--color-danger);
 }
 
+/* The permanent grant chip (nocx-wcswn). One chip, two typed states: the
+   count is the only changing content and the list lives in its popover. */
+.nocx-editor-grant {
+  width: 13rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nocx-editor-grant[data-state='default'] {
+  color: var(--color-text-muted);
+}
+
+.nocx-editor-grant[data-state='chosen'] {
+  color: var(--color-accent);
+}
 /* The model chip pair (nocx-rikz5): the endpoint and model that will answer
    a question, or the one rung of the ladder that has to be climbed first.
    A control, so it takes the pointer its neighbours do not — .nocx-chip
@@ -1059,32 +1047,27 @@
   letter-spacing: var(--term-cell-delta, 0px);
 }
 
-.term-line[data-attached] {
+/* A grant marks the whole block, never a selection-sized set of rows. */
+.cmd-block[data-granted] {
   position: relative;
   background: color-mix(in srgb, var(--color-accent), transparent 94%);
   box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-accent), transparent 35%);
 }
 
-.term-line-attachment-mark {
+.cmd-block[data-granted]::before {
+  content: '';
   position: absolute;
   inset: 0 auto 0 0;
-  width: 10px;
-  border: 0;
-  padding: 0;
-  background: transparent;
-  cursor: pointer;
+  width: 3px;
+  background: var(--color-accent);
+  pointer-events: none;
 }
 
-.term-line-attachment-mark:focus-visible {
-  outline: 1px solid var(--color-accent);
-  outline-offset: -1px;
+.cmd-block-grant-flash {
+  animation: cmd-block-grant-flash 700ms ease-out;
 }
 
-.term-line-attachment-flash {
-  animation: term-line-attachment-flash 700ms ease-out;
-}
-
-@keyframes term-line-attachment-flash {
+@keyframes cmd-block-grant-flash {
   from {
     background: color-mix(in srgb, var(--color-accent), transparent 72%);
   }
@@ -1094,7 +1077,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .term-line-attachment-flash {
+  .cmd-block-grant-flash {
     animation: none;
   }
 }

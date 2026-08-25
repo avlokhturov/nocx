@@ -28,6 +28,7 @@ const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).path
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 
 import type { PaneIdentity } from './terminal-content'
+import type { GrantBlock } from './ask-entry'
 import type { AgentStatusResult } from './generated/agent.status'
 import { EditorView } from '@codemirror/view'
 import {
@@ -85,6 +86,34 @@ vi.mock('./renderers/xterm', () => ({
 vi.mock('./ui/toast', () => ({
   showToast: vi.fn(),
 }))
+
+describe('the old attachment surface is deleted', () => {
+  it('leaves no attachment vocabulary in the grant-owned frontend files', () => {
+    const productionFiles = [
+      'editor.ts',
+      'terminal-content.ts',
+      'agent-ask.ts',
+      'ask-entry.ts',
+      'scrollback/blocks.ts',
+      'style.css',
+    ]
+    const forbidden = [
+      ['reference', 'Chip', 'Label'].join(''),
+      ['.nocx-editor', 'reference', 'count'].join('-'),
+      ['attach', 'output'].join('-'),
+      ['attach', 'Affordance'].join(''),
+      ['reference', 'Chips'].join(''),
+      ['chip', 'Fingerprint'].join(''),
+      ['data', 'attached'].join('-'),
+      ['row', 'Start'].join(''),
+      ['row', 'End'].join(''),
+    ]
+    for (const relative of productionFiles) {
+      const source = readFileSync(resolve(srcDir, relative), 'utf8')
+      for (const token of forbidden) expect(source).not.toContain(token)
+    }
+  })
+})
 
 /**
  * TerminalContent keeps the editor private; tests need the live instance the
@@ -2436,7 +2465,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
           maskedKinds: ['openai'],
           entryId: 'e-ggha',
           source: 'user',
-          redactions: [],
+          redactions: [{ kind: 'openai', start: 5, end: 11, prefix: 'sk-', suffix: 'op' }],
           maskedCommand: 'echo sk-***',
           captures: [
             {
@@ -2504,11 +2533,13 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const menuItems = Array.from(
         document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
       )
-      const attach = menuItems.find((item) => item.dataset.action === 'attach-output')
-      const ask = menuItems.find((item) => item.dataset.action === 'ask')
+      const grant = menuItems.find((item) => item.dataset.action === 'grant')
       const stop = menuItems.find((item) => item.dataset.action === 'stop')
-      expect(attach).toBeDefined()
-      expect(ask).toBeUndefined()
+      expect(grant).toBeDefined()
+      expect(grant?.textContent).toBe('ask about this block')
+      grant!.click()
+      const grantsBeforeAck = (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks
+      expect(grantsBeforeAck[0]?.command).toBe('echo sk-proj-abcdef')
       expect(stop).toBeUndefined()
       document.querySelector('.cmd-overflow-menu')?.remove()
 
@@ -2525,6 +2556,9 @@ describe('the projections consume the kernel through the composition root (ADR-0
       renderer._fireRenderFence({ hex: FENCE, line: 3, buffer: 'normal' })
       expect(rec.el.classList.contains('cmd-block-running')).toBe(false)
       await vi.waitFor(() => expect(rec.el.querySelector('.ui-block-receipt')).not.toBeNull())
+      expect(
+        (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks[0]?.command,
+      ).toBe('echo sk-***')
     } finally {
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
@@ -4418,15 +4452,12 @@ describe('a degraded session says so in the product (nocx-dvql, nocx-5uu5)', () 
 
 // ───────────────────────────────────────────────────────────────────────────
 // The ask entry gesture (nocx-4wtlh): nothing but the person changes where
-// Enter goes. Plain Enter submits to the registry's active target (the
-// shell, always, unless the person switched it); ⌘Enter is a ONE-SHOT
-// question that never touches the active target. Selecting a region of a
-// finished block's output FREEZES it into a reference chip in the input
-// line — and changes nothing else: the target does not move, and a plain
-// Enter after a selection still reaches the shell. A ⌘Enter question
-// carries exactly the chips in the line and no others. These tests drive
-// the REAL chain: real TerminalContent, real controller, real BlockManager
-// freeze, real editor submit, real registry.
+// Enter goes. Plain Enter submits to the registry's active target; ⌘Enter is
+// a one-shot question. Selecting output marks its whole containing block for
+// the next question, changes nothing else, and leaves the selection usable
+// for copy. A question carries exactly the marked block ids and no others.
+// These tests drive the real TerminalContent, controller, BlockManager,
+// editor submit, and registry chain.
 describe('the ask entry gesture (nocx-4wtlh)', () => {
   /** A client whose dispatcher answers the agent.* transaction, records
    *  EVERY dispatcher call (so the test can assert a lifecycle attempt was
@@ -4521,17 +4552,6 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     return viewOf(ed).dom.querySelector<HTMLElement>('.ui-mode-indicator')
   }
 
-  /** The single attachment counter inside the editor chrome. */
-  function attachmentCount(ed: CommandEditor): number {
-    const counter = ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')
-    if (!counter || counter.style.display === 'none') return 0
-    return Number(
-      counter
-        .querySelector('.nocx-editor-reference-count__value')
-        ?.textContent?.match(/\d+/)?.[0] ?? 0,
-    )
-  }
-
   /** Dispatch a submit key exactly where a person's keystroke lands. */
   function submitKey(ed: CommandEditor, init: KeyboardEventInit = {}): void {
     viewOf(ed).contentDOM.dispatchEvent(
@@ -4551,10 +4571,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   }
 
   /** Select rows [start, end) of a frozen block's output and fire the
-   *  selectionchange event the product listens for. jsdom does no layout,
-   *  so a real range reports no client rects; the affordance anchors to
-   *  the selection's LAST client rect, so the test supplies one rect per
-   *  covered row, as a real browser would measure. */
+   *  selectionchange event the product listens for. jsdom does no layout, so
+   *  the helper supplies one range for each covered row as a browser would. */
   function selectRows(block: HTMLElement, start: number, end: number): void {
     const lines = Array.from(block.querySelectorAll<HTMLElement>('.term-line'))
     expect(lines.length).toBeGreaterThanOrEqual(end)
@@ -4576,19 +4594,6 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     sel?.removeAllRanges()
     sel?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
-  }
-
-  /** Whether the affordance is on screen right now. */
-  function attachOfferVisible(): boolean {
-    const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')
-    return wrap !== null && wrap.style.display !== 'none'
-  }
-
-  /** Press the Attach button — the person's one way to attach. */
-  function pressAttach(): void {
-    const btn = document.body.querySelector<HTMLButtonElement>('.attach-affordance .ui-button')
-    expect(btn).not.toBeNull()
-    btn!.click()
   }
 
   /** The recorded params of one dispatcher call, narrowed to an object. */
@@ -4652,8 +4657,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const ask = recordedParams(dispatcherCalls, 'agent.ask')
       expect(ask.question).toBe('what does docs mean?')
       // A general question: no chips, no references.
-      expect(ask.references).toEqual([])
-      // Nothing shell ran FOR THE QUESTION: no pty bytes, no attempt, no
+      // A general question sends an explicit empty grant list.
+      expect(ask.attachedContent).toEqual([])
       // ledger record — the shell's history is unchanged by a question.
       // (The running block from the earlier `echo hi` is untouched — the
       // ask neither opened one of its own nor disturbed the shell's.)
@@ -4826,73 +4831,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('a selection offers to attach and attaches nothing by itself — the affordance floats, plain Enter still reaches the SHELL, and pressing Attach raises exactly one chip (nocx-a7mw7.1)', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, clipboard, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-
-      selectRows(block, 0, 2)
-      // The selection made an OFFER, not a chip: nothing is in the input
-      // line — copying output attaches nothing (the complaint the bead
-      // exists to end) — and the Attach button floats instead.
-      expect(attachmentCount(ed)).toBe(0)
-      const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')
-      expect(wrap).not.toBeNull()
-      expect(wrap!.style.display).not.toBe('none')
-      const btn = wrap?.querySelector<HTMLButtonElement>('.ui-button')
-      expect(btn?.textContent).toBe('Attach')
-
-      // The person copies the selection — the commonest thing anyone does
-      // with output. The real copy seam (a mouseup inside the scrollback)
-      // still copies, and the copy attaches NOTHING.
-      scrollbackOf(content).scrollbackArea.dispatchEvent(
-        new MouseEvent('mouseup', { bubbles: true }),
-      )
-      // BOTH halves, or this asserts nothing: the copy REACHED the clipboard,
-      // and it attached nothing. Without the first, a change that broke
-      // copy-on-select outright would pass this test — there would be no copy
-      // left to attach anything.
-      expect(clipboard.writeText).toHaveBeenCalled()
-      expect(attachmentCount(ed)).toBe(0)
-
-      // The offer changed NOTHING else: the active target is untouched and
-      // the indicator still says Run.
-      expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Run')
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-
-      // Submit with plain Enter: the SHELL receives the command — the offer
-      // never armed ask, the registry never moved, and the affordance is
-      // still on screen while the selection lives.
-      const sentBefore = sessionOf(content).send.mock.calls.length
-      ed.insertText('echo back')
-      submitKey(ed)
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore + 2)
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-      expect(activeLabel(content)).toBe('Shell')
-      expect(document.body.querySelector('.attach-affordance')?.getAttribute('style')).toContain(
-        'display: block',
-      )
-
-      // Pressing Attach freezes the offered region into exactly one chip.
-      pressAttach()
-      expect(attachmentCount(ed)).toBe(1)
-      // The press put the affordance away (the offer is spent).
-      expect(attachOfferVisible()).toBe(false)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('a drag across three rows, simulated as its intermediate selections, offers once and attaches once (nocx-a7mw7.1)', async () => {
+  it('lets a person mark a whole block from its menu, keeps the shell target, and dismisses it from the grant chip', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4903,56 +4842,36 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
+      const block = frozenBlockOf(content, 'git status', ['clean'])
+      const beforeTarget = activeLabel(content)
 
-      // The three intermediate selections a real drag fires: 1–1, 1–2,
-      // 1–3. Each moves the OFFER; none of them mints a chip.
-      selectRows(block, 0, 1)
-      expect(attachmentCount(ed)).toBe(0)
-      expect(attachOfferVisible()).toBe(true)
-      selectRows(block, 0, 2)
-      expect(attachmentCount(ed)).toBe(0)
-      selectRows(block, 0, 3)
-      expect(attachmentCount(ed)).toBe(0)
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const mark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(mark?.textContent).toBe('ask about this block')
+      mark?.click()
 
-      // One press on the final selection raises exactly ONE chip, covering
-      // the whole drag — the three intermediate selections never stacked.
-      pressAttach()
-      expect(attachmentCount(ed)).toBe(1)
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('Attach output in the block menu attaches every rendered term-line', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
-      block.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
-      const item = Array.from(
-        document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
-      ).find((button) => button.dataset.action === 'attach-output')
-      expect(item?.textContent).toBe('Attach output')
-      item?.click()
-      expect(attachmentCount(ed)).toBe(1)
-      expect(block.querySelectorAll('.term-line[data-attached]').length).toBe(3)
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')
+      expect(chip?.dataset.state).toBe('chosen')
+      expect(chip?.textContent).toContain('1')
+      expect(block.dataset.granted).toBe('true')
+      expect(activeLabel(content)).toBe(beforeTarget)
       expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
+
+      chip?.click()
+      const panel = ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
+      expect(panel?.textContent).toContain('git status')
+      panel?.querySelector<HTMLButtonElement>('[data-action="dismiss-grant"]')?.click()
+      expect(chip?.dataset.state).toBe('default')
+      expect(block.dataset.granted).toBeUndefined()
     } finally {
       teardown()
     }
   })
 
-  it('Ctrl+Shift+A attaches the current selection without summoning or moving the target', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
+  it('marks the same whole block once from a selection and from its menu', async () => {
+    const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
       { attachToDocument: true },
@@ -4964,76 +4883,23 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
       selectRows(block, 0, 2)
-      const event = new KeyboardEvent('keydown', {
-        key: 'a',
-        ctrlKey: true,
-        shiftKey: true,
-        bubbles: true,
-        cancelable: true,
-      })
-      document.dispatchEvent(event)
-      expect(event.defaultPrevented).toBe(true)
-      expect(attachmentCount(ed)).toBe(1)
-      expect(activeLabel(content)).toBe('Shell')
-      expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
-    } finally {
-      teardown()
-    }
-  })
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(chip.dataset.state).toBe('chosen')
+      expect(chip.textContent).toContain('1')
 
-  it('shows one counter beside cwd, marks covered rows, and dismisses from the mark', async () => {
-    const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs', 'orca'])
-      selectRows(block, 1, 3)
-      pressAttach()
-      const lines = Array.from(block.querySelectorAll<HTMLElement>('.term-line'))
-      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, 'true', 'true'])
-      const counter = ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')
-      expect(counter?.querySelector('.nocx-editor-reference-count__value')?.textContent).toBe(
-        '1 attachment',
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const unmark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
       )
-      expect(counter?.closest('.nocx-editor-chrome-left')).not.toBeNull()
-      expect(
-        counter
-          ?.closest<HTMLElement>('.nocx-editor-chrome-left')
-          ?.querySelector('.nocx-editor-cwd'),
-      ).not.toBeNull()
-      expect(ed.root.querySelectorAll('.nocx-editor-reference-count')).toHaveLength(1)
-      const counterButton = ed.root.querySelector<HTMLButtonElement>(
-        '.nocx-editor-reference-count',
-      )!
-      const firstAttached = lines[1]
-      const scrollIntoView = vi.fn()
-      firstAttached.scrollIntoView = scrollIntoView
-      counterButton.click()
-      expect(scrollIntoView).toHaveBeenCalledWith({ block: 'center', behavior: 'smooth' })
-      expect(firstAttached.classList.contains('term-line-attachment-flash')).toBe(true)
-      counterButton.querySelector<HTMLButtonElement>('.nocx-editor-reference-count__drop')!.click()
-      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, undefined, undefined])
-      selectRows(block, 1, 3)
-      pressAttach()
-      const mark = lines[1].querySelector<HTMLElement>('.term-line-attachment-mark')
-      expect(mark).not.toBeNull()
-      mark?.dispatchEvent(new MouseEvent('click', { bubbles: true }))
-      expect(lines.map((line) => line.dataset.attached)).toEqual([undefined, undefined, undefined])
-      expect(
-        ed.root.querySelector<HTMLElement>('.nocx-editor-reference-count')?.style.display,
-      ).toBe('none')
+      expect(unmark?.textContent).toBe('unmark')
+      unmark?.click()
+      expect(chip.textContent).toContain('0')
+      expect(block.dataset.granted).toBeUndefined()
     } finally {
       teardown()
     }
   })
-
-  it('attaching a region already attached is a no-op, not a second chip (nocx-a7mw7.1)', async () => {
+  it('sends marked block ids on a real question without capturing or leaking another block', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5044,328 +4910,26 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      const marked = frozenBlockOf(content, 'git status', ['clean'])
+      frozenBlockOf(content, 'npm test', ['passed'])
 
-      selectRows(block, 0, 2)
-      pressAttach()
-      expect(attachmentCount(ed)).toBe(1)
-      // The press spent the offer; re-selecting the IDENTICAL region
-      // re-offers, and pressing again must not stack a second chip.
-      expect(attachOfferVisible()).toBe(false)
-      selectRows(block, 0, 2)
-      expect(attachOfferVisible()).toBe(true)
-      pressAttach()
-      expect(attachmentCount(ed)).toBe(1)
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('attaching does not move the input target and does not touch the selection — asserted with the affordance on screen (nocx-4wtlh, nocx-a7mw7.1)', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
-
-      const sel = window.getSelection()!
-      const anchorBefore = sel.anchorNode
-      const focusBefore = sel.focusNode
-      const textBefore = sel.toString()
-
-      // A real press: mousedown first — the browser's default on a button
-      // would collapse the selection and steal focus — then the click.
-      const btn = document.body.querySelector<HTMLButtonElement>('.attach-affordance .ui-button')!
-      const md = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
-      btn.dispatchEvent(md)
-      expect(md.defaultPrevented).toBe(true)
-      btn.click()
-      expect(attachmentCount(ed)).toBe(1)
-
-      // The selection survived the press — same anchor, same focus, same
-      // text. Attaching touched nothing.
-      expect(sel.anchorNode).toBe(anchorBefore)
-      expect(sel.focusNode).toBe(focusBefore)
-      expect(sel.toString()).toBe(textBefore)
-      // The target never moved: Enter still goes to the shell, and nothing
-      // crossed the control plane.
-      expect(activeLabel(content)).toBe('Shell')
-      expect(indicatorOf(ed)?.textContent).toBe('Run')
-      expect(dispatcherCalls.find((c) => c.method === 'agent.ask')).toBeUndefined()
-    } finally {
-      teardown()
-    }
-  })
-
-  it('the affordance disappears when the selection collapses, and never appears for a selection that crosses blocks or lands in a running block (nocx-a7mw7.1)', async () => {
-    const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
-      expect(attachOfferVisible()).toBe(true)
-
-      // A click that collapses the selection (or any caret move).
-      const sel = window.getSelection()!
-      sel.removeAllRanges()
-      document.dispatchEvent(new Event('selectionchange'))
-      expect(attachOfferVisible()).toBe(false)
-      expect(attachmentCount(ed)).toBe(0)
-
-      // A selection crossing two blocks has no single frame: no offer.
-      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-      const linesA = block.querySelectorAll<HTMLElement>('.term-line')
-      const linesB = blockB.querySelectorAll<HTMLElement>('.term-line')
-      const range = document.createRange()
-      range.setStart(linesA[0].firstChild ?? linesA[0], 0)
-      range.setEnd(linesB[0].lastChild ?? linesB[0], (linesB[0].textContent ?? '').length)
-      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
-      sel.removeAllRanges()
-      sel.addRange(range)
-      document.dispatchEvent(new Event('selectionchange'))
-      expect(attachOfferVisible()).toBe(false)
-
-      const running = document.createElement('div')
-      running.className = 'cmd-block cmd-block-running'
-      const runningOutput = document.createElement('div')
-      runningOutput.className = 'cmd-output'
-      const runningLine = document.createElement('span')
-      runningLine.className = 'term-line'
-      runningLine.textContent = 'working'
-      runningOutput.appendChild(runningLine)
-      running.appendChild(runningOutput)
-      scrollbackOf(content).scrollbackInner.appendChild(running)
-      const runningLines = running.querySelectorAll<HTMLElement>('.term-line')
-      const runningRange = document.createRange()
-      runningRange.setStart(runningLines[0].firstChild ?? runningLines[0], 0)
-      runningRange.setEnd(runningLines[0].lastChild ?? runningLines[0], 0)
-      runningRange.getClientRects = () => [new DOMRect(100, 300, 200, 20)] as unknown as DOMRectList
-      sel.removeAllRanges()
-      sel.addRange(runningRange)
-      document.dispatchEvent(new Event('selectionchange'))
-      expect(attachOfferVisible()).toBe(false)
-      expect(attachmentCount(ed)).toBe(0)
-    } finally {
-      teardown()
-    }
-  })
-
-  it("the affordance follows the scrollback while the selection is alive — a scroll re-anchors it to the selection's current rects (nocx-a7mw7.1)", async () => {
-    const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
-      const wrap = document.body.querySelector<HTMLElement>('.attach-affordance')!
-      // The initial anchor: last rect at left 100 → right 300 (the button
-      // is 0×0 in jsdom, so the clamp returns the anchor's own values).
-      expect(wrap.style.left).toBe('300px')
-
-      // The selection scrolled up the viewport — its client rects moved.
-      const sel = window.getSelection()!
-      sel.getRangeAt(0).getClientRects = () =>
-        [new DOMRect(400, 60, 200, 20)] as unknown as DOMRectList
-      scrollbackOf(content).scrollbackArea.dispatchEvent(new Event('scroll'))
-      expect(wrap.style.left).toBe('600px')
-      expect(wrap.style.top).toBe(`${60 + 20 + 4}px`)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('a question carries the chips explicitly attached in the line and no others — two selections, one unrelated block (nocx-a7mw7.1)', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-      const unrelated = frozenBlockOf(content, 'sleep 1', ['zzz'])
-
-      selectRows(blockA, 0, 2)
-      pressAttach()
-      selectRows(blockB, 0, 1)
-      pressAttach()
-      expect(attachmentCount(ed)).toBe(2)
-
-      const sentBefore = sessionOf(content).send.mock.calls.length
-      typeAndAsk(ed, content, 'how are these related?')
+      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      document
+        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .click()
+      typeAndAsk(ed, content, 'what happened?')
       await vi.waitFor(() => {
-        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
+        expect(dispatcherCalls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
       })
 
-      // Exactly the two chip blocks were captured — the unrelated block's
-      // rows never left the DOM.
-      const frames = dispatcherCalls
-        .filter((c) => c.method === 'agent.captureFrame')
-        .map((c) => (c.params as { rows: { text: string }[] }).rows.map((r) => r.text))
-      expect(frames).toHaveLength(2)
-      expect(frames).toContainEqual(['total 12', 'docs'])
-      expect(frames).toContainEqual(['commit abc'])
-      // The unrelated block's rows exist in the flow and never left it.
-      expect(
-        Array.from(unrelated.querySelectorAll('.term-line')).map((l) => l.textContent),
-      ).toEqual(['zzz'])
-      expect(frames.some((f) => f.includes('zzz'))).toBe(false)
-
-      // The references are exactly the chips — each with its own region and
-      // its own frame.
-      const ask = recordedParams(dispatcherCalls, 'agent.ask')
-      expect(ask.references).toEqual([
-        { frameId: 'frame-1', region: { rowStart: 0, rowEnd: 2 } },
-        { frameId: 'frame-2', region: { rowStart: 0, rowEnd: 1 } },
-      ])
-      // Nothing shell ran; the chips were consumed by the question.
-      expect(sessionOf(content).send.mock.calls.length).toBe(sentBefore)
-      expect(attachmentCount(ed)).toBe(0)
-    } finally {
-      teardown()
-    }
-  })
-
-  it('an explicitly attached chip can be dismissed from the line, and the next question carries what remains (nocx-a7mw7.1)', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-
-      selectRows(blockA, 0, 2)
-      pressAttach()
-      selectRows(blockB, 0, 1)
-      pressAttach()
-      blockA
-        .querySelector<HTMLElement>('.term-line-attachment-mark')!
-        .dispatchEvent(new MouseEvent('click', { bubbles: true }))
-      expect(attachmentCount(ed)).toBe(1)
-
-      typeAndAsk(ed, content, 'what is left?')
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
+      expect(dispatcherCalls.some((call) => call.method === 'agent.captureFrame')).toBe(false)
+      const ask = dispatcherCalls.find((call) => call.method === 'agent.ask')!
+      expect(ask.params).toMatchObject({
+        question: 'what happened?',
+        attachedContent: [
+          { itemId: marked.dataset.blockId, command: 'git status', state: 'exited' },
+        ],
       })
-      const ask = recordedParams(dispatcherCalls, 'agent.ask')
-      expect(ask.references).toEqual([{ frameId: 'frame-1', region: { rowStart: 0, rowEnd: 1 } }])
-    } finally {
-      teardown()
-    }
-  })
-  it('the editor stays available after explicitly attached context — a second question works while the first streams, and each answer lands on its own entry (nocx-wmy4, nocx-a7mw7.1)', async () => {
-    const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(
-      makeClipboard(),
-      { attachToDocument: true },
-      client,
-    )
-    try {
-      content.setVisible(true)
-      _resetThemeState()
-      ed.show()
-      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
-      const blockA = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      const blockB = frozenBlockOf(content, 'git log', ['commit abc'])
-      // Question one, through the REAL gesture: ⌘Enter to Ask, then Enter.
-      selectRows(blockA, 0, 2)
-      pressAttach()
-      typeAndAsk(ed, content, 'what does docs mean?')
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(1)
-      })
-      // The question left the editor up — no handoff.
-      expect(ed.isVisible).toBe(true)
-
-      // While the first answer streams, point at block B and ask again.
-      selectRows(blockB, 0, 1)
-      pressAttach()
-      typeAndAsk(ed, content, 'what did it fix?')
-      await vi.waitFor(() => {
-        expect(dispatcherCalls.filter((c) => c.method === 'agent.ask')).toHaveLength(2)
-      })
-      // The second payload carries block B's rows.
-      const frames = dispatcherCalls
-        .filter((c) => c.method === 'agent.captureFrame')
-        .map((c) => (c.params as { rows: { text: string }[] }).rows.map((r) => r.text))
-      expect(frames).toHaveLength(2)
-      expect(frames[1]).toEqual([{ kind: 'text', text: 'commit abc' }].map((r) => r.text))
-
-      // Both streams interleave through the REAL subscription seam; each
-      // run's deltas land on its own answer block, never the other's.
-      deliverNotification(client, 'agent.runDelta', {
-        runId: 7,
-        entryId: 'entry-7',
-        seq: 0,
-        text: 'docs: a directory',
-      })
-      deliverNotification(client, 'agent.runDelta', {
-        runId: 8,
-        entryId: 'entry-8',
-        seq: 0,
-        text: 'fix: the bug',
-      })
-      deliverNotification(client, 'agent.runDelta', {
-        runId: 7,
-        entryId: 'entry-7',
-        seq: 1,
-        text: ' of files',
-      })
-      deliverNotification(client, 'agent.runDelta', {
-        runId: 8,
-        entryId: 'entry-8',
-        seq: 1,
-        text: ' now',
-      })
-      const answers = Array.from(
-        scrollback.scrollbackInner.querySelectorAll<HTMLElement>('[data-entry-id]'),
-      )
-      expect(answers).toHaveLength(2)
-      const bodyOf = (entryId: string): string | undefined =>
-        answers.find((a) => a.dataset.entryId === entryId)?.querySelector('.cmd-output')
-          ?.textContent
-      expect(bodyOf('entry-7')).toBe('docs: a directory of files')
-      expect(bodyOf('entry-8')).toBe('fix: the bug now')
-
-      deliverNotification(client, 'agent.runState', { runId: 7, state: 'completed' })
-      deliverNotification(client, 'agent.runState', { runId: 8, state: 'completed' })
-      await vi.waitFor(() => {
-        expect(
-          answers.every((a) => a.querySelector('.cmd-header-exit')?.textContent === 'completed'),
-        ).toBe(true)
-      })
-      expect(ed.isVisible).toBe(true)
     } finally {
       teardown()
     }
@@ -5483,10 +5047,17 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
+
+      const marked = frozenBlockOf(content, 'git status', ['clean'])
+      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      document
+        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .click()
+      const grantChip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(grantChip.dataset.state).toBe('chosen')
 
       typeAndAsk(ed, content, 'why did it fail?')
+
       await vi.waitFor(() => {
         expect(dispatcherCalls.some((c) => c.method === 'agent.ask')).toBe(true)
       })
@@ -5495,6 +5066,8 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
           expect.objectContaining({ level: 'warning', message: 'no endpoint configured' }),
         )
       })
+      expect(marked.dataset.granted).toBe('true')
+      expect(grantChip.dataset.state).toBe('chosen')
       // The editor stays up for the next attempt — a refusal is not a
       // handoff and not a dead end.
       expect(ed.isVisible).toBe(true)
@@ -7683,7 +7256,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return items.find((el) => el.dataset.action === action)
   }
 
-  it('the running block’s ⋮ menu offers Ask about this command, and it does what the chord does', async () => {
+  it('the running block’s ⋮ menu offers the same whole-block grant as a finished block', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7695,8 +7268,6 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       const handler = lifecycleHandler(client)
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
-      // A real submit, so the running block is the one a person's Enter
-      // opened rather than a fixture.
       ed.insertText('sleep 300')
       view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
@@ -7710,12 +7281,15 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       })
       expect(ed.isVisible).toBe(false)
 
-      const ask = itemNamed(runningBlockMenu(content), 'ask')
-      expect(ask, 'the running block’s menu offers no way to ask about it').toBeDefined()
-      ask!.click()
+      const grant = itemNamed(runningBlockMenu(content), 'grant')
+      expect(grant?.textContent).toBe('ask about this block')
+      grant?.click()
 
-      expect(ed.isVisible).toBe(true)
-      expect(targetNamed(ed)).toBe('agent')
+      const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
+      expect(block?.dataset.granted).toBe('true')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
+        'chosen',
+      )
     } finally {
       restore()
       teardown()

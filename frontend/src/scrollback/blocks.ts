@@ -829,17 +829,14 @@ export type AnswerTextSource = (entryId: string) => Promise<string | null>
  *  a gesture nobody uses, and two implementations of one action are two
  *  behaviours waiting to diverge. */
 export interface RunningBlockActions {
-  /** Summon the editor to ask about this command — what ⌘/Ctrl+Enter does.
-   *  A turn has no second question action, so this is optional there. */
-  ask?(): void
-  /** Stop it, through the backend's escalation ladder. */
+  /** Stop a live command through the backend's escalation ladder. */
   stop(): void
-  /** Whether time-limited actions still belong to this specific block.
-   *  The host owns this identity-aware derivation; the DOM class is only a
-   *  visual transition and may lag a logical completion. */
+  /** Whether time-limited actions still belong to this specific block. */
   isActive(blockEl: HTMLElement): boolean
-  /** Attach all output rows through the host's single chip seam. */
-  attachOutput?(blockEl: HTMLElement, rowStart: number, rowEnd: number): void
+  /** Whether this block is currently granted to the next question. */
+  isGranted?(blockEl: HTMLElement): boolean
+  /** Toggle this whole block's grant, independent of liveness. */
+  toggleGrant?(blockEl: HTMLElement): void
 }
 
 function buildOverflowMenu(
@@ -998,24 +995,19 @@ function buildOverflowMenu(
         else clipboardFallback(`${intent()}\n${stored}`)
       })
     })
-    const isActive = running?.isActive(blockEl) ?? false
 
-    if (!isActive && running?.attachOutput) {
-      const attach = document.createElement('button')
-      attach.className = 'cmd-overflow-menu-item'
-      attach.dataset.action = 'attach-output'
-      attach.textContent = 'Attach output'
-      attach.addEventListener('click', (ev) => {
+    const isActive = running?.isActive(blockEl) ?? false
+    if (running?.toggleGrant) {
+      const grant = document.createElement('button')
+      grant.className = 'cmd-overflow-menu-item'
+      grant.dataset.action = 'grant'
+      grant.textContent = running.isGranted?.(blockEl) ? 'unmark' : 'ask about this block'
+      grant.addEventListener('click', (ev) => {
         ev.stopPropagation()
-        if (running.isActive(blockEl)) {
-          closeMenu()
-          return
-        }
-        const rowEnd = blockEl.querySelectorAll('.cmd-output .term-line').length
-        if (rowEnd > 0) running.attachOutput?.(blockEl, 0, rowEnd)
+        running.toggleGrant?.(blockEl)
         closeMenu()
       })
-      menu.appendChild(attach)
+      menu.appendChild(grant)
     }
     // Wrap is a per-block override of the kind's default, and it lives here
     // rather than as a control on the block because it is rare: the kind is
@@ -1049,29 +1041,9 @@ function buildOverflowMenu(
       closeMenu()
     })
 
-    // THE TWO THINGS A PERSON CAN DO ABOUT A COMMAND THAT IS STILL RUNNING
-    // (nocx-92gfl, nocx-23rph). Present only while it runs, and only when
-    // the host supplied the handlers: a finished block has nothing to ask
+    // Stopping remains time-limited; granting the whole block does not.
+    // Stopping is the only liveness-bound action; granting is not.
     if (running && isActive) {
-      const timeLimited: HTMLElement[] = []
-      if (running.ask) {
-        const ask = document.createElement('button')
-        ask.className = 'cmd-overflow-menu-item'
-        // The identity is the attribute, not the word: the word can be
-        // translated and the CSS and the tests read this.
-        ask.dataset.action = 'ask'
-        ask.textContent = 'Ask about this command'
-        ask.addEventListener('click', (ev) => {
-          ev.stopPropagation()
-          if (!running.isActive(blockEl)) {
-            closeMenu()
-            return
-          }
-          closeMenu()
-          running.ask?.()
-        })
-        timeLimited.push(ask)
-      }
       const stop = document.createElement('button')
       stop.className = 'cmd-overflow-menu-item'
       stop.dataset.action = 'stop'
@@ -1085,8 +1057,7 @@ function buildOverflowMenu(
         closeMenu()
         running.stop()
       })
-      timeLimited.push(stop)
-      menu.append(...timeLimited)
+      menu.append(stop)
     }
     menu.append(copyCmd, copyOut, copyAll, wrapItem)
     // Render at body level so it floats above all scroll containers (P1-6).
@@ -1113,6 +1084,11 @@ function buildOverflowMenu(
     menu.style.position = 'fixed'
     const btnRect = btn.getBoundingClientRect()
     const menuRect = menu.getBoundingClientRect()
+    // Freeze the measured shell dimensions before assigning its final
+    // coordinates. This keeps the clamp calculation stable in browsers whose
+    // fixed-position box reports a different static rect after placement.
+    menu.style.width = `${menuRect.width}px`
+    menu.style.height = `${menuRect.height}px`
     // Right-aligned to the button, exactly where the fixed `right` it
     // replaces put it.
     const { left, top } = clampMenuPosition(

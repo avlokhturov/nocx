@@ -19,7 +19,6 @@ import {
   FENCE_DEFER_MS,
   type BlockKind,
 } from './blocks'
-import { chipFromSelection } from '../ask-entry'
 import { clampMenuPosition } from '../ui/menu-geometry'
 import { shellHighlightReady } from '../shell-highlight'
 import { applyReasoningExpanded } from '../reasoning-expanded'
@@ -2561,28 +2560,6 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
     await vi.waitFor(() => expect(copied).toEqual(['printf "hi"\necho done']))
   })
 
-  it('reference-chip selection spans prose and hidden fence rows as one answer output', () => {
-    const { manager } = newManager()
-    const h = manager.addAnswerBlock('q', '/')
-    h.append('before\n```\nprintf "hi"\n```\nafter')
-    h.close('success')
-
-    const prose = h.el.querySelector<HTMLElement>('.cmd-output > .term-line')!
-    const codeRows = Array.from(h.el.querySelectorAll<HTMLElement>('.cmd-output-code .term-line'))
-    const selection = window.getSelection()!
-    const range = document.createRange()
-    range.setStart(prose.firstChild!, 0)
-    const closing = codeRows[codeRows.length - 1]
-    range.setEnd(closing.firstChild!, closing.textContent.length)
-    selection.removeAllRanges()
-    selection.addRange(range)
-
-    const chip = chipFromSelection(selection)
-    expect(chip?.blockEl).toBe(prose.closest('.cmd-block'))
-    expect(chip?.rowStart).toBe(0)
-    expect(chip?.rowEnd).toBe(4)
-  })
-
   it('keeps an unclosed fence stable within one answer run, then starts prose at the next answer boundary', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
@@ -3260,71 +3237,135 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
   })
 })
 
-/**
- * WHAT A RUNNING BLOCK'S ⋮ MENU OFFERS (nocx-92gfl, nocx-23rph).
- *
- * Both gestures also exist as a keystroke — ⌘/Ctrl+Enter summons the editor
- * to ask, Ctrl+C interrupts — and the menu is what makes them findable: a
- * chord nobody can see is a gesture nobody uses. It is a second DOOR to the
- * host's handlers and never a second implementation, so what this file
- * asserts is that the items exist, that they call through, and that they
- * exist ONLY while the command is running.
- *
- * They are added to the menu the kit already draws for every block, not to a
- * menu of their own: one vocabulary for "what can I do with this block".
- */
-describe('the running block’s ⋮ menu acts on the command, not just its text', () => {
+describe('the block grant menu action', () => {
   const menuItems = (el: HTMLElement): HTMLElement[] => {
     el.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
     return Array.from(document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'))
   }
-  const named = (items: HTMLElement[], action: string): HTMLElement | undefined =>
-    items.find((i) => i.dataset.action === action)
 
   afterEach(() => {
-    document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    document.querySelectorAll('.cmd-overflow-menu').forEach((menu) => menu.remove())
   })
 
-  it('offers Ask about this command and Stop, and each calls the host’s handler once', () => {
+  it('marks running and finished blocks through one liveness-free action', () => {
     const container = document.createElement('div')
-    const ask = vi.fn()
-    const stop = vi.fn()
-    const el = createRunningBlock(
+    const toggleGrant = vi.fn()
+    const isActive = vi.fn(() => true)
+    const running = createRunningBlock(
       1,
-      'du -Hs /',
+      'git status',
       '~',
       '',
       () => container,
       noopSelect,
       freshStore(),
       'shell',
-      { ask, stop, isActive: () => true },
+      { stop: vi.fn(), isActive, toggleGrant },
+    )
+    const finished = createCommandBlock(
+      'command',
+      2,
+      'npm test',
+      '~',
+      '',
+      '<span class="term-line">ok</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      { stop: vi.fn(), isActive, toggleGrant },
+    )
+    document.body.append(running, finished)
+    try {
+      const runningGrant = menuItems(running).find((item) => item.dataset.action === 'grant')
+      expect(runningGrant?.textContent).toBe('ask about this block')
+      isActive.mockClear()
+      runningGrant?.click()
+      expect(toggleGrant).toHaveBeenCalledWith(running)
+      expect(isActive).not.toHaveBeenCalled()
+
+      const finishedGrant = menuItems(finished).find((item) => item.dataset.action === 'grant')
+      expect(finishedGrant?.textContent).toBe('ask about this block')
+      isActive.mockClear()
+      finishedGrant?.click()
+      expect(toggleGrant).toHaveBeenCalledWith(finished)
+      expect(isActive).not.toHaveBeenCalled()
+    } finally {
+      running.remove()
+      finished.remove()
+    }
+  })
+
+  it('labels the same item unmark when the block is already granted', () => {
+    const container = document.createElement('div')
+    const el = createCommandBlock(
+      'command',
+      3,
+      'pwd',
+      '~',
+      '',
+      '<span class="term-line">/tmp</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      {
+        stop: vi.fn(),
+        isActive: vi.fn(),
+        isGranted: () => true,
+        toggleGrant: vi.fn(),
+      },
     )
     document.body.append(el)
     try {
-      const items = menuItems(el)
-      expect(named(items, 'ask')?.textContent).toBe('Ask about this command')
-      expect(named(items, 'stop')?.textContent).toBe('Stop')
-      named(items, 'ask')!.click()
-      expect(ask).toHaveBeenCalledTimes(1)
+      const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
+      expect(grant?.textContent).toBe('unmark')
+    } finally {
+      el.remove()
+    }
+  })
 
-      named(menuItems(el), 'stop')!.click()
+  it("a running block's Stop action calls the host once and closes its menu", () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    const el = createRunningBlock(
+      4,
+      'npm test',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: vi.fn(() => true) },
+    )
+    document.body.append(el)
+    try {
+      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
+      expect(stopItem?.textContent).toBe('Stop')
+      stopItem!.click()
       expect(stop).toHaveBeenCalledTimes(1)
-      // The click closed the menu: an action that acts on the block behind
-      // its own popover would leave the popover over the result.
       expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
     } finally {
       el.remove()
     }
   })
 
-  it('rechecks liveness before a time-limited action fires', () => {
+  it('rechecks liveness before Stop fires', () => {
     const container = document.createElement('div')
     const stop = vi.fn()
     let active = true
     const el = createRunningBlock(
-      1,
-      'du -Hs /',
+      5,
+      'npm test',
       '~',
       '',
       () => container,
@@ -3335,9 +3376,9 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
     )
     document.body.append(el)
     try {
-      const items = menuItems(el)
+      const stopItem = menuItems(el).find((item) => item.dataset.action === 'stop')
       active = false
-      named(items, 'stop')!.click()
+      stopItem!.click()
       expect(stop).not.toHaveBeenCalled()
       expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
     } finally {
@@ -3345,121 +3386,39 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
     }
   })
 
-  it('rechecks liveness before Attach output fires', () => {
+  it('uses supplied block liveness to gate Stop', () => {
     const container = document.createElement('div')
-    const attachOutput = vi.fn()
-    let active = false
-    const el = createCommandBlock(
-      'command',
-      1,
-      'du -Hs /',
-      '~',
-      '',
-      '<span class="term-line">12K\t/</span>',
-      120,
-      0,
-      'success',
-      () => container,
-      noopSelect,
-      freshStore(),
-      'shell',
-      undefined,
-      { isActive: () => active, stop: vi.fn(), attachOutput },
-    )
-    document.body.append(el)
-    try {
-      const items = menuItems(el)
-      active = true
-      named(items, 'attach-output')!.click()
-      expect(attachOutput).not.toHaveBeenCalled()
-    } finally {
-      el.remove()
-    }
-  })
-
-  it('uses the supplied block liveness for both time-limited and attach actions', () => {
-    const container = document.createElement('div')
-    const attachOutput = vi.fn()
     const isActive = vi.fn(() => false)
     const el = createRunningBlock(
-      1,
-      'du -Hs /',
+      6,
+      'npm test',
       '~',
       '',
       () => container,
       noopSelect,
       freshStore(),
       'shell',
-      { ask: vi.fn(), stop: vi.fn(), isActive, attachOutput },
+      { stop: vi.fn(), isActive },
     )
     document.body.append(el)
     try {
       const items = menuItems(el)
-      expect(named(items, 'attach-output')?.textContent).toBe('Attach output')
-      expect(named(items, 'ask')).toBeUndefined()
-      expect(named(items, 'stop')).toBeUndefined()
+      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
       expect(isActive).toHaveBeenCalledWith(el)
     } finally {
       el.remove()
-      document.querySelector('.cmd-overflow-menu')?.remove()
-    }
-
-    const finished = createCommandBlock(
-      'command',
-      2,
-      'du -Hs /',
-      '~',
-      '',
-      '<span class="term-line">12K\t/</span>',
-      120,
-      0,
-      'success',
-      () => container,
-      noopSelect,
-      freshStore(),
-      'shell',
-      undefined,
-      { ask: vi.fn(), stop: vi.fn(), isActive: () => true, attachOutput },
-    )
-    document.body.append(finished)
-    try {
-      const items = menuItems(finished)
-      expect(named(items, 'attach-output')).toBeUndefined()
-      expect(named(items, 'ask')?.textContent).toBe('Ask about this command')
-      expect(named(items, 'stop')?.textContent).toBe('Stop')
-    } finally {
-      finished.remove()
     }
   })
 
-  it('and a block with no running actions wired keeps exactly the menu it had', () => {
-    const container = document.createElement('div')
-    const el = createRunningBlock(1, 'du -Hs /', '~', '', () => container, noopSelect, freshStore())
-    document.body.append(el)
-    try {
-      const items = menuItems(el)
-      expect(named(items, 'ask')).toBeUndefined()
-      expect(named(items, 'stop')).toBeUndefined()
-      expect(items.map((i) => i.textContent)).toEqual([
-        'Copy command',
-        'Copy output',
-        'Copy all',
-        'Wrap lines',
-      ])
-    } finally {
-      el.remove()
-    }
-  })
-
-  it('a FROZEN block offers neither: there is nothing left to stop, and its output is right there', () => {
+  it('a frozen block offers no Stop action', () => {
     const container = document.createElement('div')
     const el = createCommandBlock(
       'command',
-      1,
-      'du -Hs /',
+      7,
+      'npm test',
       '~',
       '',
-      '<span class="term-line">12K\t/</span>',
+      '<span class="term-line">ok</span>',
       120,
       0,
       'success',
@@ -3470,69 +3429,89 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
     )
     document.body.append(el)
     try {
-      const items = menuItems(el)
-      expect(named(items, 'ask')).toBeUndefined()
-      expect(named(items, 'stop')).toBeUndefined()
+      expect(menuItems(el).find((item) => item.dataset.action === 'stop')).toBeUndefined()
     } finally {
       el.remove()
     }
   })
-  it('offers Attach output for the rendered output span and delegates the chip action', () => {
+
+  it('rechecks the block before Stop fires when another command starts', () => {
     const container = document.createElement('div')
-    const attachOutput = vi.fn()
-    const el = createCommandBlock(
-      'command',
-      1,
-      'du -Hs /',
+    const stop = vi.fn()
+    let activeBlock: HTMLElement | null = null
+    const actions = {
+      stop,
+      isActive: vi.fn((blockEl: HTMLElement) => blockEl === activeBlock),
+    }
+    const first = createRunningBlock(
+      4,
+      'npm test',
       '~',
       '',
-      '<span class="term-line">12K\t/</span><span class="term-line">second row</span>',
-      120,
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      actions,
+    )
+    const second = createRunningBlock(
+      5,
+      'git status',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      actions,
+    )
+    activeBlock = first
+    document.body.append(first, second)
+    try {
+      const menu = menuItems(first)
+      const stopItem = menu.find((item) => item.dataset.action === 'stop')
+      expect(stopItem?.textContent).toBe('Stop')
+      expect(actions.isActive).toHaveBeenCalledWith(first)
+
+      activeBlock = second
+      stopItem?.click()
+
+      expect(actions.isActive).toHaveBeenLastCalledWith(first)
+      expect(stop).not.toHaveBeenCalled()
+    } finally {
+      first.remove()
+      second.remove()
+    }
+  })
+
+  it('keeps an unwired host on its ordinary copy and wrap menu', () => {
+    const container = document.createElement('div')
+    const el = createCommandBlock(
+      'command',
+      6,
+      'pwd',
+      '~',
+      '',
+      '<span class="term-line">/repo</span>',
+      10,
       0,
       'success',
       () => container,
       noopSelect,
       freshStore(),
       'shell',
-      undefined,
-      { ask: vi.fn(), stop: vi.fn(), isActive: () => false, attachOutput },
     )
-    document.body.append(el)
+    document.body.appendChild(el)
     try {
       const items = menuItems(el)
-      const attach = named(items, 'attach-output')
-      expect(attach?.textContent).toBe('Attach output')
-      attach?.click()
-      expect(attachOutput).toHaveBeenCalledWith(el, 0, 2)
+      const labels = items.map((item) => item.textContent)
+      expect(labels).toEqual(
+        expect.arrayContaining(['Copy command', 'Copy output', 'Copy all', 'Wrap lines']),
+      )
+      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(items.find((item) => item.dataset.action === 'stop')).toBeUndefined()
     } finally {
       el.remove()
-    }
-    const answerAttachOutput = vi.fn()
-    const answer = createCommandBlock(
-      'ask',
-      2,
-      'What happened?',
-      '~',
-      '',
-      '<span class="term-line">answer row</span><span class="term-line">second answer row</span>',
-      null,
-      null,
-      'success',
-      () => container,
-      noopSelect,
-      freshStore(),
-      'shell',
-      undefined,
-      { ask: vi.fn(), stop: vi.fn(), isActive: () => false, attachOutput: answerAttachOutput },
-    )
-    document.body.append(answer)
-    try {
-      const answerAttach = named(menuItems(answer), 'attach-output')
-      expect(answerAttach?.textContent).toBe('Attach output')
-      answerAttach?.click()
-      expect(answerAttachOutput).toHaveBeenCalledWith(answer, 0, 2)
-    } finally {
-      answer.remove()
     }
   })
 })
