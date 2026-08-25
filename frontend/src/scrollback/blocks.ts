@@ -110,13 +110,13 @@ type BuiltStatus = Exclude<HeaderStatus, 'running'>
 
 // ── Block kind ─────────────────────────────────────────────────────────────
 
-/** A block's content grammar (nocx-ex636, ADR-0037). The FRAME — a header, a
+/** A block's content grammar (nocx-ex636, ADR-0040). The FRAME — a header, a
  *  body, selection, the overflow menu — is shared by every block; the
  *  grammar is not. A question is prose and a command is a command line, and a
  *  fifth kind must declare itself in the rules table instead of inheriting
  *  the command's rules by accident.
  *
- *  `text` and `tool` are what a TURN is made of (ADR-0037): its children are
+ *  `text` and `tool` are what a TURN is made of (ADR-0040): its children are
  *  the causal sequence, top to bottom, and each one is an ordinary block with
  *  its own id, its own selection and its own place in the order. A `text`
  *  block is one run of assistant prose, and a `tool` block is one call that
@@ -131,7 +131,7 @@ export type BlockKind = 'command' | 'ask' | 'text' | 'tool'
 export interface BlockKindRules {
   /** Whether the block draws a HEADER at all.
    *
-   *  A run of prose does not, and that is the point of ADR-0037: there is
+   *  A run of prose does not, and that is the point of ADR-0040: there is
    *  nothing to name it — the intent was the question — and a header
    *  repeating the question is the `continued` badge this ADR deleted. The
    *  block is still a real block: it has an id, it selects, and it holds a
@@ -268,7 +268,7 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       },
     },
   },
-  // One run of assistant prose (ADR-0037). No header — see `header` above —
+  // One run of assistant prose (ADR-0040). No header — see `header` above —
   // and the same wrapping body a whole answer used to have, because it IS
   // that body: what changed is that a turn now has several of them in order
   // rather than one string with offsets cut into it.
@@ -279,7 +279,7 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     statusChips: null,
     headerRight: { chips: [], terminal: () => null },
   },
-  // One tool call that opened no block of its own (ADR-0037). It is a HEADER
+  // One tool call that opened no block of its own (ADR-0040). It is a HEADER
   // and nothing else: the header names the tool and the arguments it ran on,
   // which is what tells two calls of one tool apart, and the call's result
   // has an owner already (the ledger's attempt). The name is prose and never
@@ -324,7 +324,7 @@ export interface AnswerBlockHandle {
    *  block, off agent.runDelta. A chunk naming a DIFFERENT block than the
    *  one being written opens the next run of prose, which is how the turn
    *  gets its several runs; the boundary is the BACKEND's and is never
-   *  worked out here (ADR-0037: while the cut was the renderer's, the live
+   *  worked out here (ADR-0040: while the cut was the renderer's, the live
    *  path and the restore each computed it and could drift).
    *
    *  Omitted for a sentence the RENDERER writes into the flow — the dropped
@@ -332,7 +332,7 @@ export interface AnswerBlockHandle {
    *  rather than declaring a boundary of its own. */
   append(this: void, text: string, blockId?: string): void
   /** Draw one tool call (agent.runToolCall) as a CHILD of the turn, in the
-   *  seat it arrived at (ADR-0037). Never a top-level block: the call
+   *  seat it arrived at (ADR-0040). Never a top-level block: the call
    *  belongs to the turn that made it, and its position among the turn's
    *  children is what says when it happened.
    *
@@ -375,11 +375,11 @@ export interface AnswerToolCall {
   /** What the model asked for, as the tool's schema validated it. This is
    *  what NAMES the call: the tool and the derived resource are the same for
    *  two calls of one session-scoped tool, and the arguments are what tell
-   *  them apart (ADR-0037). */
+   *  them apart (ADR-0040). */
   args?: Record<string, unknown>
   resource?: { kind: string; id: string }
   /** Whether this call's work becomes a BLOCK of its own — the tool
-   *  declaration's fact, off the wire (ADR-0037). True and the turn draws
+   *  declaration's fact, off the wire (ADR-0040). True and the turn draws
    *  NO child for the call: the block the command opened is the account of
    *  it and takes the next seat. False and the call's own child is the only
    *  thing that says it occurred.
@@ -1148,7 +1148,7 @@ export function deselectAllBlocks(container: HTMLElement): boolean {
  * Drag (mousedown+move) starts text selection and does NOT select the block.
  * @param onSelect callback(id, selected) — notifies the manager of selection changes.
  *
- * THE INNERMOST BLOCK OWNS THE CLICK (ADR-0037). A turn CONTAINS the blocks
+ * THE INNERMOST BLOCK OWNS THE CLICK (ADR-0040). A turn CONTAINS the blocks
  * it caused now, so a click inside a child bubbles through the parent's
  * listener too, and both would claim it — two surfaces owning one input,
  * which AGENTS.md forbids whichever one wins by evaluation order. The nearest
@@ -1269,7 +1269,7 @@ export function createCommandBlock(
   }
 
   // A kind that draws no header draws no ⋮ either — the button lives in the
-  // header — and a run of prose is the one that does not (ADR-0037): there
+  // header — and a run of prose is the one that does not (ADR-0040): there
   // is nothing to name it, because the intent was the question.
   if (rules.header) {
     const header = createHeader(
@@ -1312,7 +1312,7 @@ export function createCommandBlock(
     if ((e.target as HTMLElement).closest('.cmd-overflow-btn, .cmd-overflow-menu')) return
     // The innermost block owns the gesture, for the reason selection does:
     // a turn contains the blocks it caused, so the same double-click reaches
-    // every ancestor's listener (ADR-0037).
+    // every ancestor's listener (ADR-0040).
     if ((e.target as HTMLElement).closest('.cmd-block') !== wrapper) return
     if (e.detail !== 2) return
     e.preventDefault()
@@ -1624,7 +1624,7 @@ export class BlockManager {
   /** The fence hex consumed by the last freeze — a replay of it (one seen
    *  for an already-frozen block) does nothing. */
   private _consumedFence: string | null = null
-  /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0037).
+  /** WHERE THE NEXT BLOCK THIS MANAGER OPENS BELONGS (ADR-0040).
    *
    *  A turn's `run` call is announced BEFORE the command is submitted, and
    *  the command is then submitted through the ordinary path — the same
@@ -1662,7 +1662,7 @@ export class BlockManager {
   }
 
   /** Put a COMMAND block in the next seat: inside the turn that claimed it
-   *  (ADR-0037), or — nobody claimed it — at the tail of the scrollback,
+   *  (ADR-0040), or — nobody claimed it — at the tail of the scrollback,
    *  where every block a person opens goes.
    *
    *  A nested block is still remembered by `_owned`: `clearAll` walks one
@@ -2246,7 +2246,7 @@ export class BlockManager {
   }
 
   /**
-   * Open a TURN in the scrollback (nocx-x8s2.2, ADR-0037): the question as
+   * Open a TURN in the scrollback (nocx-x8s2.2, ADR-0040): the question as
    * its header, and the blocks it causes as its CHILDREN, in order.
    *
    * A TURN IS ONE BLOCK THAT CARRIES WHAT IT CAUSED. Its children, top to
@@ -2256,7 +2256,7 @@ export class BlockManager {
    * order is the store's, and vertical position in a terminal is a claim
    * about time.
    *
-   * WHAT THIS REPLACES, AND WHY (ADR-0037). The turn used to be drawn as
+   * WHAT THIS REPLACES, AND WHY (ADR-0040). The turn used to be drawn as
    * SEVERAL top-level blocks: the answer was one stored string, a command it
    * ran landed at the tail of the scrollback, and the only way to read in
    * order was to CUT the prose at the offset the call happened at and open a
@@ -2389,7 +2389,7 @@ export class BlockManager {
      *  The boundary is never decided here. The backend opens a `text` block
      *  on the first delta after a call and seals it when the next call
      *  arrives, and the id rides every delta; all this does is notice that
-     *  the id changed (ADR-0037: while the cut was the renderer's, the live
+     *  the id changed (ADR-0040: while the cut was the renderer's, the live
      *  path and the restore each computed it and could drift). */
     const proseBody = (blockId: string | undefined): AnswerBody => {
       if (prose && (blockId === undefined || prose.blockId === blockId)) return prose.body
@@ -2458,7 +2458,7 @@ export class BlockManager {
         // meanwhile: the waiting chip is removed only by a delta or a close.
         showTyping()
         if (call.opensBlock) {
-          // THE BLOCK IS THE ACCOUNT OF THIS CALL (ADR-0037). The command is
+          // THE BLOCK IS THE ACCOUNT OF THIS CALL (ADR-0040). The command is
           // submitted through the ordinary path, and the turn claims the seat
           // it lands in, so the command's own block — its header, its output,
           // its exit status, its ⋮ — stands exactly where the call happened.
@@ -2471,7 +2471,7 @@ export class BlockManager {
         // the arguments it ran on. The arguments are the whole point — the
         // tool and the derived resource are identical for two calls of one
         // session-scoped tool, and `blocks.read blockId=3` and
-        // `blocks.read blockId=4` must read differently (ADR-0037).
+        // `blocks.read blockId=4` must read differently (ADR-0040).
         const cid = mintId()
         const cel = createCommandBlock(
           'tool',

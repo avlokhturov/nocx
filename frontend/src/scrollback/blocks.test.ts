@@ -1831,7 +1831,7 @@ function newManager(
 }
 
 describe('BlockManager.addAnswerBlock', () => {
-  // ── the turn's children, in order (ADR-0037, nocx-s92so) ────────────
+  // ── the turn's children, in order (ADR-0040, nocx-s92so) ────────────
 
   /** Everything a reader meets inside a turn, in DOM order, each as
    *  "kind:text" — the ORDER is the property these tests are about, so
@@ -1929,7 +1929,7 @@ describe('BlockManager.addAnswerBlock', () => {
     const h = manager.addAnswerBlock('q', '/')
     // A call that opens NO block, so its own child is what a repeat
     // announcement could duplicate — a `run` call draws none at all
-    // (ADR-0037), and this test is about the idempotence, not about which
+    // (ADR-0040), and this test is about the idempotence, not about which
     // tool it was.
     const call = {
       callId: 'call_1',
@@ -2502,7 +2502,7 @@ describe('the block kind owns the grammar (nocx-ex636)', () => {
   })
 
   it('a run of prose carries the wrapping class its kind declares', () => {
-    // The body hangs on the `text` child now, not on the turn (ADR-0037) —
+    // The body hangs on the `text` child now, not on the turn (ADR-0040) —
     // and the class still comes from the kind's rules, which own the wrap
     // policy: prose wraps, a command's grid does not (nocx-juau).
     const { manager } = newManager()
@@ -3226,7 +3226,7 @@ describe('the header’s right-hand group has one owner (nocx-hoeq3)', () => {
   })
 
   it('the turn states its outcome once, on its own header, however much it did', () => {
-    // Criterion 5, as ADR-0037 leaves it. The outcome used to be a question
+    // Criterion 5, as ADR-0040 leaves it. The outcome used to be a question
     // of WHICH FRAGMENT states it — the turn was several blocks and only the
     // last one had ended. There is one block now, so how long the turn took
     // and how it ended land on the header that carries the question, and no

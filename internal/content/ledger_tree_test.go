@@ -1,7 +1,7 @@
 package content_test
 
-// Entries are an ordered tree, and prose is a block (ADR-0037, amending
-// ADR-0036).
+// Entries are an ordered tree, and prose is a block (ADR-0040, amending
+// ADR-0039).
 //
 // A turn is drawn as a sequence — the model writes prose, calls a tool,
 // writes more prose, runs a command, concludes — and on screen that ORDER is

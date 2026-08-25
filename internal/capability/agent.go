@@ -23,7 +23,7 @@ type AgentService interface {
 	CaptureFrame(ctx context.Context, in content.CaptureFrame) (content.CaptureFrameResult, error)
 	// SubmitAsk records one ask transaction atomically (the turn, its pending
 	// run and its reference edges) and returns the backend-minted run id. It
-	// opens no body: a turn's body is its `text` children now (ADR-0037), and
+	// opens no body: a turn's body is its `text` children now (ADR-0040), and
 	// the first one is opened by the stream, not by the ask.
 	SubmitAsk(ctx context.Context, in content.AgentAsk) (content.AgentAskResult, error)
 	// TransitionRun moves the run to a non-terminal state (prepared →
@@ -32,7 +32,7 @@ type AgentService interface {
 	// FinishAgentRun closes the run and its entries in one transaction.
 	FinishAgentRun(ctx context.Context, runID int64, in content.FinishAgentRun) error
 	// OpenProse opens one run of assistant prose under the turn: a `text`
-	// child at the next free seat with an artifact of its own (ADR-0037).
+	// child at the next free seat with an artifact of its own (ADR-0040).
 	// The stream calls it on the first delta after a call — the backend owns
 	// where one run of prose begins, so the renderer never decides it. runID
 	// is the run printing it, recorded on the block so a turn with more than
@@ -40,7 +40,7 @@ type AgentService interface {
 	OpenProse(ctx context.Context, turnID string, runID int64) (content.ProseBlock, error)
 	// PriorTurn is the conversation read: the agent turn preceding
 	// beforeEntryID in paneID, with the prose of the run that answered it,
-	// already arranged (ADR-0037 — the conversation is assembled from the
+	// already arranged (ADR-0040 — the conversation is assembled from the
 	// children, in pos order, per run). Nil when nothing precedes it.
 	PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*content.PriorTurn, error)
 	// SealProse seals one prose block's body: the boundary arrived (the next

@@ -179,7 +179,7 @@ type AttemptLedger interface {
 	StartExecution(ctx context.Context, in content.StartExecution) (int64, error)
 	FinishExecution(ctx context.Context, executionID int64, end content.FinishExecution) error
 	// AddCause seats an entry this turn caused as the next child of the
-	// turn's own entry (nocx-h1l4o, ADR-0037). The store assigns the seat;
+	// turn's own entry (nocx-h1l4o, ADR-0040). The store assigns the seat;
 	// see content.LedgerRepository.AddCause for why the caller may not.
 	AddCause(ctx context.Context, turnID, causedID string) (int, error)
 }
@@ -212,7 +212,7 @@ type policyMiddleware struct {
 	runID     string
 	attempt   int
 	// turnEntryID is the TURN's own ledger entry — the thing every entry
-	// this run causes is joined to (nocx-h1l4o, ADR-0036's closing
+	// this run causes is joined to (nocx-h1l4o, ADR-0039's closing
 	// sentence).
 	//
 	// HOW A RUN ID MAPS TO ITS TURN, since the run id is what this
@@ -1249,7 +1249,7 @@ func (m *policyMiddleware) runWithRetained(decl agenttools.Tool, callID string, 
 }
 
 // noteCause seats one entry this turn caused under the turn (nocx-h1l4o,
-// ADR-0037): the command a `run` call opened, the action entry of any other
+// ADR-0040): the command a `run` call opened, the action entry of any other
 // call, the proposal entry of an escalation. The seat inside the turn is the
 // store's — see content.LedgerRepository.AddCause.
 //

@@ -68,7 +68,7 @@ export interface RestoredBlockFacts {
    *  live one does. */
   entryId?: string
   /**
-   * Whether the prose of THIS RUN is no longer kept (ADR-0037's retention
+   * Whether the prose of THIS RUN is no longer kept (ADR-0040's retention
    * rule, ADR-0019 §7). The TURN's notice is gated on this FACT, never on
    * `body === null` alone: a turn that never streamed a word has an empty
    * body and everything is fine (nothing was lost), while a turn whose
@@ -122,7 +122,7 @@ export function restoredBlock(
   // capture stored.
   //
   // The EVICTED SENTENCE is the TURN's alone: a run whose prose is gone is
-  // reported once, on the turn that owns it (ADR-0037's retention rule) —
+  // reported once, on the turn that owns it (ADR-0040's retention rule) —
   // never one sentence per hole. A text child whose body is null therefore
   // draws an empty block where its rows used to be, and a command whose
   // terminal body was evicted says its own sentence on its own block.
@@ -214,14 +214,14 @@ export interface RestoredCause {
  *  the ledger holds for it. `proseEvicted` is inherited from the block
  *  facts — the turn's own notice is the block's, gated on that fact. */
 export interface RestoredTurnFacts extends Omit<RestoredBlockFacts, 'id'> {
-  /** The turn's children, in the seat order the ledger stored (ADR-0037). */
+  /** The turn's children, in the seat order the ledger stored (ADR-0040). */
   causes?: RestoredCause[]
 }
 
 /**
  * Build one restored TURN: its block, then the blocks it caused, drawn
  * INSIDE the turn exactly as the live path draws its children — one
- * `.cmd-children` box under the header, each child at its seat (ADR-0037).
+ * `.cmd-children` box under the header, each child at its seat (ADR-0040).
  * The turn and its children are ONE block with ONE question.
  *
  * WHAT THE RESTORED TURN DRAWS, AND WHY IT IS THE SAME LIST. Live, the

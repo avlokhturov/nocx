@@ -5902,7 +5902,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
 		"an undeclared field on a cause": body(
 			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
-		// THE ANCHOR IS GONE FROM THE CONTRACT (ADR-0037), so it is refused
+		// THE ANCHOR IS GONE FROM THE CONTRACT (ADR-0040), so it is refused
 		// like any other field nobody declared — additionalProperties does
 		// that, and this is the assertion that it really is off the schema
 		// rather than merely unset by the server.
@@ -5917,7 +5917,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 		// The arguments are required for the reason the resource is: two
 		// calls of one session-scoped tool have the same tool and the same
 		// resource, and a cause that will not say what it ASKED FOR is one a
-		// restored turn cannot tell from its neighbour (ADR-0037). A shell
+		// restored turn cannot tell from its neighbour (ADR-0040). A shell
 		// child says `null` — it asked for nothing — and that is still
 		// saying it.
 		"a cause that will not say what it asked for": body(
@@ -5940,7 +5940,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	if err := validateJSONErr(schema, []byte(ok)); err != nil {
 		t.Fatalf("the schema refused a well-formed cause: %v", err)
 	}
-	// And a run of prose, which is a child like any other since ADR-0037: it
+	// And a run of prose, which is a child like any other since ADR-0040: it
 	// names no intent, has no effect and no resource, and opens no block. The
 	// server sends these now, so a schema that could not express one would be
 	// a contract the wire cannot keep.

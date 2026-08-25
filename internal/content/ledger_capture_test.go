@@ -90,7 +90,7 @@ func TestCaptureOutput_StoresTheBodyWithItsProvenance(t *testing.T) {
 	if art.ByteLen != int64(len(capturedBody)) {
 		t.Fatalf("byte_len = %d, want %d", art.ByteLen, len(capturedBody))
 	}
-	// It BELONGS to the entry (ADR-0037) and records the entry's own
+	// It BELONGS to the entry (ADR-0040) and records the entry's own
 	// execution as its provenance — the one RecordCompleted wrote in the
 	// same transaction as the entry. An artifact against somebody else's
 	// block is a body attributed to a command that did not print it.

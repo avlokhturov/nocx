@@ -1,4 +1,4 @@
-# ADR-0036 — An assistant turn is one ledger entry: the question is its intent, the answer is its body
+# ADR-0039 — An assistant turn is one ledger entry: the question is its intent, the answer is its body
 
 - **Status:** Accepted
 - **Date:** 2026-08-23
@@ -39,7 +39,7 @@ not carry. The owner, shown this: «вопрос — это команда. А �
 artifact on the turn's own run execution. There is no answer entry and no `caused-by` edge
 between them.
 
-> **Amended 2026-08-23 by [ADR-0037](0037-a-block-is-a-node-in-an-ordered-tree.md).** The
+> **Amended 2026-08-23 by [ADR-0040](0040-a-block-is-a-node-in-an-ordered-tree.md).** The
 > first sentence stands: a turn is one entry, and that entry is its IDENTITY — the id the
 > deltas route by, the grant hangs off, and copy and the conversation address. The second
 > no longer does. **A turn's answer is not an artifact of its own; the turn's body is its
@@ -159,11 +159,11 @@ re-litigation without amending this ADR again.**
   claim about time, and that claim would be that the command preceded the intent that
   caused it.
 
-## Amendment, 2026-08-23 (second) — the answer is not one artifact; the turn's body is its children ([ADR-0037](0037-a-block-is-a-node-in-an-ordered-tree.md))
+## Amendment, 2026-08-23 (second) — the answer is not one artifact; the turn's body is its children ([ADR-0040](0040-a-block-is-a-node-in-an-ordered-tree.md))
 
 The first amendment above bought the interleaving with an ANCHOR: `caused-by`'s payload
 carries `at`, the offset into the answer where each cause sat, and the renderer cuts the
-stored answer at those offsets. ADR-0037 removes both the cut and the offset, and the
+stored answer at those offsets. ADR-0040 removes both the cut and the offset, and the
 reason is this ADR's own: it retired the separate answer entry because that entry "was only
 ever an ADDRESS for the deltas". `at` is the same shape one layer down — a coordinate that
 exists only because the unit that is DRAWN (a run of prose) and the unit that is STORED

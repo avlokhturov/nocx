@@ -1,7 +1,7 @@
 package transport
 
 // The follow-up question carries the turn before it (bead nocx-dc2fr.5,
-// ADR-0037's closing consequence: "the conversation is assembled from the
+// ADR-0040's closing consequence: "the conversation is assembled from the
 // children, in pos order, per run").
 //
 // A turn's answer used to be one stored string, so "send the previous answer"
@@ -257,7 +257,7 @@ func TestAgentAsk_AnEarlierTurnThatMadeNoCallsIsOneMessage(t *testing.T) {
 
 // ── acceptance 3: an evicted answer SAYS SO ──────────────────────────────
 
-// Retention takes the prose of one run as a unit (ADR-0037's retention rule),
+// Retention takes the prose of one run as a unit (ADR-0040's retention rule),
 // and a turn whose prose has gone keeps every block. The follow-up must then
 // carry the earlier question with a STATED absence where the answer was —
 // never a hole (which reads as "that question was never answered") and never

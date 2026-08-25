@@ -125,7 +125,7 @@ overwrite-on-quit lifecycle that makes only the last session restorable, and no 
 conversation view is a filter over `kind='agent'` and the tree beneath each turn, which is
 cheap and throws nothing away.
 
-> **Amended 2026-08-23 by [ADR-0037](0037-a-block-is-a-node-in-an-ordered-tree.md).** This
+> **Amended 2026-08-23 by [ADR-0040](0040-a-block-is-a-node-in-an-ordered-tree.md).** This
 > line named a `conversation_id` column, which is dropped: it was threaded from a
 > `SubmitEntry` field no caller ever set, so every row carried NULL and no projection could
 > ever have used it. What replaces it is stronger than what was described — a turn's prose,

@@ -672,7 +672,7 @@ func TestLedgerGet_ProseEvictedOverTheWire(t *testing.T) {
 // A PROSE BLOCK'S BODY REACHES THE RENDERER (nocx-dc2fr.7, and it did not).
 //
 // An artifact belongs to its BLOCK and names an execution only when an
-// attempt produced it (ADR-0037 decision 3). A run of assistant prose was
+// attempt produced it (ADR-0040 decision 3). A run of assistant prose was
 // printed, not attempted, so its body hangs on the entry alone — and
 // handleGet flattened `row.Executions` only. Every prose body was therefore
 // stored, read back by the ledger, and dropped at the wire: the live turn was

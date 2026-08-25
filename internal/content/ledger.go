@@ -27,7 +27,7 @@ package content
 // AddCause and Caused were never on that list: they arrived wired
 // (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for
 // every entry a turn causes (policyMiddleware.noteCause) and ledger.get
-// reaches Caused. Since ADR-0037 both work the tree — AddCause seats a child,
+// reaches Caused. Since ADR-0040 both work the tree — AddCause seats a child,
 // Caused reads a block's children in pos order — rather than the retired
 // `caused-by` edge. Both were checked with `deadcode -tags gtk3 -whylive`,
 // which is the only form that answers this question — see the note below
@@ -76,7 +76,7 @@ const (
 	EntryShell  EntryKind = "shell"
 	EntryAsk    EntryKind = "ask"
 	EntryAction EntryKind = "action"
-	// EntryText is one run of assistant prose (ADR-0037): a thing that was
+	// EntryText is one run of assistant prose (ADR-0040): a thing that was
 	// PRINTED, not attempted. It has no intent, no execution and no outcome
 	// to wait for, so the schema's CHECK pins its shape — inside a block
 	// (parent and pos), empty intent, born closed and successful. Everything
@@ -132,7 +132,7 @@ const (
 // Relation is the edge vocabulary (design §3.4).
 type Relation string
 
-// `caused-by` was here and is retired (ADR-0037): containment is
+// `caused-by` was here and is retired (ADR-0040): containment is
 // entries.parent_id now, which is one parent the database enforces rather
 // than however many rows anybody inserted. What is left is what is genuinely
 // not a tree.
@@ -382,7 +382,7 @@ type SubmitEntry struct {
 	// outside a terminal and every submit before nocx-rtg0.28 look like.
 	PaneID    *string
 	SessionID *string
-	// ParentID and Pos place the entry IN THE TREE (ADR-0037): the block it
+	// ParentID and Pos place the entry IN THE TREE (ADR-0040): the block it
 	// sits inside and where among that block's children it sits. Both nil is
 	// a top-level block, whose order stays ingest_seq.
 	//
@@ -827,15 +827,15 @@ type AgentAsk struct {
 // never executed.
 //
 // ONE entry id and not two (nocx-4em1z). A turn is a block: the question is
-// the entry's intent, and its BODY IS ITS CHILDREN (ADR-0037, amending
-// ADR-0036). The answer used to be an entry of its own joined by a caused-by
+// the entry's intent, and its BODY IS ITS CHILDREN (ADR-0040, amending
+// ADR-0039). The answer used to be an entry of its own joined by a caused-by
 // edge (assistant design §5) and nothing needed it to be — its id was a
 // routing ADDRESS for deltas, reasoning, tool calls and copy, and the
 // turn's own id addresses all four.
 //
 // NO ANSWER ARTIFACT IS OPENED HERE, and the absence is the change. The ask
 // used to open one text/plain artifact on the run and every delta appended to
-// it, which is precisely the arrangement ADR-0037 retires: the unit that is
+// it, which is precisely the arrangement ADR-0040 retires: the unit that is
 // DRAWN (a run of prose) and the unit that was STORED (the whole answer) were
 // different things, and something had to translate between them. The run
 // opens a `text` child per run of prose instead (OpenProse), so the turn
@@ -850,7 +850,7 @@ type AgentAskResult struct {
 	Replayed  bool
 }
 
-// ProseBlock is one run of assistant prose as the store holds it (ADR-0037):
+// ProseBlock is one run of assistant prose as the store holds it (ADR-0040):
 // the `text` child of the turn, and the artifact that child's deltas append
 // to. Two ids because they are two rows doing two jobs — the block is what is
 // DRAWN and what the wire addresses, the artifact is the body it grows.
@@ -863,11 +863,11 @@ type ProseBlock struct {
 }
 
 // ProseFacts is the part of a TEXT entry's payload the ledger reads back:
-// WHICH RUN printed this piece of prose (ADR-0037's "the conversation is
+// WHICH RUN printed this piece of prose (ADR-0040's "the conversation is
 // assembled from the children, in pos order, per run").
 //
 // It is a payload key rather than a column because it is what ONE kind has —
-// the distinction ADR-0037 drew when it rejected an attributes table: "a
+// the distinction ADR-0040 drew when it rejected an attributes table: "a
 // column is what every kind has and the database must check, and payload is
 // what one kind has". And it is deliberately not artifacts.execution_id: that
 // column says which ATTEMPT produced a body, and a run of prose was printed
@@ -941,7 +941,7 @@ type TurnProse struct {
 	// call was made, and a sentence written after it is a conclusion drawn
 	// from its output.
 	Text string
-	// Evicted says retention took the bodies of this run's prose (ADR-0037's
+	// Evicted says retention took the bodies of this run's prose (ADR-0040's
 	// retention rule: the prose of one run is evicted as a unit). It is read
 	// off the SAME receipt LedgerEntry.ProseEvicted reads — the sweep's mark
 	// on the body — narrowed to this run's blocks, so there is one stored
@@ -1036,7 +1036,7 @@ type CaptureOutput struct {
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
 // never one BLOB.
 type AppendArtifact struct {
-	// EntryID is the OWNER: the block this is a body of (ADR-0037). Required.
+	// EntryID is the OWNER: the block this is a body of (ADR-0040). Required.
 	EntryID string
 	// ExecutionID is PROVENANCE: which attempt produced this body. Nil when
 	// there was no attempt — a `text` block was printed, not run.
@@ -1074,7 +1074,7 @@ type Edge struct {
 	// Payload is the edge's sparse extension — for a `references` edge it
 	// is the region JSON (FrameRegion). Default '{}'; the store never
 	// interprets it. It carried a `caused-by` edge's causal position until
-	// ADR-0037 made containment a column, and no relation left here has a
+	// ADR-0040 made containment a column, and no relation left here has a
 	// field the store reads.
 	Payload string
 }
@@ -1094,7 +1094,7 @@ type ActionFacts struct {
 	// written with the attempt and read back here so a RESTORED call can be
 	// named the same way the live one was.
 	//
-	// It has a reader now, and that is the change (ADR-0037). Two calls of
+	// It has a reader now, and that is the change (ADR-0040). Two calls of
 	// one session-scoped tool have the same tool name and the same derived
 	// resource; what separates them is the arguments, so a restore without
 	// them would say strictly less than the live announcement did — the
@@ -1104,7 +1104,7 @@ type ActionFacts struct {
 	// (agenttools.Declaration.OpensBlock), written with the attempt: the
 	// call's work became a BLOCK of its own, so that block — its command, its
 	// output, its exit status — is the account of the call, and a second child
-	// beside it would restate the same command twice (ADR-0037).
+	// beside it would restate the same command twice (ADR-0040).
 	//
 	// Stored rather than matched on Tool by the reader, for the reason
 	// Effect is stored: a reader holding its own list of which tools open
@@ -1117,7 +1117,7 @@ type ActionFacts struct {
 }
 
 // CausedEntry is one CHILD of a block, resolved: its seat and the facts a
-// reader needs to draw it, off its own row (ADR-0037).
+// reader needs to draw it, off its own row (ADR-0040).
 //
 // It used to be a `caused-by` edge's other end and it is a child row now.
 // What it carried and no longer does is `at` — how far the turn's prose had
@@ -1333,7 +1333,7 @@ type LedgerEntry struct {
 	// wrote it exited (design §6.1).
 	PaneID    *string
 	SessionID *string
-	// ParentID and Pos are the entry's place in the tree (ADR-0037): the
+	// ParentID and Pos are the entry's place in the tree (ADR-0040): the
 	// block it sits inside and its seat among that block's children. Both nil
 	// on a top-level block.
 	ParentID    *string
@@ -1354,7 +1354,7 @@ type LedgerEntry struct {
 	Sensitivity Sensitivity
 	Payload     string
 	// Artifacts are the entry's OWN bodies — the ones no execution produced
-	// (ADR-0037 decision 3: an artifact belongs to its block, and which
+	// (ADR-0040 decision 3: an artifact belongs to its block, and which
 	// attempt made it is a second, weaker fact that a `text` block does not
 	// have). A run of prose is exactly that case, and without this it could
 	// be written and never enumerated: the per-execution lists below reach a
@@ -1367,7 +1367,7 @@ type LedgerEntry struct {
 	// the recall read never hauls bytes.
 	Artifacts []Artifact
 	// ProseEvicted says the prose of THIS RUN is no longer kept: retention
-	// took the bodies of its `text` children (ADR-0037's retention rule,
+	// took the bodies of its `text` children (ADR-0040's retention rule,
 	// ADR-0019 §7). It is the ONE place a reader asks that question, and it
 	// is a fact about the RUN because the run is the unit — the prose of one
 	// run is retained or evicted together, so a turn cut into seven pieces
@@ -1421,7 +1421,7 @@ type Execution struct {
 type Artifact struct {
 	ID string
 	// EntryID is the block this body belongs to; ExecutionID is which
-	// attempt produced it, nil when there was none (ADR-0037).
+	// attempt produced it, nil when there was none (ADR-0040).
 	EntryID        string
 	ExecutionID    *int64
 	MediaType      MediaType
@@ -1543,7 +1543,7 @@ type LedgerRepository interface {
 	// EvictEntries walks, and a pinned body is exempt for the same reason.
 	//
 	// IT EVICTS UNITS, NOT ARTIFACTS. The prose of one assistant run is one
-	// unit (ADR-0037): a pass that takes one `text` body of a run takes all
+	// unit (ADR-0040): a pass that takes one `text` body of a run takes all
 	// of them, and a pin on any piece exempts the whole run. Everything else
 	// is its own unit, so a command's terminal body still evicts
 	// independently of the prose around it. Max bounds the pass in bodies
@@ -1611,7 +1611,7 @@ type LedgerRepository interface {
 	// Idempotent on (ID, Client, digest): a replay returns the original
 	// run id; the same ask id with different content is ErrIDConflict.
 	SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentAskResult, error)
-	// OpenProse opens ONE run of assistant prose under a turn (ADR-0037): a
+	// OpenProse opens ONE run of assistant prose under a turn (ADR-0040): a
 	// `text` child at the turn's next free seat, with an artifact of its own
 	// for the deltas that follow. Both rows land in one transaction — a block
 	// with nowhere to put its text is not a block anyone can draw.
@@ -1669,8 +1669,8 @@ type LedgerRepository interface {
 	// Edges returns every edge touching entryID, in either direction.
 	Edges(ctx context.Context, entryID string) ([]Edge, error)
 	// AddCause seats an EXISTING entry as the next child of turnID and
-	// returns the seat it took (nocx-h1l4o, ADR-0036's closing sentence, as
-	// amended by ADR-0037). It is the write path for a block the turn caused
+	// returns the seat it took (nocx-h1l4o, ADR-0039's closing sentence, as
+	// amended by ADR-0040). It is the write path for a block the turn caused
 	// but did not create — a command a `run` call opened, the action entry
 	// of a tool call — whose row was submitted before anyone knew where in
 	// the turn it belonged. An entry that knows its place when it is written
@@ -1699,7 +1699,7 @@ type LedgerRepository interface {
 	AddCause(ctx context.Context, turnID, causedID string) (int, error)
 	// Caused returns entryID's CHILDREN in pos order — everything drawn
 	// inside that block, prose included — each resolved into what a reader
-	// draws it with. It read `caused-by` edges until ADR-0037 made
+	// draws it with. It read `caused-by` edges until ADR-0040 made
 	// containment a column; the order it returns is the order on screen, and
 	// the sequence is the whole meaning (a sentence before a command is why
 	// the command was run). Empty — never an error — for a block with no
@@ -1718,7 +1718,7 @@ type LedgerRepository interface {
 	// stands, and what that run printed in what order — and each of them has
 	// exactly one right answer. A caller that stitched them from a children
 	// read would be a second owner of the arrangement, in the surface with
-	// the least idea what it means, which is the defect ADR-0037 exists to
+	// the least idea what it means, which is the defect ADR-0040 exists to
 	// remove.
 	//
 	// beforeEntryID names the turn to look BEFORE, and it is resolved to that

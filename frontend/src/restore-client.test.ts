@@ -116,7 +116,7 @@ describe('restore-client — a block says what it is by what its body is', () =>
   //
   // A command the assistant ran used to be recorded as `kind=agent`, because
   // that column carried WHO submitted it as well as WHAT the row is. Once
-  // ADR-0037 took the turn's own artifact away and the grammar started being
+  // ADR-0040 took the turn's own artifact away and the grammar started being
   // read from the kind, that command came back drawn as PROSE: reflowing
   // text where a terminal grid belongs, with the grid's alignment gone.
   //
@@ -137,8 +137,8 @@ describe('restore-client — a block says what it is by what its body is', () =>
     })
   })
 
-  it('a whole agent turn answers with NO artifact and is still an ask (ADR-0037)', async () => {
-    // Since ADR-0037 a turn carries no artifact of its own: its prose is
+  it('a whole agent turn answers with NO artifact and is still an ask (ADR-0040)', async () => {
+    // Since ADR-0040 a turn carries no artifact of its own: its prose is
     // `text` children. So an empty artifact list is the ORDINARY shape of
     // a turn, never evidence it was a command — the kind is the entry's.
     const { client } = fakeLedger([], 'ask')
@@ -242,7 +242,7 @@ describe('restore-client — the pane read', () => {
 
 // ── what a turn caused, and where it goes (nocx-h1l4o) ────────────────────
 //
-// ADR-0036 made a turn one entry and left this: the things a turn caused are
+// ADR-0039 made a turn one entry and left this: the things a turn caused are
 // separate entries, and until the `caused-by` relation existed a restored tab
 // had nothing to join them with. `ingest_seq` is commit order and explicitly
 // NOT causality (ADR-0019 §2), so the arrangement is read from the relation
@@ -337,7 +337,7 @@ describe('restore-client — blocks arranged by the relation', () => {
 
   const cause = (entryId: string, position: number) => ({
     entryId,
-    // The child's seat among its siblings (ADR-0037). It replaces the `at`
+    // The child's seat among its siblings (ADR-0040). It replaces the `at`
     // this fixture used to carry — how far the turn's prose had got when the
     // cause happened — which existed only while a turn's prose was one string
     // to be cut. Irrelevant to the arrangement asserted here either way: this

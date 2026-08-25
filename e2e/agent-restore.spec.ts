@@ -190,7 +190,7 @@ async function storedWith(
 }
 
 /** Wait until the STORE holds a turn and its PROSE text child carries a
- *  text/plain body (ADR-0037: the answer is a `text` child, and the child
+ *  text/plain body (ADR-0040: the answer is a `text` child, and the child
  *  owns its own artifact). The command/agent halves still use `storedWith`
  *  — their bodies hang on the entry or an execution. */
 async function storedProseChild(
@@ -337,7 +337,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     const liveAgentBlock = blockFor(page, AGENT_COMMAND).first()
     await expect(liveAgentBlock).toBeVisible({ timeout: 30_000 })
 
-    // ── The turn reads in the order it happened (ADR-0037) ─────────────
+    // ── The turn reads in the order it happened (ADR-0040) ─────────────
     // The owner's report was this sequence inverted: the answer finished
     // above the evidence it was distilled from. Now the turn is ONE block
     // whose OWN header is the question and whose children are the causal
@@ -399,7 +399,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
 
     // The assistant's command: still a command block, still carrying its
     // output, and it still says who ran it. This is the badge half.
-    // BY ITS OWN HEADER, not by containing the text (ADR-0037). A command
+    // BY ITS OWN HEADER, not by containing the text (ADR-0040). A command
     // the assistant ran is a CHILD of its turn now, so the turn contains
     // that text too and `blockFor(...).first()` picks the turn — whose kind
     // is `ask`, which is what this used to fail on. A block whose own
@@ -414,7 +414,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
 
     // The dialogue: back at all — it used to be absent entirely — and back as
     // the turn it was. The question is the block's own line and the answer
-    // is a `text` CHILD (ADR-0037: a turn carries the prose it wrote as a
+    // is a `text` CHILD (ADR-0040: a turn carries the prose it wrote as a
     // child in seat order, and a restored prose child carries its text).
     // The kind is `ask` rather than `command`, which is what keeps the prose
     // wrapping instead of being held to a grid.
@@ -429,7 +429,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await expect(turn).not.toHaveAttribute('data-output-evicted', 'true')
 
     // The turn that RAN something comes back arranged exactly as it was
-    // drawn (ADR-0037 criterion 9): the relation and the prose anchors are
+    // drawn (ADR-0040 criterion 9): the relation and the prose anchors are
     // stored, so the restored view of one turn is the live one it came
     // from — ONE turn block, its question once, its children in the same
     // seats, and the restored prose child carrying its text.

@@ -1,4 +1,4 @@
-// What a tool call is CALLED on screen (ADR-0037) — one owner, because the
+// What a tool call is CALLED on screen (ADR-0040) — one owner, because the
 // header of a tool block and anything else that ever has to name a call must
 // not each invent their own phrasing.
 //

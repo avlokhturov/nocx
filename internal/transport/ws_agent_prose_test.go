@@ -1,7 +1,7 @@
 package transport
 
 // The run writes PROSE BLOCKS, and the backend owns the boundary between them
-// (ADR-0037, amending ADR-0036).
+// (ADR-0040, amending ADR-0039).
 //
 // A turn used to be one entry whose answer was ONE artifact: every delta of
 // the whole run appended to it, and the things the turn caused were joined to
@@ -578,7 +578,7 @@ func TestProseBlocksAreNotAnchoredToThePane(t *testing.T) {
 // again, so the text after the approval is the CONTINUATION of the text before
 // it. Numbering it from 0 again would collide; opening a second `text` block
 // for it would cut one sentence in half at a place nothing happened — which is
-// the defect ADR-0037 exists to remove, arriving by the one door the ADR does
+// the defect ADR-0040 exists to remove, arriving by the one door the ADR does
 // not close.
 //
 // The suspension is scripted rather than driven through a real tool, and that
@@ -693,7 +693,7 @@ func TestBlocksRead_OfATurnReturnsItsProse(t *testing.T) {
 		t.Fatalf("blockBody: %v", err)
 	}
 	if !got.kept {
-		t.Fatal("the turn reports that it kept no body — its answer is its prose children (ADR-0037)")
+		t.Fatal("the turn reports that it kept no body — its answer is its prose children (ADR-0040)")
 	}
 	// ONE answer, however many pieces the calls cut it into: a reader asking
 	// for the block's body is asking what the assistant said, and where the

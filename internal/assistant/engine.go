@@ -327,7 +327,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 
 	// The answer as it stands: accumulated for the "did this endpoint
 	// actually answer" check below, and for nothing else. It carried a
-	// UTF-16 LENGTH beside it until ADR-0037, which the middleware read to
+	// UTF-16 LENGTH beside it until ADR-0040, which the middleware read to
 	// anchor each cause in the prose; prose is a `text` entry with a seat of
 	// its own now, so there is no offset left to take.
 	//

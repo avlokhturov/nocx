@@ -433,7 +433,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	// One edge: the references edge (question → frame, region carried).
 	// Design §5 had a second — a caused-by from an answer entry of its own —
 	// and there is no such entry (nocx-4em1z) and no such relation
-	// (ADR-0037): containment is a column now.
+	// (ADR-0040): containment is a column now.
 	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
@@ -459,7 +459,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	}
 	// NOTHING CONTAINS THE TURN, because there is no second entry it could
 	// be the answer of: a turn is ONE entry whose body is its CHILDREN
-	// (nocx-4em1z as amended by ADR-0037). The tree is free for what actually
+	// (nocx-4em1z as amended by ADR-0040). The tree is free for what actually
 	// needs it — an action, a command, a run of prose, each drawn inside its
 	// turn.
 	//
@@ -482,7 +482,7 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 		t.Errorf("the turn's execution has no run state — it IS the run")
 	}
 	if len(turn.Executions[0].Artifacts) != 0 {
-		t.Fatalf("the ask opened %d artifacts, want none — the answer's body is its `text` children (ADR-0037): %+v",
+		t.Fatalf("the ask opened %d artifacts, want none — the answer's body is its `text` children (ADR-0040): %+v",
 			len(turn.Executions[0].Artifacts), turn.Executions[0].Artifacts)
 	}
 	// The paired success, so "none" is not passing because the read is
@@ -941,7 +941,7 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 	// The run still exists (the question is recorded and answerable): the
 	// turn carries a prepared run and no body at all — the same shape as a
 	// referenced ask, minus the edges. The deltas will land in the `text`
-	// children the run opens as it writes them (ADR-0037), so there is
+	// children the run opens as it writes them (ADR-0040), so there is
 	// nothing to carry here yet.
 	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
@@ -1025,7 +1025,7 @@ func TestTransitionRun_SkipToApprovalRefused(t *testing.T) {
 // §5's stated reason is untouched by this and is asserted below: the answer is
 // an ARTIFACT with provenance, not a string in a column (ADR-0019 §6).
 //
-// ADR-0037 amends the OTHER half. "One entry" stays true of the turn's
+// ADR-0040 amends the OTHER half. "One entry" stays true of the turn's
 // IDENTITY — one row routes the deltas, carries the grant and is what a
 // restore reads back — and what is dropped is "its own body is the answer".
 // The turn's body is its `text` CHILDREN now, one per run of prose, so the
@@ -1068,7 +1068,7 @@ func TestAnAskIsOneEntryWhoseBodyIsItsProseChildren(t *testing.T) {
 		runBodies = append(runBodies, ex.Artifacts...)
 	}
 	if len(runBodies) != 0 {
-		t.Fatalf("the ask left %d artifacts on the run, want none (ADR-0037): %+v", len(runBodies), runBodies)
+		t.Fatalf("the ask left %d artifacts on the run, want none (ADR-0040): %+v", len(runBodies), runBodies)
 	}
 
 	// The paired success, and it is the assertion §5's reason survives in: a

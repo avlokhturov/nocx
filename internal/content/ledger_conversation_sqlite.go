@@ -1,6 +1,6 @@
 package content
 
-// The conversation read (ADR-0037's closing consequence): "the conversation is
+// The conversation read (ADR-0040's closing consequence): "the conversation is
 // assembled from the children, in pos order, per run".
 //
 // It lives in the ledger and not in the caller, and that is the decision this
@@ -10,7 +10,7 @@ package content
 // run whose answer stands, ordered by seat, with their bodies read back. Every
 // one of those three steps has exactly one right answer, and a reader that
 // stitched them itself would be a second owner of the arrangement (AD-8), in
-// the surface with the least idea what it means. That is the shape ADR-0037
+// the surface with the least idea what it means. That is the shape ADR-0040
 // exists to remove, and putting it back one layer up would be the same defect
 // under a different roof.
 //
@@ -26,7 +26,7 @@ package content
 //     how many `text` children exist — an interrupted run leaves exactly the
 //     rows a finished one leaves. So the state is carried out with the text
 //     and the caller is told, rather than guessing from a length.
-//   - EVICTION. Retention takes the prose of one run as a unit (ADR-0037's
+//   - EVICTION. Retention takes the prose of one run as a unit (ADR-0040's
 //     retention rule). A turn whose prose is gone must be reported gone —
 //     TurnProse.Evicted — so that a caller can say so instead of leaving a
 //     hole or inventing text.

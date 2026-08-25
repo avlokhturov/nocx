@@ -300,7 +300,7 @@ describe('a block built from the store', () => {
 
   it('the question appears exactly once, however many blocks the turn caused', () => {
     // The `continued` badge and the repeated header are gone with the
-    // fragments (ADR-0037): a restored turn says its question once, like a
+    // fragments (ADR-0040): a restored turn says its question once, like a
     // live one.
     const [el] = turn([
       { entryId: 'cmd-1', kind: 'shell', source: 'user' },
@@ -314,7 +314,7 @@ describe('a block built from the store', () => {
   })
 
   it('the blocks it caused are drawn inside the turn, in the seat order the ledger gave', () => {
-    // ADR-0037: the turn CARRIES its children. A restored turn is ONE
+    // ADR-0040: the turn CARRIES its children. A restored turn is ONE
     // block whose `.cmd-children` hold the same seats the store recorded,
     // exactly as the live path draws them.
     const [el] = turn([

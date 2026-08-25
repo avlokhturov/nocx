@@ -256,7 +256,7 @@ type AskParams struct {
 	RunID   string
 	Attempt int
 	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
-	// since ADR-0036, and what everything this run causes is joined to by a
+	// since ADR-0039, and what everything this run causes is joined to by a
 	// `caused-by` edge (nocx-h1l4o).
 	//
 	// It is passed rather than looked up from RunID, even though the two

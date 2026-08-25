@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// A turn reads in the order it happened (ADR-0037), asserted on the LIVE
+// A turn reads in the order it happened (ADR-0040), asserted on the LIVE
 // path — the scrollback the ask surface actually drives.
 //
 // The owner's report, twice. First: he asked how much disk was free and got,
@@ -180,7 +180,7 @@ describe('a turn draws the blocks it caused, in order', () => {
   })
 
   it('a run of prose is a real block: its own id, its own selection, no header', () => {
-    // ADR-0037: the header is simply not drawn — there is nothing to name it,
+    // ADR-0040: the header is simply not drawn — there is nothing to name it,
     // because the intent was the question. Everything else a block has, it
     // has.
     const { inner, manager } = newManager()

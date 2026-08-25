@@ -1,13 +1,13 @@
 package content_test
 
-// Containment with an order (nocx-h1l4o), through the public seam. ADR-0036
+// Containment with an order (nocx-h1l4o), through the public seam. ADR-0039
 // ends on the sentence these tests are: an assistant turn is one entry, the
 // things it causes are separate entries, and until now nothing joined them —
 // `ingest_seq` is commit order, never causality (ADR-0019 §2), so a restored
 // turn came back with neither its calls nor a reason to draw its command
 // anywhere in particular.
 //
-// ADR-0037 made that relation a COLUMN. Two facts are still asserted IN THE
+// ADR-0040 made that relation a COLUMN. Two facts are still asserted IN THE
 // STORE and never inferred from ordering: that the child is inside the
 // parent, and that it holds the seat the parent gave it. The seat is the
 // ledger's own, taken inside the transaction that writes it — see AddCause's
@@ -59,7 +59,7 @@ func submitAction(t *testing.T, led content.LedgerRepository, id, tool string, e
 }
 
 // causePosition reads the seat off the child's OWN ROW — the assertion is IN
-// THE STORE, and since ADR-0037 the store's answer is a column rather than an
+// THE STORE, and since ADR-0040 the store's answer is a column rather than an
 // edge payload: parent_id says which block draws it and pos says where.
 func causePosition(t *testing.T, led content.LedgerRepository, child, parent string) int {
 	t.Helper()

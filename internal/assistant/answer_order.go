@@ -12,7 +12,7 @@ package assistant
 // the GRAPH's goroutine, so a response that both speaks and proposes a tool
 // can deliver its call before the sentence that precedes it. That is not a
 // cosmetic inversion — the transport seals the open prose block AT the call
-// event (ADR-0037), so a call that arrives first finds no block to seal and
+// event (ADR-0040), so a call that arrives first finds no block to seal and
 // the prose on both sides of it merge into one. The renderer used to paper
 // over exactly this by cutting prose at the call announcement; the epic
 // exists to remove the paper.

@@ -1,5 +1,5 @@
 // What a tool call is CALLED — the one thing that tells two calls apart
-// (ADR-0037).
+// (ADR-0040).
 //
 // These assert the SENTENCE a person reads, not the shape of a data
 // structure: the defect was that four announcements read as the same three

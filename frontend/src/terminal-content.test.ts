@@ -5015,7 +5015,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   })
 
   it('two runs of prose behind one turn keep their boundary: the backend’s block id must reach the manager (w-call-id-order)', async () => {
-    // The backend names the `text` child a delta appends to (ADR-0037):
+    // The backend names the `text` child a delta appends to (ADR-0040):
     // it seals one block when a call arrives and opens the NEXT on the
     // first delta after it, and the id rides every delta. The one seam that
     // can lose that fact is the openAnswer wrapper — it used to forward
@@ -6173,7 +6173,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
   // reaches restoredBody, arrangedByCause and restoredBlock, and the DOM it
   // produces is what a person sees. A unit that never runs here is a feature
   // that does not exist (AGENTS.md, "is the code reachable").
-  // RETIRED WITH THE ARRANGEMENT IT ASSERTED (ADR-0037, nocx-dc2fr.2).
+  // RETIRED WITH THE ARRANGEMENT IT ASSERTED (ADR-0040, nocx-dc2fr.2).
   // 'draws a restored turn with the calls it made and the command it ran
   // beside it' stood here and read the turn as FRAGMENTS: two `ask` blocks
   // carrying data-turn-fragment 0 and 1, with the prose cut at the offset the
@@ -6277,7 +6277,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
         const id = (params as { id?: string }).id
         // The turn caused the two children: the prose run and the command
         // it ran, in seat order. Its own artifacts are empty, so it reads
-        // as an ask with no body of its own (ADR-0037).
+        // as an ask with no body of its own (ADR-0040).
         if (id === 'turn-1')
           return Promise.resolve({
             entry: { ...turn },

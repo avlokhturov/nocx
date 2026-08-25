@@ -307,7 +307,7 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 			return err
 		}
 		mediaType, method, version := frameArtifactIdentity(in)
-		// The frame's body belongs to the frame BLOCK (ADR-0037); the
+		// The frame's body belongs to the frame BLOCK (ADR-0040); the
 		// capture execution beside it says which attempt took it.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
 			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
@@ -467,7 +467,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			// A replay returns the ORIGINAL run and turn, and nothing else
 			// to return: the answer's body is not one artifact any more, it
 			// is whatever `text` children the run has opened so far
-			// (ADR-0037). A replay that re-drove the stream would open its
+			// (ADR-0040). A replay that re-drove the stream would open its
 			// prose blocks after the ones already there, which is the same
 			// answer twice and is a defect of the driver, not of this
 			// result shape.
@@ -545,7 +545,7 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 		// on the run here, and every delta of the whole answer appended to
 		// it — which made the STORED unit the whole answer while the DRAWN
 		// unit was a run of prose between two calls, and something had to
-		// translate between them. That translation was the anchor ADR-0037
+		// translate between them. That translation was the anchor ADR-0040
 		// deletes.
 		//
 		// The turn's body is its children now: the run opens a `text` block
@@ -703,7 +703,7 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 	})
 }
 
-// sealTurnBody seals an ASK turn's answer body — which since ADR-0037 is
+// sealTurnBody seals an ASK turn's answer body — which since ADR-0040 is
 // every `text` child the run wrote, not one artifact on the run. It is the
 // terminalizers' shared step, so EVERY path that closes an ask run closes its
 // prose too: a run is never reported terminal while a block it streamed into
@@ -741,7 +741,7 @@ func proseDigest(turnID string, pos int) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
-// OpenProse opens one run of assistant prose under a turn (ADR-0037): the
+// OpenProse opens one run of assistant prose under a turn (ADR-0040): the
 // `text` child and its body, in ONE transaction.
 //
 // Why the two writes cannot be separate calls: a `text` entry with no
@@ -856,7 +856,7 @@ func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int6
 
 		// The body: owned by the BLOCK, with no execution — a run of prose
 		// was printed, not attempted, so there is no attempt to name as its
-		// provenance (ADR-0037 decision 3). Open until the boundary arrives.
+		// provenance (ADR-0040 decision 3). Open until the boundary arrives.
 		artifactID := mintID()
 		if _, err = tx.ExecContext(ctx, `INSERT INTO artifacts
 			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,

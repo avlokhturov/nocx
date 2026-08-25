@@ -275,13 +275,13 @@ func TestAgentAsk_StreamsTheAnswerAndTerminalizes(t *testing.T) {
 	}
 	// Nothing contains it: the answer is the turn's own body, so there is no
 	// second entry to point at (nocx-4em1z). Containment is a column since
-	// ADR-0037, so the question is asked of the row itself.
+	// ADR-0040, so the question is asked of the row itself.
 	if ans.ParentID != nil {
 		t.Errorf("the turn is drawn inside %q — the answer is its own body", *ans.ParentID)
 	}
 	// The turn opens no body of its own: the answer is its `text` children,
 	// and with no tool call in this run there is exactly one of them
-	// (ADR-0037).
+	// (ADR-0040).
 	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 0 {
 		t.Fatalf("answer entry executions/artifacts = %d/%d, want 1/0",
 			len(ans.Executions), len(ans.Executions[0].Artifacts))

@@ -40,7 +40,7 @@ type fakeAgentService struct {
 	appended    []string
 	finish      *content.FinishAgentRun
 	// opened and sealed are the prose-block boundary the stream draws
-	// (ADR-0037): which `text` children it asked the store to open, and which
+	// (ADR-0040): which `text` children it asked the store to open, and which
 	// it sealed. Recorded in order, because the order IS the assertion — a
 	// block opens on the first delta after a call and seals when the next
 	// call arrives.

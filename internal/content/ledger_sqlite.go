@@ -188,7 +188,7 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			}
 		}
 		submittedAt = time.Now().UnixMilli()
-		// A `text` block is BORN CLOSED (ADR-0037). Every other kind opens a
+		// A `text` block is BORN CLOSED (ADR-0040). Every other kind opens a
 		// lifecycle the driver will bind and close; prose has none — it was
 		// printed, so there is nothing to wait for and nothing to judge. The
 		// schema's CHECK says exactly this, and the two are read together
@@ -345,7 +345,7 @@ func (s *sqliteContent) Entry(ctx context.Context, id string) (*LedgerEntry, err
 }
 
 // ownArtifactsFor reads the bodies this ENTRY owns and no execution produced
-// (ADR-0037). The `execution_id IS NULL` is what keeps it disjoint from
+// (ADR-0040). The `execution_id IS NULL` is what keeps it disjoint from
 // artifactsFor: a command's output belongs to the attempt that produced it
 // and is listed there, so no body appears in both lists.
 func (s *sqliteContent) ownArtifactsFor(ctx context.Context, entryID string) ([]Artifact, error) {
@@ -932,7 +932,7 @@ func runStateForTermination(r TerminationReason) RunState {
 // terminal dimensions, stream position, encoding, gaps). Content arrives via
 // AppendChunk: an artifact is never one BLOB.
 //
-// The entry is required and the execution is not (ADR-0037): a body belongs
+// The entry is required and the execution is not (ADR-0040): a body belongs
 // to the block it is a body of, and which ATTEMPT produced it is a second,
 // weaker fact that a `text` block simply does not have.
 func (s *sqliteContent) AppendArtifact(ctx context.Context, in AppendArtifact) (string, error) {
@@ -1111,7 +1111,7 @@ func (s *sqliteContent) CaptureOutput(ctx context.Context, in CaptureOutput) (bo
 			// A replay must find the artifact it wrote. Anything else under
 			// the same id is a different object, and this store never
 			// overwrites one id with another object (§7). The identity
-			// checked is the artifact's OWNER (ADR-0037) — the execution
+			// checked is the artifact's OWNER (ADR-0040) — the execution
 			// beside it is provenance, and a body cannot change which block
 			// it is a body of whatever attempt wrote it.
 			if existingMedia.String != string(in.MediaType) ||
@@ -1239,7 +1239,7 @@ func (s *sqliteContent) AddEdge(ctx context.Context, e Edge) error {
 // AddCause seats an existing entry as the next child of the block that
 // caused it, and returns the seat it took.
 //
-// It was one `caused-by` edge; ADR-0037 made containment a column, so this
+// It was one `caused-by` edge; ADR-0040 made containment a column, so this
 // is now an UPDATE of the child's own row. What did not change is why read
 // and write are one transaction: the seat is derived from what is already
 // stored — the highest pos any child of this parent holds — so an in-memory

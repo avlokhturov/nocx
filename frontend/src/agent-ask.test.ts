@@ -139,7 +139,7 @@ describe('AgentInputTarget', () => {
   })
 
   it('hands on the BLOCK the chunk belongs to, so the renderer never cuts prose itself', async () => {
-    // The boundary between two runs of prose is the BACKEND's (ADR-0037):
+    // The boundary between two runs of prose is the BACKEND's (ADR-0040):
     // it opens a `text` child on the first delta after a call and seals it
     // when the next call arrives. The renderer's only job is to notice that
     // the id changed — which it cannot do if the id never reaches it.
@@ -190,7 +190,7 @@ describe('AgentInputTarget', () => {
 
     // The ARGUMENTS come with it: they are what tells two calls of one tool
     // apart, and the block that draws the call is named from them
-    // (ADR-0037).
+    // (ADR-0040).
     expect(handle.toolCall).toHaveBeenCalledWith({
       callId: 'call_1',
       tool: 'files.read',

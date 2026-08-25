@@ -199,7 +199,7 @@ type blockBodyResult struct {
 // deliberate fetch.
 //
 // A TURN takes the second path, and it is not a special case so much as the
-// same read one level down: since ADR-0037 an assistant turn owns no body of
+// same read one level down: since ADR-0040 an assistant turn owns no body of
 // its own — its answer is the `text` children the run wrote, one per run of
 // prose — so a block that kept nothing on its own attempts is asked for its
 // prose before it is reported as a block that kept nothing at all. Without

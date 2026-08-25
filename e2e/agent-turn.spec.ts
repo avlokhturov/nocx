@@ -1,8 +1,8 @@
 /**
  * e2e: one multi-step assistant turn reads as the causal sequence it was —
- * live, and again after a backend restart (ADR-0037, nocx-dc2fr).
+ * live, and again after a backend restart (ADR-0040, nocx-dc2fr).
  *
- * WHY THIS FILE, WHEN THE UNITS ARE GREEN. ADR-0037 turned `entries` into an
+ * WHY THIS FILE, WHEN THE UNITS ARE GREEN. ADR-0040 turned `entries` into an
  * ordered tree: a turn CARRIES the blocks it caused as one `.cmd-children`
  * list, in the exact order the store recorded, and a `text` block is a run of
  * assistant prose born closed and successful. The unit tests assert the store,
@@ -11,7 +11,7 @@
  * a command, the command with its real output, the sentence written from it, a
  * tool call that opens no block, the final sentence. That is AGENTS.md testing
  * rule 2's "watch a person do the thing", and it is the only check that could
- * have reported the fixed arrangement this ADR exists to kill (ADR-0037
+ * have reported the fixed arrangement this ADR exists to kill (ADR-0040
  * §Context: every prior arrangement put all the prose below all the children,
  * so a turn read as though the command came after the conclusion it was
  * evidence for).
@@ -388,7 +388,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
 
     // ── 3. The two tool calls read differently — the run's block says what
     //       it ran; the read-only tool child says the tool and its argument.
-    //       (They are different tools; ADR-0037's same-tool-two-args is the
+    //       (They are different tools; ADR-0040's same-tool-two-args is the
     //       unit suite's acceptance 2.) The argument that makes THIS call
     //       distinguishable is `region`, and its header must show it.
     const toolBlock = children.nth(3)

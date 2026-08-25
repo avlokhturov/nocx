@@ -12,7 +12,7 @@
 // DOMs read the same.
 //
 // WHAT IS COMPARED, and it is stated because "the same" needs a definition
-// (ADR-0037): the sequence of blocks in the scrollback, and inside a turn the
+// (ADR-0040): the sequence of blocks in the scrollback, and inside a turn the
 // sequence of its children and the TEXT each one draws — a run of prose is
 // read by its rows, a tool call by its header, a command by its header. NOT
 // the chrome: a restored block carries `data-restored` and offers nothing
@@ -103,7 +103,7 @@ const QUESTION = 'what went wrong?'
 const BEFORE = 'let me look at the file. '
 const AFTER = 'line 3 is wrong'
 // No concatenation of the two: the answer is not one string any more
-// (ADR-0037). BEFORE and AFTER are separate `text` blocks either side of the
+// (ADR-0040). BEFORE and AFTER are separate `text` blocks either side of the
 // command, and joining them here would be this test quietly re-inventing the
 // cut it exists to prove nobody has to make.
 const COMMAND = 'cat -n a.txt'
@@ -131,7 +131,7 @@ describe('a restored turn reads the same as the live turn it came from', () => {
     return inner
   }
 
-  it('draws the same blocks in the same order — children included (ADR-0037)', () => {
+  it('draws the same blocks in the same order — children included (ADR-0040)', () => {
     const live = liveTurn()
     const turnEl = live.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')!
 
@@ -436,7 +436,7 @@ function draw(
         if (cause.kind === 'action') {
           // A call that OPENED A BLOCK draws no child line of its own: the
           // command block it opened IS the account of that call, exactly as
-          // the live flow places it (ADR-0037).
+          // the live flow places it (ADR-0040).
           if (cause.opensBlock) return null
           return restoredBlock(
             {

@@ -264,7 +264,7 @@ func TestAssistant_LooksAtThePaneTheQuestionWasAskedIn(t *testing.T) {
 
 	// The answer reaches the block: the turn's prose, sealed, carrying the
 	// same sentence the person watched stream. Its home is a `text` child
-	// rather than a body on the turn since ADR-0037, and the claim being made
+	// rather than a body on the turn since ADR-0040, and the claim being made
 	// is unchanged — what streamed is what was kept.
 	led := h.db.Ledger()
 	ctx := context.Background()

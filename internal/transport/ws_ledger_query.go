@@ -153,7 +153,7 @@ type ledgerGetResponse struct {
 	// in either direction, `caused` is the ONE relation the restore draws
 	// with, joined to the rows it points at.
 	Caused []ledgerCausedWire `json:"caused"`
-	// ProseEvicted says the prose of THIS RUN is no longer kept (ADR-0037's
+	// ProseEvicted says the prose of THIS RUN is no longer kept (ADR-0040's
 	// retention rule, ADR-0019 §7): retention took the bodies of the run's
 	// `text` children as a unit, and the renderer drawing the turn has ONE
 	// sentence to say rather than one per hole. It is the detail read's
@@ -168,7 +168,7 @@ type ledgerGetResponse struct {
 // facts and are null on every other kind, honestly — a command a turn ran is
 // not a tool call.
 type ledgerCausedWire struct {
-	// There is no `at`, and the absence is the point (ADR-0037). It said
+	// There is no `at`, and the absence is the point (ADR-0040). It said
 	// where in the turn's ANSWER this cause happened, in UTF-16 code units
 	// (nocx-9sqii), so that the renderer could cut one stored answer back
 	// into the fragments it was drawn as. It existed only because the unit
@@ -361,7 +361,7 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 			})
 		}
 		// EVERY body this entry has, from BOTH places one can hang
-		// (ADR-0037 decision 3): the entry's own, and each execution's.
+		// (ADR-0040 decision 3): the entry's own, and each execution's.
 		//
 		// The own ones come first and they were missing entirely until
 		// nocx-dc2fr.7's end-to-end check found it. An artifact belongs to
@@ -579,7 +579,7 @@ func ledgerArtifactWireOf(a content.Artifact) (ledgerArtifactWire, error) {
 	}
 	// The wire's executionId is a plain integer, and the contract owns that
 	// shape. Every artifact reaching here came off the entry's executions,
-	// so the pointer is never nil on this path; ADR-0037 made the column
+	// so the pointer is never nil on this path; ADR-0040 made the column
 	// nullable for a body no attempt produced (a `text` block's), and
 	// putting THAT on the wire belongs to the contracts task.
 	var execID int64

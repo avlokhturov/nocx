@@ -76,7 +76,7 @@ type EvictionRequest struct {
 	//
 	// It counts BLOCKS, and a pass overruns it by the prose of the last run
 	// it takes: a turn is removed with its `text` children or not at all
-	// (ADR-0037), so the cap can stop the pass between runs and never inside
+	// (ADR-0040), so the cap can stop the pass between runs and never inside
 	// one.
 	Max int
 }
@@ -188,7 +188,7 @@ func (s *sqliteContent) evictEntries(ctx context.Context, req EvictionRequest) (
 	//
 	// A `text` block cannot exist without its parent: the schema's CHECK
 	// requires parent_id IS NOT NULL, and parent_id is ON DELETE SET NULL
-	// (ADR-0037 — a tool call whose turn was evicted is still a command that
+	// (ADR-0040 — a tool call whose turn was evicted is still a command that
 	// ran). Deleting a turn while its prose is still there therefore asks
 	// the engine to null a column a CHECK forbids to be null, and the whole
 	// statement fails. Nothing about it is recoverable at the next attempt
@@ -407,7 +407,7 @@ func (s *sqliteContent) evictAgedOnWrite(ctx context.Context) {
 //
 // # Why the unit is the RUN and not the artifact
 //
-// ADR-0037 turned an assistant turn's answer from one artifact into several:
+// ADR-0040 turned an assistant turn's answer from one artifact into several:
 // each run of prose between two tool calls is its own `text` block with its
 // own body. A sweep deciding per artifact would take pieces 1, 3 and 7 of a
 // turn and leave the rest, and what a reader then meets is a COMPLETE-LOOKING
@@ -619,7 +619,7 @@ const unitKeyExpr = `CASE WHEN e.kind = 'text' THEN 'run:' || e.parent_id ELSE '
 //     mid-stream, a command still printing — and freeing it would tear the
 //     answer out from under the deltas still arriving. For prose the block
 //     that must have closed is the RUN, because the run is the unit; a
-//     `text` block is born closed (ADR-0037) and so cannot speak for itself
+//     `text` block is born closed (ADR-0040) and so cannot speak for itself
 //     here. It is the same rule the age pass states as "an entry that never
 //     ended is unfinished, not old".
 //

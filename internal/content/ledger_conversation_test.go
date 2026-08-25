@@ -1,6 +1,6 @@
 package content_test
 
-// The conversation read (ADR-0037's closing consequence, bead nocx-dc2fr.5):
+// The conversation read (ADR-0040's closing consequence, bead nocx-dc2fr.5):
 // "the conversation is assembled from the children, in pos order, per run".
 //
 // A turn's answer used to be ONE string in ONE column, and asking a follow-up
@@ -239,7 +239,7 @@ func TestPriorTurn_OneRunKeepsEveryBlockItWrote(t *testing.T) {
 
 // ── acceptance 3: evicted prose SAYS SO, and is never a hole ─────────────
 
-// Retention takes the prose of one run as a unit (ADR-0037's retention rule),
+// Retention takes the prose of one run as a unit (ADR-0040's retention rule),
 // and a turn whose prose has gone keeps every block. So the read must report
 // the absence rather than answering with an empty string: "there was an answer
 // and it is no longer kept" and "this run printed nothing" are different facts,

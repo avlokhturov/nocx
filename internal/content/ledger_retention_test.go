@@ -496,7 +496,7 @@ func TestEvictionRefusesAnUnusableRequest(t *testing.T) {
 
 // ── the prose of one run is retained or evicted as a UNIT ────────────────
 //
-// ADR-0037 turned an assistant turn's answer from ONE artifact into several:
+// ADR-0040 turned an assistant turn's answer from ONE artifact into several:
 // each run of prose between two tool calls is its own `text` block with its
 // own body. ADR-0019 §7 evicts bodies and leaves entries, and with one answer
 // per turn that was unambiguous — the answer was there, or it was plainly
@@ -825,7 +825,7 @@ func TestATurnWhoseProseWasEvictedKeepsEveryBlockItHad(t *testing.T) {
 		t.Fatalf("the turn has %d children after the sweep, want the %d it had", len(after), len(before))
 	}
 	// reflect.DeepEqual rather than ==: a child carries the arguments the call
-	// asked for (ADR-0037), which is a map, and a struct holding one is not
+	// asked for (ADR-0040), which is a map, and a struct holding one is not
 	// comparable. The claim is unchanged — the same children, in the same
 	// seats, with the same facts.
 	for i := range before {
@@ -1018,7 +1018,7 @@ func TestAnEvictedBodyIsDistinguishableFromOneThatPrintedNothing(t *testing.T) {
 // the age sweep states as "an entry that never ended is unfinished, not old"
 // — because freeing the body of a turn mid-stream would tear the answer out
 // from under the deltas still arriving. For prose the block that must have
-// closed is the RUN: a `text` block is born closed (ADR-0037) and cannot
+// closed is the RUN: a `text` block is born closed (ADR-0040) and cannot
 // speak for itself here.
 //
 // Paired with the closed turn beside it, which loses everything: the rule is
@@ -1112,7 +1112,7 @@ func TestBodyEvictionRefusesAnUnusableRequest(t *testing.T) {
 
 // A `text` block cannot exist without its parent — the CHECK says
 // parent_id IS NOT NULL — so a turn that ages out takes its prose with it.
-// Before ADR-0037 landed there was nothing under a turn to take; afterwards
+// Before ADR-0040 landed there was nothing under a turn to take; afterwards
 // the entry sweep's DELETE hit the CHECK through parent_id's ON DELETE SET
 // NULL, and because eviction on the write path is best-effort the whole
 // subsystem failed silently on the first turn old enough to be a candidate.

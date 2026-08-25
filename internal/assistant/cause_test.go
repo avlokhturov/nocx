@@ -2,7 +2,7 @@ package assistant
 
 // What a turn caused, joined to the turn (nocx-h1l4o).
 //
-// ADR-0036 made a turn ONE entry and left the sentence this file is: the
+// ADR-0039 made a turn ONE entry and left the sentence this file is: the
 // things a turn causes — a command it ran, a tool call it made — are separate
 // entries joined to it by nothing at all, so a restored turn came back
 // without them and `ingest_seq` (commit order, never causality — ADR-0019 §2)

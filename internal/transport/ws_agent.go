@@ -227,7 +227,7 @@ func (c *agentRunControl) beginTerminal() (func(), bool, bool) {
 // re-rolling it, so its deltas are numbered after the ones the question
 // interrupted, never over them.
 //
-// BlockID is the piece this chunk appends to (ADR-0037): the `text` child of
+// BlockID is the piece this chunk appends to (ADR-0040): the `text` child of
 // the turn that the backend opened for this run of prose. EntryID still says
 // WHICH ANSWER — the routing key, unchanged — and BlockID says WHERE IN IT,
 // which is a place in the tree rather than an offset into a string.
@@ -262,7 +262,7 @@ type agentRunDelta struct {
 // destination.
 //
 // The ARGUMENTS are here, and the field's absence is what this notification
-// was corrected for (ADR-0037). They were left off on the argument that their
+// was corrected for (ADR-0040). They were left off on the argument that their
 // readable half is the RESOURCE, derived once by namedResource — and the
 // resource IS the readable half exactly while it differs between calls. For a
 // session-scoped tool it never does, so one turn announced readScreen,
@@ -851,7 +851,7 @@ type askRunContext struct {
 	// nothing else.
 	paneID *string
 	// prose is the run of prose currently OPEN — the `text` child the next
-	// delta appends to, and the artifact its text lands in (ADR-0037). The
+	// delta appends to, and the artifact its text lands in (ADR-0040). The
 	// zero value is "no block is open", which is the state a run starts in
 	// and the state a tool call leaves behind: a call that arrives before the
 	// model has said anything must open no empty block.
@@ -969,7 +969,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Content: assistant.SystemPrompt(promptFacts),
 	})
 	// THE CONVERSATION, and it is read from the ledger rather than remembered
-	// in this process (ADR-0037's closing consequence). The turn before this
+	// in this process (ADR-0040's closing consequence). The turn before this
 	// one in this pane is what "what did we just say" means: its question, and
 	// the prose of the run that answered it, in seat order and as ONE message.
 	//
@@ -1052,7 +1052,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			if ev.Call == nil {
 				return nil
 			}
-			// THE BOUNDARY, and it is the backend's (ADR-0037). The prose
+			// THE BOUNDARY, and it is the backend's (ADR-0040). The prose
 			// that was streaming ends HERE, where the call arrived, because
 			// a sentence written before a command explains why the command
 			// was run and a sentence written after it is a conclusion drawn
@@ -1128,7 +1128,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		text := ev.Text
 		// The other half of the boundary: the FIRST delta after a call opens
 		// the next run of prose — a `text` child of the turn at the next free
-		// seat, with a body of its own (ADR-0037). Opened lazily and never up
+		// seat, with a body of its own (ADR-0040). Opened lazily and never up
 		// front, which is what makes "a call before any prose opens no empty
 		// block" true by construction rather than by a later cleanup.
 		//
@@ -1239,7 +1239,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // numbered after these, not over them.
 //
 // prose crosses with it, and for the identical reason one step further in
-// (ADR-0037): a resume that continues the answer continues the PIECE of it
+// (ADR-0040): a resume that continues the answer continues the PIECE of it
 // that was open, so the block the interrupted stream was writing into is
 // handed to the next drive rather than left behind for a second block to be
 // opened beside it. A run suspended before it said anything carries the zero

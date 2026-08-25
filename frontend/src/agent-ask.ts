@@ -123,12 +123,12 @@ export class AgentInputTarget implements InputTarget {
       if (handle.el.dataset.entryId !== d.entryId) return
       // …and the block id says WHERE in the turn: the `text` child this run
       // of prose is, opened by the backend on the first delta after a call
-      // and sealed when the next one arrives (ADR-0037). The renderer never
+      // and sealed when the next one arrives (ADR-0040). The renderer never
       // works the boundary out — that is what the anchor did, and the live
       // path and the restore each computed it and could drift.
       handle.append(d.text, d.blockId)
     })
-    // A tool call is a CHILD of this turn (ADR-0037), so it is routed
+    // A tool call is a CHILD of this turn (ADR-0040), so it is routed
     // exactly as a delta is — same two ids, same mismatch rule — and handed
     // to the same handle. That is the whole ordering fix: the call takes its
     // seat when it arrives, which is before the deltas the model writes from
@@ -151,7 +151,7 @@ export class AgentInputTarget implements InputTarget {
         effect: c.effect,
         // What the model asked for, as the tool's schema validated it: the
         // half that tells two calls of one tool apart, which the tool name
-        // and the derived resource cannot (ADR-0037).
+        // and the derived resource cannot (ADR-0040).
         args: c.args,
         // The wire says `null` for a tool that names no resource; the flow
         // wants "absent", and the two must not be confused into a resource

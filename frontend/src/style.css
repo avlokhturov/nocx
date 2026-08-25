@@ -918,7 +918,7 @@
   color: var(--color-text-muted);
 }
 
-/* ── A turn's children (ADR-0037) ───────────────────────────────────── */
+/* ── A turn's children (ADR-0040) ───────────────────────────────────── */
 
 /* WHAT THIS IS. A turn is ONE block that carries the blocks it caused, in
    order: a run of prose, a tool call, more prose, a command with its real
@@ -955,13 +955,13 @@
    would wear the divider that separates one TOP-LEVEL block from the next —
    and a divider between the pieces of one answer says "these are separate
    answers", which is the sentence the `continued` badge used to say and
-   ADR-0037 deleted. The turn's own top border still separates the turn from
+   ADR-0040 deleted. The turn's own top border still separates the turn from
    what came before it. */
 .cmd-children > .cmd-block {
   border-top: 0;
 }
 
-/* ONE TOOL CALL: a header and nothing else (ADR-0037). The header's bottom
+/* ONE TOOL CALL: a header and nothing else (ADR-0040). The header's bottom
    padding is the gap between a command and what it printed, and a call
    prints nothing here — its result belongs to the ledger's attempt, and the
    command a `run` call opened is a block of its own beside this. */

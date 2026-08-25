@@ -740,7 +740,7 @@ CREATE TABLE IF NOT EXISTS entries (
   -- true of the rows as well — see dropDeadSessions.
   pane_id         TEXT REFERENCES panes(id) ON DELETE SET NULL,
   session_id      TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-  -- THE TREE (ADR-0037, amending ADR-0036). Everything drawn in the
+  -- THE TREE (ADR-0040, amending ADR-0039). Everything drawn in the
   -- scrollback is an entry, and entries form ONE ordered tree: parent_id is
   -- containment and pos orders siblings. NULL parent is a top-level block,
   -- whose order stays ingest_seq — the design's total order (ADR-0019 §2) is
@@ -765,7 +765,7 @@ CREATE TABLE IF NOT EXISTS entries (
   parent_id       TEXT REFERENCES entries(id) ON DELETE SET NULL,
   pos             INTEGER,
   cwd             TEXT NOT NULL,
-  -- text is one run of assistant prose (ADR-0037): a thing that was
+  -- text is one run of assistant prose (ADR-0040): a thing that was
   -- PRINTED, not attempted. Its shape is declared by the CHECK at the foot
   -- of the table rather than left to convention, because the objection to
   -- prose living in a table built around intent → attempt → outcome is real.
@@ -819,7 +819,7 @@ CREATE TABLE IF NOT EXISTS entries (
            intent = '' AND phase = 'closed' AND status = 'success'))
 ) STRICT;
 
--- What is left here is what is genuinely NOT a tree (ADR-0037). caused-by
+-- What is left here is what is genuinely NOT a tree (ADR-0040). caused-by
 -- is retired with its {pos, at} payload: containment is entries.parent_id
 -- now, and the database guarantees the one parent an edge never could. These
 -- five are relations between blocks that each already have a home.
@@ -889,7 +889,7 @@ CREATE TABLE IF NOT EXISTS grant_effects (
   PRIMARY KEY (grant_id, effect)
 ) STRICT;
 
--- AN ARTIFACT BELONGS TO ITS BLOCK (ADR-0037). entry_id is the OWNER: it is
+-- AN ARTIFACT BELONGS TO ITS BLOCK (ADR-0040). entry_id is the OWNER: it is
 -- what a body is a body OF, and it is NOT NULL because a body with no block
 -- is nothing a reader could ever draw. It cascades, so DeleteEntry still
 -- takes the bodies with it and eviction still frees what it accounts for.

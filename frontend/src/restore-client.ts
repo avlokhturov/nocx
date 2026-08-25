@@ -198,7 +198,7 @@ export interface RestoredBody {
   kind: 'command' | 'ask'
   body: string | null
   /**
-   * Whether the prose of THIS RUN is no longer kept (ADR-0037's retention
+   * Whether the prose of THIS RUN is no longer kept (ADR-0040's retention
    * rule, ADR-0019 §7): retention took the bodies of the turn's `text`
    * children as a unit. It is the ONE place a reader asks that question —
    * the same receipt the store's own LedgerEntry.ProseEvicted reads — and
@@ -226,7 +226,7 @@ export interface RestoredBody {
 /**
  * One entry's body, and what that body says the block IS (nocx-4em1z).
  *
- * THE KIND IS READ, NOT INFERRED. Since ADR-0037 the entry's OWN kind is
+ * THE KIND IS READ, NOT INFERRED. Since ADR-0040 the entry's OWN kind is
  * the durable fact: an `agent` entry is a TURN (ask grammar — prose, wrapped
  * by the answer body), a `shell` entry is a COMMAND (a terminal grid, which
  * must not re-wrap). The artifact list decides only what BODY to draw with
@@ -257,7 +257,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const chosen = entry.entry.kind === 'ask' ? (text ?? vt) : (vt ?? text)
     if (!chosen) {
       // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
-      // artifact survived: since ADR-0037 a turn carries NO artifact of its
+      // artifact survived: since ADR-0040 a turn carries NO artifact of its
       // own (its prose is a `text` child), so an empty artifact list is the
       // ordinary shape of a whole turn, not evidence it was a command.
       return {
@@ -291,7 +291,7 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
  *
  * WHAT IT DOES NOT DECIDE, and where that decision lives. This puts a turn's
  * caused blocks next to it, in causal order. WHERE inside the turn each one
- * goes is the drawer's, and since ADR-0037 there is nothing left to work out:
+ * goes is the drawer's, and since ADR-0040 there is nothing left to work out:
  * a turn CARRIES its children in the seats the store gave them, so the
  * drawer places what it is handed. The drawer consumes the blocks a turn
  * placed rather than drawing them again at their own row.

@@ -80,17 +80,20 @@ func TestAgentApprove_ResumedDeltasContinueTheNumbering(t *testing.T) {
 		{deltas: []string{" — it says", " hello"}},
 	}}
 	h := suspendedRunWith(t, askPolicyStore(t), client)
-
-	// The two deltas before the question. suspendedRunWith has already read
-	// past them to the approvalRequested notification, so they are read off
-	// the ledger rather than the wire; the wire's own numbering is asserted
-	// on the two that follow the answer.
 	h.approve(t, "session")
 
+	// ALL FOUR DELTAS ARE READ OFF THE WIRE, and that is the assertion.
+	// suspendedRunWith reads as far as the approvalRequested notification,
+	// and since the inbox (ws_inbox_test.go) a notification seen on the way
+	// is RETAINED rather than dropped — so the two deltas that preceded the
+	// question are still here to be read, and the test can state the whole
+	// sequence instead of taking the first half on trust from the ledger.
+	// That is the stronger claim of the two: what a renderer places is what
+	// crossed the socket, in the order it crossed.
 	var seqs []int
 	var text string
 	deadline := time.Now().Add(5 * time.Second)
-	for len(seqs) < 2 && time.Now().Before(deadline) {
+	for len(seqs) < 4 && time.Now().Before(deadline) {
 		raw := readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 		var d struct {
 			Seq  int    `json:"seq"`
@@ -102,7 +105,16 @@ func TestAgentApprove_ResumedDeltasContinueTheNumbering(t *testing.T) {
 		seqs = append(seqs, d.Seq)
 		text += d.Text
 	}
-	if len(seqs) != 2 || seqs[0] != 2 || seqs[1] != 3 {
-		t.Fatalf("the resumed deltas arrived as seq %v carrying %q, want 2 then 3 — the answer before the question already used 0 and 1, and the resume continues it (nocx-igu4y)", seqs, text)
+	want := []int{0, 1, 2, 3}
+	if len(seqs) != len(want) {
+		t.Fatalf("the run emitted %d deltas carrying %q, want %d", len(seqs), text, len(want))
+	}
+	for i, w := range want {
+		if seqs[i] != w {
+			t.Fatalf("the deltas arrived as seq %v carrying %q, want %v — the answer before the question used 0 and 1, and the resume continues it rather than restarting (nocx-igu4y)", seqs, text, want)
+		}
+	}
+	if text != "let me look — it says hello" {
+		t.Fatalf("the deltas carried %q; a restart would write new text over the numbers the renderer has already placed (nocx-igu4y)", text)
 	}
 }

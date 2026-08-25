@@ -482,7 +482,7 @@ func TestRun_AuthorisedThreadReadsBackFromTheLedger(t *testing.T) {
 	if len(ans.Executions) != 1 {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
-	// The turn opens NO body of its own (ADR-0037): the answer is its `text`
+	// The turn opens NO body of its own (ADR-0040): the answer is its `text`
 	// children, one per run of prose, and the close sealed every one of them.
 	if len(ans.Executions[0].Artifacts) != 0 {
 		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children",
@@ -634,7 +634,7 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
 	if len(ans.Executions[0].Artifacts) != 0 {
-		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children (ADR-0037)",
+		t.Fatalf("turn artifacts = %d, want none — the answer is its prose children (ADR-0040)",
 			len(ans.Executions[0].Artifacts))
 	}
 	assertProseSealed(t, led, res.EntryID)
@@ -782,7 +782,7 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
 	}
 	// The answer streamed: the model's reply after the refusal is prose in
-	// the thread (ADR-0037), exactly what the brief's "with prose in it"
+	// the thread (ADR-0040), exactly what the brief's "with prose in it"
 	// means.
 	if prose := proseUnder(t, led, res.EntryID); len(prose) == 0 {
 		t.Error("the answered turn has no prose block — the model's words after the refusal must be in the thread")
@@ -891,7 +891,7 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 	// Three things, in the order the turn did them: the tool call's own
 	// action entry — the line that says WHEN the assistant reached for run —
 	// then the command that really opened a block, and then the run of prose
-	// the model wrote from its output (ADR-0037). The prose is a CHILD like
+	// the model wrote from its output (ADR-0040). The prose is a CHILD like
 	// the other two, at a seat of its own, which is the whole of what the
 	// anchor used to be needed for.
 	if got := childKinds(t, led, res.EntryID); len(got) != 3 ||
@@ -936,7 +936,7 @@ func TestRun_AResolutionNamingNoRowJoinsNothingAndDoesNotFailTheRun(t *testing.T
 	// The call the turn made is joined; the command that names no row is
 	// not, and nothing was invented in its place. Beside it sits the run of
 	// prose the model wrote after the call — a child of the turn like any
-	// other since ADR-0037, and the reason this list is two long rather than
+	// other since ADR-0040, and the reason this list is two long rather than
 	// one.
 	if len(caused) != 2 || caused[0].Intent != "run" || caused[0].Kind != content.EntryAction {
 		t.Fatalf("the turn caused %+v, want the call it made and the prose it wrote after it", caused)

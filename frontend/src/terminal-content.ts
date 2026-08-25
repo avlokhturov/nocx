@@ -3379,7 +3379,7 @@ export class TerminalContent extends BasePaneContent {
         )
         continue
       }
-      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0037), and the restore
+      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0040), and the restore
       // draws exactly that: one turn block whose `.cmd-children` hold the
       // causal sequence — prose, tool calls, commands — in the seats the
       // ledger stored, through the SAME builders the live path ends at.
@@ -3436,7 +3436,7 @@ export class TerminalContent extends BasePaneContent {
             // An ACTION child is a tool line — a header naming what was
             // called and with what, never a top-level block — EXCEPT one
             // that opened a block: the command block it opened IS the
-            // account of that call (ADR-0037), exactly as the live flow
+            // account of that call (ADR-0040), exactly as the live flow
             // draws it, so a restored turn must not restate it.
             if (cause.kind === 'action') {
               if (cause.opensBlock) return null

@@ -1,4 +1,4 @@
-# ADR-0037 — A block is a node in an ordered tree, and everything drawn is a block
+# ADR-0040 — A block is a node in an ordered tree, and everything drawn is a block
 
 - **Status:** Accepted
 - **Date:** 2026-08-23
@@ -10,7 +10,7 @@
   [ADR-0020](0020-the-agent-gets-a-lane-authority-is-granted-per-run.md) (decision 4: a
   retry after approval is an execution of the same intent, never a new intent — which is
   why `executions` survives this ADR unchanged),
-  [ADR-0036](0036-an-assistant-turn-is-one-entry.md) (**amended by this ADR**: the half
+  [ADR-0039](0039-an-assistant-turn-is-one-entry.md) (**amended by this ADR**: the half
   that says a turn owns its answer as one artifact),
   AD-8 (one owner per behaviour), `nocx-shxv0`, `nocx-9sqii`, `nocx-lfxi6`.
 
@@ -23,7 +23,7 @@ written after it is a conclusion drawn from its output. Vertical position in a t
 a claim about time.
 
 The store did not have that sequence. A turn was **one entry** whose answer was **one
-artifact** (ADR-0036), and the things it caused were separate entries joined by a
+artifact** (ADR-0039), and the things it caused were separate entries joined by a
 `caused-by` edge. So the store held the answer whole and the causes apart, and the
 renderer had to put them back together.
 
@@ -107,10 +107,10 @@ rather than two projections of one string, so they cannot disagree — which is 
 
 ## Consequences
 
-**ADR-0036 is amended, and half of it survives.** "A turn is one entry" stays true of its
+**ADR-0039 is amended, and half of it survives.** "A turn is one entry" stays true of its
 IDENTITY: one `entryId` routes the deltas, carries the grant, and is what copy and the
 conversation address. What is dropped is the other half — that the turn's own body is the
-answer. The turn's body is now its children. ADR-0036's own reasoning is what argues for
+answer. The turn's body is now its children. ADR-0039's own reasoning is what argues for
 this: it retired a second entry because that entry "was only ever an ADDRESS for the
 deltas". The same test applied to the anchor retires the anchor.
 
