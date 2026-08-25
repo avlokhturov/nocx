@@ -233,15 +233,38 @@ test.describe('API testing: import, send, and the token that never lands in a fi
     // reached the VAULT: a run where nothing was bound would have no ids to
     // look for, and the assertion below refuses to pass on an empty list.
     const bindingsPath = join(documentDir(backend.isolatedHome), 'api-bindings.json')
-    expect(
-      existsSync(bindingsPath),
-      'the import bound no secret at all — there is no binding document',
-    ).toBe(true)
-    const bindings = JSON.parse(readFileSync(bindingsPath, 'utf8')) as {
-      bindings?: { collection: string; environment: string; variable: string; secretId: string }[]
+    // WAITED FOR, because the directory arriving is not this import's last
+    // event — the comment above is right about what §12.2 promises and wrong
+    // about who it promises it to. ImportInto renames the staging tree into
+    // place and only THEN offers each secret value to the BindWriter (step 5
+    // of write.go's own contract), and that offer is a vault write: a key
+    // derivation and an encrypt against the passphrase vault step 0 set up,
+    // before api-bindings.json is rewritten. So there is a window in which
+    // dest exists and no binding document does. What §12.2 rules out is that
+    // window ever becoming permanent — a failure after the rename calls undo
+    // and takes dest away again — which is exactly why waiting here is safe
+    // and reading once is not.
+    //
+    // The wait is on the state and never on a duration (nocx-2qo02): webkit
+    // lost this race on a loaded runner at a commit that had been green an
+    // hour before, and a sleep would only have moved the loss further out.
+    // Polling the COUNT rather than the file also keeps the assertion the
+    // next line depends on — a document holding no binding fails here rather
+    // than one line later with a worse message.
+    const boundSecretIds = (): string[] => {
+      if (!existsSync(bindingsPath)) return []
+      const doc = JSON.parse(readFileSync(bindingsPath, 'utf8')) as {
+        bindings?: { collection: string; environment: string; variable: string; secretId: string }[]
+      }
+      return (doc.bindings ?? []).map((b) => b.secretId)
     }
-    const secretIds = (bindings.bindings ?? []).map((b) => b.secretId)
-    expect(secretIds, 'the token was not stored in the vault').not.toHaveLength(0)
+    await expect
+      .poll(() => boundSecretIds().length, {
+        message: 'the import bound no secret at all — no binding document, or nothing in it',
+        timeout: 15_000,
+      })
+      .toBeGreaterThan(0)
+    const secretIds = boundSecretIds()
 
     // And the binding document is NOT inside the collection: §8.1's whole
     // point is that the identifier is held by the app, beside the vault.
