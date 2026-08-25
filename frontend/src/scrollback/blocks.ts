@@ -834,8 +834,10 @@ export interface RunningBlockActions {
   ask?(): void
   /** Stop it, through the backend's escalation ladder. */
   stop(): void
-  /** Whether the time-limited actions still belong on the block. */
-  isActive?(): boolean
+  /** Whether time-limited actions still belong to this specific block.
+   *  The host owns this identity-aware derivation; the DOM class is only a
+   *  visual transition and may lag a logical completion. */
+  isActive(blockEl: HTMLElement): boolean
   /** Attach all output rows through the host's single chip seam. */
   attachOutput?(blockEl: HTMLElement, rowStart: number, rowEnd: number): void
 }
@@ -996,14 +998,19 @@ function buildOverflowMenu(
         else clipboardFallback(`${intent()}\n${stored}`)
       })
     })
+    const isActive = running?.isActive(blockEl) ?? false
 
-    if (!blockEl.classList.contains('cmd-block-running') && running?.attachOutput) {
+    if (!isActive && running?.attachOutput) {
       const attach = document.createElement('button')
       attach.className = 'cmd-overflow-menu-item'
       attach.dataset.action = 'attach-output'
       attach.textContent = 'Attach output'
       attach.addEventListener('click', (ev) => {
         ev.stopPropagation()
+        if (running.isActive(blockEl)) {
+          closeMenu()
+          return
+        }
         const rowEnd = blockEl.querySelectorAll('.cmd-output .term-line').length
         if (rowEnd > 0) running.attachOutput?.(blockEl, 0, rowEnd)
         closeMenu()
@@ -1045,7 +1052,7 @@ function buildOverflowMenu(
     // THE TWO THINGS A PERSON CAN DO ABOUT A COMMAND THAT IS STILL RUNNING
     // (nocx-92gfl, nocx-23rph). Present only while it runs, and only when
     // the host supplied the handlers: a finished block has nothing to ask
-    if (running && (running.isActive?.() ?? true)) {
+    if (running && isActive) {
       const timeLimited: HTMLElement[] = []
       if (running.ask) {
         const ask = document.createElement('button')
@@ -1056,6 +1063,10 @@ function buildOverflowMenu(
         ask.textContent = 'Ask about this command'
         ask.addEventListener('click', (ev) => {
           ev.stopPropagation()
+          if (!running.isActive(blockEl)) {
+            closeMenu()
+            return
+          }
           closeMenu()
           running.ask?.()
         })
@@ -1067,6 +1078,10 @@ function buildOverflowMenu(
       stop.textContent = 'Stop'
       stop.addEventListener('click', (ev) => {
         ev.stopPropagation()
+        if (!running.isActive(blockEl)) {
+          closeMenu()
+          return
+        }
         closeMenu()
         running.stop()
       })

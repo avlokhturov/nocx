@@ -2498,6 +2498,19 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const rec = withScrollback.scrollback.blockManager.blocks[0]
       expect(rec.status).toBe('success')
       expect(rec.el.classList.contains('cmd-block-running')).toBe(true)
+      const menuButton = rec.el.querySelector<HTMLElement>('.cmd-overflow-btn')
+      expect(menuButton).not.toBeNull()
+      menuButton!.click()
+      const menuItems = Array.from(
+        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+      )
+      const attach = menuItems.find((item) => item.dataset.action === 'attach-output')
+      const ask = menuItems.find((item) => item.dataset.action === 'ask')
+      const stop = menuItems.find((item) => item.dataset.action === 'stop')
+      expect(attach).toBeDefined()
+      expect(ask).toBeUndefined()
+      expect(stop).toBeUndefined()
+      document.querySelector('.cmd-overflow-menu')?.remove()
 
       // The ack lands here. It used to be refused for the class alone and
       // dropped for good — no retry, nothing shown, nothing logged.

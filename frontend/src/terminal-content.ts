@@ -1311,6 +1311,12 @@ export class TerminalContent extends BasePaneContent {
         // never a second implementation — so the chord and the item cannot
         // drift apart.
         runningActions: {
+          // The lifecycle kernel is the liveness owner, but the block identity
+          // is part of the predicate: frozen history must never signal a newer
+          // command. The DOM class is only a visual transition and can lag the
+          // authenticated completion.
+          isActive: (blockEl) =>
+            this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
           ask: () => void this.summonEditor(),
           stop: () => this.signalActiveCommand('stop'),
           attachOutput: (blockEl, rowStart, rowEnd) =>
