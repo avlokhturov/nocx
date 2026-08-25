@@ -472,18 +472,6 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: domain and command required"})
 		return
 	}
-	if s.contentDB == nil {
-		// The renderer fails open and still writes the command bytes, but
-		// without a durable ledger there is no honest block identity to
-		// return. Refuse before mutating the lifecycle kernel.
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle ledger unavailable"})
-		return
-	}
-	masked, err := maskLedgerCommand(params.Command)
-	if err != nil {
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: detection failed; command not recorded"})
-		return
-	}
 	dom, ok := s.lifecyclePub.Domain(lifecycle.DomainID(params.Domain))
 	if !ok {
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
@@ -501,50 +489,46 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(lifecycle.ErrUnknownDomain), Message: lifecycle.ErrUnknownDomain.Error()})
 		return
 	}
-	ledger := s.contentDB.Ledger()
-	env := environmentForSession(sess)
-	if err := ledger.EnsureEnvironment(ctx, env); err != nil {
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: ensure environment: " + err.Error()})
-		return
-	}
 	att, err := s.lifecyclePub.SubmitAttempt(lifecycle.DomainID(params.Domain), params.Command, params.Cwd, params.Host)
 	if err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
 	}
-	startedAt := att.StartedAt.UnixMilli()
-	payload, err := content.WithEntryMasking("{}", content.EntryMasking{
-		MaskedCount: len(masked.findings),
-		MaskedKinds: maskedKindsOf(masked.findings),
-		Redactions:  redactionsOf(masked.findings, masked.segments),
-	})
-	if err != nil {
-		_ = s.lifecyclePub.AbandonAttempt(att.ID)
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: masking receipt failed"})
-		return
-	}
-	_, err = ledger.Submit(ctx, content.SubmitEntry{
-		ID:            string(att.ID),
-		Client:        fmt.Sprintf("%d", wconn.id),
-		EnvironmentID: env.ID,
-		PaneID:        panePtr(sess.PaneID()),
-		Cwd:           att.Cwd,
-		Kind:          content.EntryShell,
-		Source:        content.SourceUser,
-		Intent:        masked.text,
-		StartedAt:     &startedAt,
-		Sensitivity:   content.SensitivityNormal,
-		Payload:       payload,
-	})
-	if err != nil {
-		// The kernel minted the authoritative id before the store could
-		// accept its row. Contain that half-open attempt rather than
-		// leaving a live lifecycle with no ledger identity.
-		if abandonErr := s.lifecyclePub.AbandonAttempt(att.ID); abandonErr != nil {
-			s.log.Warn("lifecycle submit cleanup failed", "attempt", att.ID, "error", abandonErr)
+	if s.contentDB != nil {
+		masked, maskErr := maskLedgerCommand(params.Command)
+		if maskErr != nil {
+			s.log.Warn("lifecycle ledger masking failed; command remains executable", "attempt", att.ID, "error", maskErr)
+		} else {
+			ledger := s.contentDB.Ledger()
+			env := environmentForSession(sess)
+			if envErr := ledger.EnsureEnvironment(ctx, env); envErr != nil {
+				s.log.Warn("lifecycle ledger environment unavailable; command remains executable", "attempt", att.ID, "error", envErr)
+			} else {
+				startedAt := att.StartedAt.UnixMilli()
+				payload, payloadErr := content.WithEntryMasking("{}", content.EntryMasking{
+					MaskedCount: len(masked.findings),
+					MaskedKinds: maskedKindsOf(masked.findings),
+					Redactions:  redactionsOf(masked.findings, masked.segments),
+				})
+				if payloadErr != nil {
+					s.log.Warn("lifecycle ledger masking receipt failed; command remains executable", "attempt", att.ID, "error", payloadErr)
+				} else if _, submitErr := ledger.Submit(ctx, content.SubmitEntry{
+					ID:            string(att.ID),
+					Client:        fmt.Sprintf("%d", wconn.id),
+					EnvironmentID: env.ID,
+					PaneID:        panePtr(sess.PaneID()),
+					Cwd:           att.Cwd,
+					Kind:          content.EntryShell,
+					Source:        content.SourceUser,
+					Intent:        masked.text,
+					StartedAt:     &startedAt,
+					Sensitivity:   content.SensitivityNormal,
+					Payload:       payload,
+				}); submitErr != nil {
+					s.log.Warn("lifecycle ledger submit failed; command remains executable", "attempt", att.ID, "error", submitErr)
+				}
+			}
 		}
-		_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "lifecycle.submitAttempt: record open entry: " + err.Error()})
-		return
 	}
 	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
 		// The shell can authenticate its Start concurrently with the

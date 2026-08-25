@@ -25,14 +25,16 @@ import type { WSClient } from './ipc'
 import { log } from './log'
 import type { RecallScope } from './recall'
 
-/** The history.record request — the ledger's facts minus what never crosses
- *  (the session-local id, the live marker-line accessor, the disposed flag)
- *  and minus the output, which is never retained (ADR-0008). paneId is the
- *  ONE deliberate exception to "session-local ids never cross the wire"
- *  (nocx-tsajw): the renderer-minted per-tab identity that scopes the
- *  pending-capture registry. It is opaque to the backend — minted once per
- *  tab, never reused, and bound to the connection it arrives on. */
+/** The history.record request — the ledger's facts plus the authenticated
+ *  lifecycle attempt id that identifies the row opened at submit. What never
+ *  crosses is the session-local id, the live marker-line accessor, the
+ *  disposed flag, and output (ADR-0008). paneId is the ONE deliberate
+ *  exception to "session-local ids never cross the wire" (nocx-tsajw): the
+ *  renderer-minted per-tab identity that scopes pending captures. It is opaque
+ *  to the backend — minted once per tab, never reused, and bound to the
+ *  connection it arrives on. */
 export interface HistoryRecordParams {
+  attemptId: string
   command: string
   cwd: string
   host: string
@@ -52,15 +54,16 @@ export interface HistoryRecordParams {
  *  authenticated attempt that completed it. Best-effort by design: a
  *  socket drop or an unavailable store loses the entry for this session —
  *  the honest cost of not blocking the terminal — and the recall overlay
- *  still answers from the session ledger until the store comes back.
+ *  answers from the session ledger until the store comes back.
  *
- *  The attempt is authority, never data: the record's command text is what
- *  persists (app-owned, reference-intact), and the attempt's own command
- *  field never crosses this seam. `trusted` does not exist on the wire.
- *  Only a COMPLETED attempt persists: an open attempt has nothing to
- *  record, and an abandoned one is `unknown` — the ledger keeps it for the
- *  session, but nothing unreported crosses to the store (ADR-0024 §5's
- *  interval: absence of a completion is not a status).
+ *  The attempt id is authority and row identity: the record's command text
+ *  is what persists (app-owned, reference-intact), and the attempt's own
+ *  command field never crosses this seam. `trusted` does not exist on the
+ *  wire.
+ *  Only a COMPLETED attempt persists: an open attempt has nothing to record,
+ *  and an abandoned one is `unknown` — the ledger keeps it for the session,
+ *  but nothing unreported crosses to the store (ADR-0024 §5's interval:
+ *  absence of a completion is not a status).
  *  Resolves with the store's ack — what was masked and, when a credential
  *  was detected, the pending-capture offers — or null on failure. The ack
  *  is what lets the block show the masked command and attach the
@@ -73,8 +76,9 @@ export function recordCommand(
   attempt: ExecutionAttempt,
 ): Promise<HistoryRecord | null> {
   if (attempt.state !== 'completed') return Promise.resolve(null)
-  void attempt // the authority the caller already proved; the params carry only the record
+  void attempt // the authority and stable row identity for this completed command
   const params: HistoryRecordParams = {
+    attemptId: attempt.id,
     command: rec.command,
     cwd: rec.cwd,
     host: rec.host,

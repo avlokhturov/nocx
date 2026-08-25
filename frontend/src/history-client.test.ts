@@ -64,6 +64,7 @@ describe('recordCommand', () => {
     const [method, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(method).toBe('history.record')
     expect(params).toEqual({
+      attemptId: 'att-7',
       command: 'make deploy',
       cwd: '/repo',
       host: '',

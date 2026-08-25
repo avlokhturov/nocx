@@ -118,7 +118,8 @@ func TestLifecycleSubmitAttempt_OpensLedgerEntryAtAttemptIDAndMasks(t *testing.T
 
 func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
-	const command = "make test"
+	const secret = "sk-abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ" //nolint:gosec // synthetic detector fixture
+	command := "make test --token=" + secret
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), command), 41))
 	row := mustEntry(t, db, got.ID)
 	if row.Phase != content.PhaseOpen {
@@ -144,6 +145,46 @@ func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 	if row.Phase != content.PhaseClosed || row.Status != content.EntryFailure {
 		t.Fatalf("after completion row = phase=%q status=%q, want closed/failure", row.Phase, row.Status)
 	}
+	recordResp := jsonrpcCallWithID(t, e.conn, "history.record", map[string]any{
+		"attemptId": got.ID,
+		"command":   command,
+		"cwd":       "/repo",
+		"host":      "",
+		"source":    "user",
+		"status":    "failure",
+		"exitCode":  7,
+		"startedAt": nil,
+		"endedAt":   nil,
+		"paneId":    "01930000-0000-7000-8000-0000000000a1",
+	}, 42)
+	var recordEnvelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(recordResp, &recordEnvelope); err != nil {
+		t.Fatalf("history.record response: %v", err)
+	}
+	if recordEnvelope.Error != nil {
+		t.Fatalf("history.record: %+v", recordEnvelope.Error)
+	}
+	var ack historyRecordResponse
+	if err := json.Unmarshal(recordEnvelope.Result, &ack); err != nil {
+		t.Fatalf("history.record result: %v", err)
+	}
+	if ack.EntryID != got.ID {
+		t.Fatalf("history.record entry id = %q, want attempt id %q", ack.EntryID, got.ID)
+	}
+	entries, err := db.Ledger().ListEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != got.ID {
+		t.Fatalf("history.record rows = %+v, want one row under %q", entries, got.ID)
+	}
+	finalRow := mustEntry(t, db, got.ID)
+	if strings.Contains(finalRow.Intent, secret) || !strings.Contains(finalRow.Intent, "sk-a...GHIJ") {
+		t.Fatalf("completed row intent = %q, want masked command", finalRow.Intent)
+	}
 	items, err = e.ws.ListSessionItems(context.Background(), sid, 10)
 	if err != nil {
 		t.Fatalf("ListSessionItems after completion: %v", err)
@@ -155,7 +196,7 @@ func TestLifecycleLedgerTransitions_ListAndReadByAttemptID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadSessionItem by attempt id: %v", err)
 	}
-	if read.ID != got.ID || read.Command != command || read.State != "exited" || read.ExitCode == nil || *read.ExitCode != 7 {
+	if read.ID != got.ID || read.Command != finalRow.Intent || read.State != "exited" || read.ExitCode == nil || *read.ExitCode != 7 {
 		t.Fatalf("read item = %+v, want attempt id, command and exit code", read)
 	}
 }
@@ -193,19 +234,20 @@ func TestLifecycleLedger_AbandonsOpenRowsAsUnknownOnTransportLoss(t *testing.T) 
 	})
 }
 
-func TestLifecycleSubmitAttempt_StoreUnavailableLeavesKernelConventional(t *testing.T) {
+func TestLifecycleSubmitAttempt_StoreUnavailableStillRunsCommand(t *testing.T) {
 	e, pub, lane, h, _, _ := newLifecycleLedgerEnv(t, false)
-	if errObj := submitAttemptErr(t, e.conn, lifecycleSubmitParams(string(h.Domain), "echo hi"), 41); errObj.Code != -32603 {
-		t.Fatalf("store unavailable error code = %d, want -32603", errObj.Code)
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", lifecycleSubmitParams(string(h.Domain), "echo hi"), 41))
+	if got.ID == "" {
+		t.Fatal("store-unavailable submit returned an empty attempt id")
 	}
-	if _, ok := pub.OpenAttempt(h.Domain); ok {
-		t.Fatal("store-unavailable submit left a live kernel attempt")
+	if _, ok := pub.OpenAttempt(h.Domain); !ok {
+		t.Fatal("store-unavailable submit did not leave a live kernel attempt")
 	}
 	state, err := pub.State(lane)
 	if err != nil {
 		t.Fatalf("State: %v", err)
 	}
-	if state.Lifecycle != lifecycle.LifecyclePromptReady {
-		t.Fatalf("state after store refusal = %q, want prompt_ready", state.Lifecycle)
+	if state.Lifecycle != lifecycle.LifecycleRunning {
+		t.Fatalf("state after store degrade = %q, want running", state.Lifecycle)
 	}
 }

@@ -45,9 +45,10 @@ import (
 // captures. The scope's generation stays a backend fact (the connection's
 // own submission counter).
 type historyRecordParams struct {
-	Command string `json:"command"`
-	Cwd     string `json:"cwd"`
-	Host    string `json:"host"`
+	Command   string `json:"command"`
+	AttemptID string `json:"attemptId"`
+	Cwd       string `json:"cwd"`
+	Host      string `json:"host"`
 	// Source is who submitted the command, in the ledger's own vocabulary
 	// (entries.source): 'user' is the human, 'assistant' is the assistant's
 	// lane. Minted at submit by the submitting InputTarget on the renderer
@@ -323,13 +324,14 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	}
 
 	rec := content.CompletedCommand{
-		Client:  h.clientID,
-		Env:     environmentForHost(p.Host),
-		PaneID:  panePtr(p.PaneID),
-		Cwd:     p.Cwd,
-		Intent:  rowCommand,
-		Payload: payload,
-		Status:  content.EntryStatus(p.Status),
+		Client:    h.clientID,
+		AttemptID: p.AttemptID,
+		Env:       environmentForHost(p.Host),
+		PaneID:    panePtr(p.PaneID),
+		Cwd:       p.Cwd,
+		Intent:    rowCommand,
+		Payload:   payload,
+		Status:    content.EntryStatus(p.Status),
 		// The source the renderer minted, carried verbatim onto the
 		// entry's source column (design §3.1, nocx-iadtt): the store side
 		// never derives it from a lane or a run state, or a human command
