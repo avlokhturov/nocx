@@ -90,6 +90,7 @@ func TestAgentAsk_FailedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T
 		t.Fatalf("failed turn reads %q, want the explicit notice %q", answer, proseUnexecutedToolCallNotice)
 	}
 }
+
 func TestAgentAsk_CompletedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T) {
 	const envelope = `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`
 	client := &conversationClient{
