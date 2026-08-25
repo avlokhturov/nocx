@@ -1,9 +1,11 @@
 package assistant
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	einoopenai "github.com/cloudwego/eino-ext/components/model/openai"
 	openai "github.com/meguminnnnnnnnn/go-openai"
@@ -17,6 +19,122 @@ import (
 // — the ask path's terminal arm and the probe's — and one sentence written
 // twice is the shape this whole file exists to remove.
 const UnexplainedFailureSentence = "the model failed to answer. The details are in nocx's log."
+
+// UnexecutedToolCallSentence is what a person reads when a model asked for a
+// tool using text that nocx could not execute. It names the recoverable action
+// without exposing the provider's envelope.
+const UnexecutedToolCallSentence = "the model asked for a tool in a form nocx could not act on. Ask again — a different model may handle tools better."
+
+// UnexecutedToolCallError marks a successful stream whose answer was only a
+// textual tool-call envelope. It is a typed outcome so the transport can
+// terminalize the run without matching provider error text.
+type UnexecutedToolCallError struct{}
+
+func (*UnexecutedToolCallError) Error() string {
+	return "assistant: unexecuted tool-call envelope"
+}
+
+// IsUnexecutedToolCallEnvelope recognizes one or more complete textual
+// tool-call envelopes, not a vendor name. The serving stack has been observed
+// to emit both the XML-shaped function/parameter dialect and a JSON object
+// inside the same <tool_call> wrapper. Multiple blocks are accepted only when
+// separated by whitespace; requiring the entire trimmed prose to be that
+// sequence keeps an answer that quotes <tool_call> ordinary prose.
+//
+// finish_reason is deliberately not inspected: some endpoints say "stop",
+// some omit it, and some provide it only on the final delta. A list of
+// provider strings is also rejected because it would make this judgement stale
+// as soon as another compatible endpoint uses the same shape.
+func IsUnexecutedToolCallEnvelope(text string) bool {
+	const (
+		open  = "<tool_call>"
+		close = "</tool_call>"
+	)
+	remaining := strings.TrimSpace(text)
+	found := false
+	for remaining != "" {
+		if !strings.HasPrefix(remaining, open) {
+			return false
+		}
+		closeOffset := strings.Index(remaining[len(open):], close)
+		if closeOffset < 0 {
+			return false
+		}
+		closeOffset += len(open)
+		blockEnd := closeOffset + len(close)
+		block := remaining[:blockEnd]
+		inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(block, open), close))
+		// Nested wrappers are not a dialect. Reject them before either
+		// inner parser can mistake their tags for parameter or JSON data.
+		if strings.Contains(inner, open) || strings.Contains(inner, close) {
+			return false
+		}
+		if !isXMLToolCallEnvelope(inner) && !isJSONToolCallEnvelope(inner) {
+			return false
+		}
+		found = true
+		remaining = strings.TrimSpace(remaining[blockEnd:])
+	}
+	return found
+}
+
+func isJSONToolCallEnvelope(inner string) bool {
+	var call struct {
+		Name      string          `json:"name"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := json.Unmarshal([]byte(inner), &call); err != nil || strings.TrimSpace(call.Name) == "" {
+		return false
+	}
+	var arguments map[string]json.RawMessage
+	if err := json.Unmarshal(call.Arguments, &arguments); err != nil {
+		return false
+	}
+	return arguments != nil
+}
+
+func isXMLToolCallEnvelope(inner string) bool {
+	const (
+		functionPrefix  = "<function="
+		functionClose   = "</function>"
+		parameterPrefix = "<parameter="
+		parameterClose  = "</parameter>"
+	)
+	if !strings.HasPrefix(inner, functionPrefix) {
+		return false
+	}
+	functionEnd := strings.IndexByte(inner, '>')
+	if functionEnd <= len(functionPrefix) {
+		return false
+	}
+	if strings.TrimSpace(inner[len(functionPrefix):functionEnd]) == "" {
+		return false
+	}
+	rest := strings.TrimSpace(inner[functionEnd+1:])
+	if !strings.HasSuffix(rest, functionClose) {
+		return false
+	}
+	rest = strings.TrimSpace(strings.TrimSuffix(rest, functionClose))
+	for rest != "" {
+		if !strings.HasPrefix(rest, parameterPrefix) {
+			return false
+		}
+		parameterEnd := strings.IndexByte(rest, '>')
+		if parameterEnd <= len(parameterPrefix) {
+			return false
+		}
+		if strings.TrimSpace(rest[len(parameterPrefix):parameterEnd]) == "" {
+			return false
+		}
+		valueAndFollowing := rest[parameterEnd+1:]
+		valueEnd := strings.Index(valueAndFollowing, parameterClose)
+		if valueEnd < 0 {
+			return false
+		}
+		rest = strings.TrimSpace(valueAndFollowing[valueEnd+len(parameterClose):])
+	}
+	return true
+}
 
 // Why this file imports go-openai directly, and why go.mod promotes it from an
 // indirect dependency: the HTTP status is carried on a STRUCT FIELD

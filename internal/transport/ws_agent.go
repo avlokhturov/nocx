@@ -1773,6 +1773,13 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	if errors.As(err, &se) {
 		return content.TermFailed, se.Message
 	}
+	// The endpoint returned a complete textual tool-call envelope instead of
+	// a native call. The stream itself succeeded, so this belongs here as a
+	// typed semantic failure rather than in the transport-error arms below.
+	var envelopeErr *assistant.UnexecutedToolCallError
+	if errors.As(err, &envelopeErr) {
+		return content.TermFailed, assistant.UnexecutedToolCallSentence
+	}
 	// The run lease (ADR-0020 decision 2) fired: the sentence names WHICH
 	// bound ended the run, so the block says why — the ledger already
 	// records the reason on the attempt; this is the same fact in the
@@ -2040,6 +2047,11 @@ func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*conten
 // model's own context, because that is who reads this message.
 const proseGoneNotice = "[the text of this answer is no longer stored: retention evicted it]"
 
+// proseUnexecutedToolCallNotice replaces a stored envelope in the next
+// question's context. Showing the provider markup again would invite the
+// model to treat an unexecuted request as an earlier assistant turn.
+const proseUnexecutedToolCallNotice = "[this answer was not usable: the model asked for a tool in a form nocx could not act on]"
+
 // proseCutShortNotice marks a partial answer AS partial. Which it is — a real
 // message or an unfinished attempt — is a fact about the run's state and never
 // about how much text there is: an interrupted run leaves exactly the rows a
@@ -2060,6 +2072,13 @@ const proseCutShortNotice = "[this answer was cut short: the run did not finish]
 //     answer that was never written has no text to miss, and a marker there
 //     would claim one was.
 func priorAnswerMessage(p content.TurnProse) (string, bool) {
+	if p.Text != "" && assistant.IsUnexecutedToolCallEnvelope(p.Text) {
+		// The envelope predicate leads because replay safety does not depend
+		// on the recorded state: any state can carry stored prose, and this
+		// prose is never a usable assistant answer. State only chooses the
+		// wording for ordinary non-completed prose below.
+		return proseUnexecutedToolCallNotice, true
+	}
 	if p.Evicted {
 		return proseGoneNotice, true
 	}
