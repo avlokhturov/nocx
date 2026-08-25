@@ -3298,7 +3298,7 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
       noopSelect,
       freshStore(),
       'shell',
-      { ask, stop },
+      { ask, stop, isActive: () => true },
     )
     document.body.append(el)
     try {
@@ -3315,6 +3315,120 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
       expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
     } finally {
       el.remove()
+    }
+  })
+
+  it('rechecks liveness before a time-limited action fires', () => {
+    const container = document.createElement('div')
+    const stop = vi.fn()
+    let active = true
+    const el = createRunningBlock(
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { stop, isActive: () => active },
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      active = false
+      named(items, 'stop')!.click()
+      expect(stop).not.toHaveBeenCalled()
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    } finally {
+      el.remove()
+    }
+  })
+
+  it('rechecks liveness before Attach output fires', () => {
+    const container = document.createElement('div')
+    const attachOutput = vi.fn()
+    let active = false
+    const el = createCommandBlock(
+      'command',
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      '<span class="term-line">12K\t/</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      { isActive: () => active, stop: vi.fn(), attachOutput },
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      active = true
+      named(items, 'attach-output')!.click()
+      expect(attachOutput).not.toHaveBeenCalled()
+    } finally {
+      el.remove()
+    }
+  })
+
+  it('uses the supplied block liveness for both time-limited and attach actions', () => {
+    const container = document.createElement('div')
+    const attachOutput = vi.fn()
+    const isActive = vi.fn(() => false)
+    const el = createRunningBlock(
+      1,
+      'du -Hs /',
+      '~',
+      '',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      { ask: vi.fn(), stop: vi.fn(), isActive, attachOutput },
+    )
+    document.body.append(el)
+    try {
+      const items = menuItems(el)
+      expect(named(items, 'attach-output')?.textContent).toBe('Attach output')
+      expect(named(items, 'ask')).toBeUndefined()
+      expect(named(items, 'stop')).toBeUndefined()
+      expect(isActive).toHaveBeenCalledWith(el)
+    } finally {
+      el.remove()
+      document.querySelector('.cmd-overflow-menu')?.remove()
+    }
+
+    const finished = createCommandBlock(
+      'command',
+      2,
+      'du -Hs /',
+      '~',
+      '',
+      '<span class="term-line">12K\t/</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      { ask: vi.fn(), stop: vi.fn(), isActive: () => true, attachOutput },
+    )
+    document.body.append(finished)
+    try {
+      const items = menuItems(finished)
+      expect(named(items, 'attach-output')).toBeUndefined()
+      expect(named(items, 'ask')?.textContent).toBe('Ask about this command')
+      expect(named(items, 'stop')?.textContent).toBe('Stop')
+    } finally {
+      finished.remove()
     }
   })
 
@@ -3381,7 +3495,7 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
       freshStore(),
       'shell',
       undefined,
-      { ask: vi.fn(), stop: vi.fn(), attachOutput },
+      { ask: vi.fn(), stop: vi.fn(), isActive: () => false, attachOutput },
     )
     document.body.append(el)
     try {
@@ -3409,7 +3523,7 @@ describe('the running block’s ⋮ menu acts on the command, not just its text'
       freshStore(),
       'shell',
       undefined,
-      { ask: vi.fn(), stop: vi.fn(), attachOutput: answerAttachOutput },
+      { ask: vi.fn(), stop: vi.fn(), isActive: () => false, attachOutput: answerAttachOutput },
     )
     document.body.append(answer)
     try {
