@@ -343,9 +343,10 @@ func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 // blocks until released, so the consumer is genuinely stopped and the
 // pump can never complete a frame while the test fills the queue.
 type blockingSocket struct {
-	released chan struct{}
-	mu       sync.Mutex
-	frames   []outbound.Frame
+	released     chan struct{}
+	writeStarted chan struct{}
+	mu           sync.Mutex
+	frames       []outbound.Frame
 }
 
 func (s *blockingSocket) ReadMessage() (int, []byte, error) { return 0, nil, fmt.Errorf("no reads") }
@@ -353,6 +354,11 @@ func (s *blockingSocket) SetWriteDeadline(time.Time) error  { return nil }
 func (s *blockingSocket) Close() error                      { return nil }
 
 func (s *blockingSocket) WriteMessage(msgType int, data []byte) error {
+	select {
+	case <-s.writeStarted:
+	default:
+		close(s.writeStarted)
+	}
 	<-s.released
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -419,10 +425,11 @@ func (r outboundNotifyResponder) TryNotify(method string, params json.RawMessage
 // test releases it — the deterministic stand-in for "the stream is still
 // producing while the consumer has stopped reading".
 type barrierAskClient struct {
-	n        int
-	emitted  chan struct{}
-	release  chan struct{}
-	deltaCnt int
+	n           int
+	emitted     chan struct{}
+	release     chan struct{}
+	pumpStarted <-chan struct{}
+	deltaCnt    int
 }
 
 func (b *barrierAskClient) Probe(context.Context, assistant.ProbeParams) (assistant.ProbeResult, error) {
@@ -439,6 +446,9 @@ func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent
 			return err
 		}
 		b.deltaCnt++
+		if i == 0 && b.pumpStarted != nil {
+			<-b.pumpStarted
+		}
 	}
 	close(b.emitted)
 	<-b.release
@@ -454,21 +464,41 @@ func (b *barrierAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent
 func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 	const deltas = outbound.DefaultQueueDepth + 2 // 256 queued + 1 in the pump's hand + 1 refused
 	svc := &fakeAgentService{}
-	sock := &blockingSocket{released: make(chan struct{})}
+	sock := &blockingSocket{
+		released:     make(chan struct{}),
+		writeStarted: make(chan struct{}),
+	}
 	conn := outbound.New(sock, outbound.Config{})
 	t.Cleanup(conn.Close)
-	client := &barrierAskClient{n: deltas, emitted: make(chan struct{}), release: make(chan struct{})}
+	client := &barrierAskClient{
+		n:           deltas,
+		emitted:     make(chan struct{}),
+		release:     make(chan struct{}),
+		pumpStarted: sock.writeStarted,
+	}
 	h := newGapHandlers(svc, client, assistant.NewApprovalStore())
+	t.Cleanup(func() {
+		select {
+		case <-client.release:
+		default:
+			close(client.release)
+		}
+	})
 
 	streamDone := make(chan struct{})
 	go func() {
 		h.runAskStream(context.Background(), gapRunContext(), outboundNotifyResponder{c: conn})
 		close(streamDone)
 	}()
+	select {
+	case <-sock.writeStarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("outbound pump did not reach the blocking consumer")
+	}
 
-	// The producer emitted every delta while the pump was blocked: the
-	// queue refused the overflow (counted, not buffered) and the stream
-	// kept going — the producer never waits on the consumer.
+	// The producer emitted every delta while the pump was blocked: the queue
+	// refused the overflow (counted, not buffered) and the stream kept going —
+	// the producer never waits on the consumer.
 	select {
 	case <-client.emitted:
 	case <-time.After(10 * time.Second):
@@ -499,8 +529,8 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 		t.Errorf("delta frames written = %d, want %d — the queue bound must hold, not the stream length", got, writtenDeltas)
 	}
 
-	// With the queue drained, the terminal runState gets through and
-	// carries the count: the drop surfaces (criterion 1) end to end.
+	// With the queue drained, the terminal runState gets through and carries
+	// the count: the drop surfaces (criterion 1).
 	close(client.release)
 	waitFor(t, "terminal runState on the wire", 10*time.Second, func() bool {
 		return sock.runStateFrame() != nil
