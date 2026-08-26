@@ -28,6 +28,12 @@ function selectedWindow(
     .map((row, index) => (range.intersectsNode(row) ? index : -1))
     .filter((index) => index >= 0)
   if (selected.length === 0) return null
+  // A window is a window only when it is a genuine SUBSET (nocx-5u3oz.16). A
+  // drag across every output row is one movement and means the block, so it
+  // collapses to a whole-block mark — otherwise "select everything" and
+  // "select the block" would be different things behind the same gesture, and
+  // the block would lose its mark at exactly the moment a person meant it most.
+  if (selected.length === rows.length) return null
   const start = selected[0]
   return { start, count: selected[selected.length - 1] - start + 1 }
 }
