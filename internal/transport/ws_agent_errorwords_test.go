@@ -34,6 +34,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
@@ -196,6 +197,116 @@ func TestAskFailure_EgressScreeningNamesSealedVault(t *testing.T) {
 	}
 	if strings.Contains(sentence, screeningErr.Tool) {
 		t.Fatalf("wire sentence contains tool name %q: %q", screeningErr.Tool, sentence)
+	}
+}
+
+// TestAsk_EgressSealedVaultUnlocksAndContinues drives a real run tool result
+// through the real policy middleware and the real vault adapter. The egress
+// gate must raise the unlock, then continue screening the same result rather
+// than discard it and fail the run.
+func TestAsk_EgressSealedVaultUnlocksAndContinues(t *testing.T) {
+	const secret = "egress-secret-value"
+	fake, srv := newRunToolCallingServer("")
+	defer srv.Close()
+
+	client := mustClient(t)
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
+	created, code := decodeEndpointResult(t, jsonrpcCall(t, h.conn, "endpoints.create", map[string]any{
+		"name":    "No-key provider",
+		"baseUrl": srv.URL,
+		"noKey":   true,
+		"models":  []map[string]any{{"name": "qwen3"}},
+	}))
+	if code != 0 {
+		t.Fatalf("endpoints.create: code %d", code)
+	}
+	if isErrorResponse(t, jsonrpcCall(t, h.conn, "roles.assign", map[string]any{
+		"role": "answering", "endpointId": created.ID, "model": "qwen3",
+	})) {
+		t.Fatal("roles.assign refused the no-key endpoint")
+	}
+	createSecret(t, h.v, "egress-secret", secret)
+	h.v.Seal()
+	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
+	sid := openLocalSession(t, h.conn)
+	fake.args = fmt.Sprintf(`{"sessionId":%q,"command":"printf output"}`, sid)
+
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "sealed-egress", "sessionId": sid, "question": "show the result",
+		"cwd": "/repo", "attachedContent": []any{},
+	}, 2)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.runRequest", 10*time.Second)
+	var runReq struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &runReq); err != nil {
+		t.Fatalf("runRequest: %v", err)
+	}
+	if runReq.RequestID == "" {
+		t.Fatal("runRequest has no requestId")
+	}
+	if response := jsonrpcCall(t, h.conn, "agent.runResolved", runResolvedWire(
+		runReq.RequestID, "egress-entry", 0, "success", 1, 0, 1, secret,
+	)); isErrorResponse(t, response) {
+		t.Fatalf("agent.runResolved refused: %s", response)
+	}
+
+	frame := readUnlockRequestFrame(t, h.conn)
+	if frame.Reason != "screen the tool result" {
+		t.Fatalf("unlock reason = %q, want %q", frame.Reason, "screen the tool result")
+	}
+	unseal := jsonrpcCallWithID(t, h.conn, "vault.unseal", map[string]any{
+		"means": "passphrase", "secret": "test",
+	}, 3)
+	if isErrorResponse(t, unseal) {
+		t.Fatalf("the unseal that answers the raised unlock was refused: %s", unseal)
+	}
+	answerUnlock(t, h.conn, frame.RequestID, "unsealed")
+	raw = readNotification(t, h.conn, "agent.approvalRequested", 10*time.Second)
+	if strings.Contains(string(raw), secret) {
+		t.Fatalf("egress approval carried secret material: %s", raw)
+	}
+	var approval agentApprovalRequested
+	if err := json.Unmarshal(raw, &approval); err != nil {
+		t.Fatalf("approvalRequested: %v", err)
+	}
+	if approval.Reason != "egress" || len(approval.Findings) != 1 ||
+		approval.Findings[0].SecretName != "egress-secret" {
+		t.Fatalf("approvalRequested = %+v, want one named egress finding", approval)
+	}
+	if _, errObj := approveOverWire(t, h.conn, map[string]any{
+		"runId": approval.RunID, "attempt": approval.Attempt,
+		"tool": approval.Tool, "callId": approval.CallID,
+		"argHash": approval.ArgHash, "approved": true, "scope": "once",
+	}, 4); errObj != nil {
+		t.Fatalf("agent.approve: %+v", errObj)
+	}
+
+	var answer string
+	for range 2 {
+		raw = readNotification(t, h.conn, "agent.runDelta", 10*time.Second)
+		var delta agentRunDelta
+		if err := json.Unmarshal(raw, &delta); err != nil {
+			t.Fatalf("runDelta: %v", err)
+		}
+		if delta.RunID != res.RunID {
+			t.Fatalf("runDelta runId = %d, want %d", delta.RunID, res.RunID)
+		}
+		answer += delta.Text
+	}
+	if answer != "ok" {
+		t.Fatalf("answer = %q, want final answer %q", answer, "ok")
+	}
+	raw = readNotification(t, h.conn, "agent.runState", 10*time.Second)
+	var state agentRunState
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState: %v", err)
+	}
+	if state.RunID != res.RunID || state.State != string(content.RunCompleted) || state.Error != "" {
+		t.Fatalf("runState = %+v, want completed without an error", state)
 	}
 }
 
