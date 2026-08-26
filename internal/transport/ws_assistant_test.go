@@ -122,7 +122,7 @@ func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *sc
 	}
 	opts := []WSServerOption{
 		WithProfileRepository(profiles), WithGroupRepository(ps),
-		WithCredentialStore(v), WithVaultLifecycle(v),
+		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
 	}
 	if stub != nil {
 		opts = append(opts, WithAssistantClient(stub))

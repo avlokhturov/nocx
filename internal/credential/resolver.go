@@ -15,6 +15,12 @@ package credential
 // There is no default. The zero stance returns ErrStanceUndeclared, and a call
 // that omits the stance does not compile. Raw Get belongs only to the
 // composition-only MaterialStore used to build this resolver.
+//
+// AN OPERATION READ BLOCKS. It waits for a person to answer a dialog, so a
+// caller holding an admission holds it for that whole wait — and the vault
+// gate is the one vault.unseal needs to answer the very prompt this raised
+// (nocx-o3606). A resolve therefore belongs outside every capability
+// admission; internal/capability asserts that it holds no Resolver at all.
 
 import (
 	"context"
@@ -69,45 +75,49 @@ type Resolver interface {
 	Resolve(ctx context.Context, id SecretID, why Stance) (Secret, error)
 }
 
-// NewResolver wraps a store. sealed recognizes the store's sealed condition.
-// ensure raises and waits for the vault-owned unlock for operation reads. A
-// nil ensure preserves the sealed error for test seams and headless consumers
-// that have no prompt carrier.
-func NewResolver(
-	store MaterialStore,
-	sealed func(error) bool,
-	ensure func(context.Context, string) error,
-) Resolver {
-	return resolver{store: store, sealed: sealed, ensure: ensure}
+// Unsealer raises the vault's own unlock and waits for it — the vault owns
+// both the prompt and the coalescing, and this package must not import it
+// (the vault imports this one), so the seam is declared here and satisfied
+// by *vault.Vault. The same shape the vault declares for its own prompt
+// carrier, and for the same reason.
+//
+// It is an INTERFACE, not a discovered method: a resolver built without one
+// never raises a prompt, and that difference has to be a decision somebody
+// wrote at the composition root rather than a type assertion that quietly
+// missed. A missed assertion degrades to "the unlock never appears", with
+// nothing in the log and nothing in the product to say so.
+type Unsealer interface {
+	EnsureUnsealed(ctx context.Context, reason string) error
 }
 
-// NewOperationResolver builds the operation-only seam used by connection and
-// SSH layers. A store that owns EnsureUnsealed supplies it structurally; test
-// stores and headless implementations preserve their ordinary read behavior.
-func NewOperationResolver(store MaterialStore) Resolver {
+// NewResolver wraps a store. sealed recognizes the store's sealed condition
+// and is what makes a Report read quiet; unsealer raises and waits for the
+// unlock on an Operation read. A nil unsealer is the headless answer — no
+// prompt carrier, so the store's sealed error is returned verbatim and the
+// renderer's replay seam handles it, exactly as it did before the vault
+// raised its own unlock.
+//
+// Both are supplied at the composition root because both are composition
+// decisions: which implementation's sealed error is in play, and whether
+// there is anybody to ask.
+func NewResolver(store MaterialStore, sealed func(error) bool, unsealer Unsealer) Resolver {
 	if store == nil {
 		return nil
 	}
-	var ensure func(context.Context, string) error
-	if unsealer, ok := store.(interface {
-		EnsureUnsealed(context.Context, string) error
-	}); ok {
-		ensure = unsealer.EnsureUnsealed
-	}
-	return NewResolver(store, nil, ensure)
+	return resolver{store: store, sealed: sealed, unsealer: unsealer}
 }
 
 type resolver struct {
-	store  MaterialStore
-	sealed func(error) bool
-	ensure func(context.Context, string) error
+	store    MaterialStore
+	sealed   func(error) bool
+	unsealer Unsealer
 }
 
 func (r resolver) Resolve(ctx context.Context, id SecretID, why Stance) (Secret, error) {
 	switch why.kind {
 	case stanceOperation:
-		if r.ensure != nil {
-			if err := r.ensure(ctx, why.reason); err != nil {
+		if r.unsealer != nil {
+			if err := r.unsealer.EnsureUnsealed(ctx, why.reason); err != nil {
 				return Secret{}, err
 			}
 		}

@@ -126,7 +126,7 @@ func (s *stubSecretStore) Get(ctx context.Context, id credential.SecretID) (cred
 }
 
 func (s *stubSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
-	return credential.NewOperationResolver(s).Resolve(ctx, id, why)
+	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
 }
 
 func (s *stubSecretStore) Delete(ctx context.Context, id credential.SecretID) error {

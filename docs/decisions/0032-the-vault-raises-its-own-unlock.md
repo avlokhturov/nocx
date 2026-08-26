@@ -160,11 +160,28 @@ The decision is amended:
 - An operation read calls the vault's `EnsureUnsealed`, waits for the one
   coalesced prompt, then continues the same operation. A report read never asks
   and maps the sealed state to `credential.ErrSealedQuiet`.
-- Waiting is allowed only outside a capability admission. The ingress-critical
-  `vault.unlockResolved` method remains on the read loop, so the answer cannot
-  queue behind the operation it releases. The earlier statement that the
-  backend never blocks on unlock is superseded by this narrower invariant: no
-  control read loop or capability admission blocks on unlock.
+- Waiting is allowed only outside a capability admission. The earlier
+  statement that the backend never blocks on unlock is superseded by this
+  narrower invariant: no control read loop or capability admission blocks on
+  unlock.
+
+  **The answer to the prompt is `vault.unseal`, not `vault.unlockResolved`.**
+  The renderer's dialog unseals first and reports the resolution only once
+  that succeeded, so it is `vault.unseal` — a VAULT-GATED method, capacity
+  one, a one-second wait — that has to get through. `unlockResolved` being
+  ingress-critical is necessary and was mistaken for sufficient: a read that
+  waits while holding the vault gate is a prompt whose own answer comes back
+  `-32004 Control plane busy`, and the person is shown a door with no handle.
+  Measured on exactly one path — `secrets.saveKeyPassphrase` resolving key
+  material inside its operation (`nocx-o3606`).
+
+  So the wait is lifted above the admission rather than trusted to stay out
+  of one: `internal/capability` holds no `credential.Resolver` at all, which a
+  test in that package asserts. A handler that needs material takes its
+  operation for the store reads, releases it, resolves, and takes it again to
+  write — the split `endpoints.probe` already had, and the same reason PHASE
+  TWO of `open` dials outside its domain gate.
+
 - `agent.ask` creates the durable run, answers with its backend identity, then
   resolves endpoint material at the start of the stream task before the
   streaming transition or any model request. Unlock therefore waits and

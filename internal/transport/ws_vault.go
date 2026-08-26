@@ -160,9 +160,14 @@ type vaultLifecycleHandlers struct {
 // vault.changed fan-out; the profile/group/credential stores are reachable
 // only through the operation's service.
 type vaultSecretHandlers struct {
-	op       capability.SecretOperation // nil → not fully wired
-	r        Responder
-	machine  vaultMachine
+	op      capability.SecretOperation // nil → not fully wired
+	r       Responder
+	machine vaultMachine
+	// secrets is the stanced material seam, held by the HANDLER and never
+	// reached from inside the operation: an operation-stance read blocks
+	// on the unlock, and no admission may be held across that wait
+	// (nocx-o3606).
+	secrets  credential.Resolver
 	notWired string // exact old -32601 answer when op is nil
 }
 
@@ -1265,7 +1270,7 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 	if s.vaultLifecycle != nil && s.profiles != nil && s.groups != nil && s.credentials != nil {
 		secretOp = capability.NewSecretOperation(
 			configGate, vaultGate, lane, s.profiles, s.groups,
-			s.vaultLifecycle, s.credentials, s.credentialResolver(),
+			s.vaultLifecycle, s.credentials,
 		)
 	}
 	var resetOp capability.VaultResetOperation
@@ -1334,7 +1339,7 @@ func (s *WSServer) vaultSpecs(lane control.Admission, configGate, vaultGate cont
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDeleteSecret(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "vault.resolveLine", params(validateVaultResolveLineRaw), func(r Responder) handlerFunc {
-			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, notWired: s.vaultSecretUnavailable("vault.resolveLine")}
+			h := vaultSecretHandlers{op: secretOp, r: r, machine: s, secrets: s.credentialResolver(), notWired: s.vaultSecretUnavailable("vault.resolveLine")}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolveLine(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(resetSub, "vault.resetPreview", noParams(), func(r Responder) handlerFunc {

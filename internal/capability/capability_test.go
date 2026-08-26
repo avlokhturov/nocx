@@ -733,7 +733,7 @@ func TestOverlappingOperationsBothComplete(t *testing.T) {
 	seam := newFakeVault()
 	cfgSvc := newProfileService(t)
 
-	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam))
+	secretOp := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
 	tabbyOp := capability.NewTabbyImportOperation(cfgGate, vltGate, testLane(), profiles, groups, cfgSvc, seam, seam)
 
 	// Run both in both arrival orders, concurrently, repeatedly.
@@ -864,7 +864,7 @@ func TestForSecretUnknownID(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam), seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
 
 	op, err := factory.ForSecret(context.Background(), "sec:v1:file:does-not-exist")
 	if err == nil {
@@ -888,7 +888,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seed secret: %v", err)
 	}
-	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam), seam.Exists)
+	factory := capability.NewSecretOperations(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, seam.Exists)
 	op, err := factory.ForSecret(context.Background(), id)
 	if err != nil {
 		t.Fatalf("ForSecret with a known id failed: %v", err)
@@ -897,7 +897,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 		t.Fatal("ForSecret returned nil on success")
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, id)
+		secret, err := seam.Get(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -1018,7 +1018,7 @@ func TestSecretDeleteUnknownRowFailsAndKnownRowSucceeds(t *testing.T) {
 	groups := &fakeGroupRepo{}
 
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam, credential.NewOperationResolver(seam))
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), profiles, groups, seam, seam)
 
 	// Failure path: unknown row.
 	err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1258,7 +1258,7 @@ func TestConfigWriteResolvesRowWithVault(t *testing.T) {
 func TestMintSecretReturnsTheMintedID(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	seam := newFakeVault()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam, credential.NewOperationResolver(seam))
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, seam, seam)
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1282,7 +1282,7 @@ func TestMintSecretReturnsTheMintedID(t *testing.T) {
 func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 	cfgGate, vltGate, _, _, _, _ := testGates()
 	store := newFakeSecretStore()
-	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store, credential.NewOperationResolver(store))
+	op := capability.NewSecretOperation(cfgGate, vltGate, testLane(), &fakeProfileRepo{}, &fakeGroupRepo{}, nil, store)
 
 	var minted credential.SecretID
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
@@ -1296,7 +1296,7 @@ func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 		t.Fatalf("minted id = %q, want the plain store's minted reference", minted)
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, minted)
+		secret, err := store.Get(ctx, minted)
 		if err != nil {
 			return err
 		}

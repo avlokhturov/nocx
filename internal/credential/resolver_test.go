@@ -48,7 +48,7 @@ func (s *stancedStore) ensure(context.Context, string) error {
 
 func TestResolverOperationEnsuresThenReads(t *testing.T) {
 	store := &stancedStore{sealed: true, secret: credential.NewSecret("value")}
-	resolver := credential.NewOperationResolver(store)
+	resolver := credential.NewResolver(store, nil, store)
 
 	got, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Operation("answer the ask"))
 	if err != nil {
@@ -66,7 +66,7 @@ func TestResolverReportNeverEnsures(t *testing.T) {
 	store := &stancedStore{sealed: true}
 	resolver := credential.NewResolver(store, func(err error) bool {
 		return errors.Is(err, errSealed)
-	}, store.ensure)
+	}, store)
 
 	_, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Report())
 	if !errors.Is(err, credential.ErrSealedQuiet) {
@@ -79,7 +79,7 @@ func TestResolverReportNeverEnsures(t *testing.T) {
 
 func TestResolverRejectsUndeclaredStance(t *testing.T) {
 	store := &stancedStore{secret: credential.NewSecret("value")}
-	resolver := credential.NewResolver(store, nil, store.ensure)
+	resolver := credential.NewResolver(store, nil, store)
 
 	_, err := resolver.Resolve(t.Context(), "sec:v1:file:test", credential.Stance{})
 	if !errors.Is(err, credential.ErrStanceUndeclared) {
