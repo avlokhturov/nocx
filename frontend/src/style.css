@@ -88,6 +88,7 @@
 @import './styles/components/overview.css';
 @import './styles/components/roles.css';
 @import './styles/components/folder-picker.css';
+@import './styles/components/mark-affordance.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';

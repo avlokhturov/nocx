@@ -36,6 +36,7 @@ import {
   type GrantBlock,
 } from './ask-entry'
 import { GrantController } from './grant'
+import { createMarkAffordance, type MarkAffordance } from './mark-affordance'
 import {
   submitCommand,
   planSubmit,
@@ -530,6 +531,8 @@ export class TerminalContent extends BasePaneContent {
    *  The absent window is the explicit whole-block form. */
   private grantedBlocks: GrantBlock[] = []
   private grantController: GrantController | null = null
+  /** A selection offers a grant; only the body-level control confirms it. */
+  private markAffordance: MarkAffordance | null = null
   private readonly runningActions: RunningBlockActions = {
     isActive: (blockEl) =>
       this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
@@ -539,10 +542,31 @@ export class TerminalContent extends BasePaneContent {
   }
   private readonly onSelectionChange = (): void => {
     const selection = window.getSelection()
-    if (!selection || selection.isCollapsed) return
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      this.markAffordance?.hide()
+      return
+    }
+    const range = selection.getRangeAt(0)
     const grant = grantBlockFromSelection(selection)
-    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) return
-    this.ensureGrant(grant)
+    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) {
+      this.markAffordance?.hide()
+      return
+    }
+    const rects = Array.from(range.getClientRects())
+    const rect = rects[rects.length - 1]
+    if (!rect) {
+      this.markAffordance?.hide()
+      return
+    }
+    this.markAffordance?.show(
+      {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+      },
+      grant,
+    )
   }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
@@ -2965,6 +2989,10 @@ export class TerminalContent extends BasePaneContent {
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
       this.grantController.setBlocks(this.grantedBlocks)
+      this.markAffordance = createMarkAffordance((grant) => {
+        this.ensureGrant(grant)
+        this.markAffordance?.hide()
+      })
       document.addEventListener('selectionchange', this.onSelectionChange)
       this._mounted = true
       this._readyResolve(true)
@@ -4308,6 +4336,8 @@ export class TerminalContent extends BasePaneContent {
     this.clearGrants()
     this.grantController?.destroy()
     this.grantController = null
+    this.markAffordance?.dispose()
+    this.markAffordance = null
     document.removeEventListener('selectionchange', this.onSelectionChange)
     this.indicator = null
     this.promptVault?.destroy()
