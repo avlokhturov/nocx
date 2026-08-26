@@ -582,8 +582,31 @@ describe('AgentApprovalPrompt', () => {
       [false, 'always'],
     ])
   })
+  it('lays out policy answers as a labelled 2×3 grid without secondary button lines', () => {
+    const { container } = renderPrompt()
+    const grid = container.querySelector('[data-approval-grid]')
+    expect(grid).toBeTruthy()
+    expect(
+      Array.from(grid!.querySelectorAll('[data-approval-scope]')).map((scope) => scope.textContent),
+    ).toEqual(['once', 'in this session', 'always — read and inspect'])
 
-  it('groups the allowances apart from the refusals, and leads each group with once', () => {
+    const buttons = Array.from(grid!.querySelectorAll<HTMLButtonElement>('.ui-button'))
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      'Allow',
+      'Allow',
+      'Allow',
+      'Deny',
+      'Deny',
+      'Deny',
+    ])
+    expect(buttons.every((button) => !button.querySelector('.ui-button__secondary'))).toBe(true)
+    expect(buttons[0]?.getAttribute('aria-label')).toBe('Allow once — this proposal only')
+    expect(buttons[2]?.getAttribute('aria-label')).toBe(
+      'Allow always — every read and inspect call, in every session, from now on',
+    )
+  })
+
+  it('groups allowances and refusals into rows under one scope legend', () => {
     const { container } = renderPrompt()
     const groups = Array.from(container.querySelectorAll('.ui-action-group'))
     expect(groups).toHaveLength(2)
@@ -591,16 +614,8 @@ describe('AgentApprovalPrompt', () => {
       Array.from(g.querySelectorAll('.ui-button')).map((b) => b.textContent),
     )
     expect(names).toEqual([
-      [
-        'Allow once — this proposal only',
-        'Allow in this session — every read and inspect call in this session',
-        'Allow always — every read and inspect call, in every session, from now on',
-      ],
-      [
-        'Deny once — this proposal only',
-        'Deny in this session — every read and inspect call in this session',
-        'Deny always — every read and inspect call, in every session, from now on',
-      ],
+      ['Allow', 'Allow', 'Allow'],
+      ['Deny', 'Deny', 'Deny'],
     ])
   })
 

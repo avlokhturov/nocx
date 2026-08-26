@@ -367,10 +367,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <Button
             variant={scope === 'once' ? variant : 'default'}
             disabled={props.busy}
-            secondary={`— ${approvalScopeCoverage(scope, ask().effect)}`}
+            ariaLabel={`${verb} ${label} — ${approvalScopeCoverage(scope, ask().effect)}`}
             onClick={() => props.onDecide(approved, scope)}
           >
-            {`${verb} ${label}`}
+            {verb}
           </Button>
         )}
       </For>
@@ -386,6 +386,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       ariaLabel={TITLE[ask().reason]}
       placement="top-sheet"
       title={TITLE[ask().reason]}
+      density="compact"
       actionsLayout={ask().reason === 'egress' ? 'row' : 'stacked'}
       actions={
         <Show
@@ -395,24 +396,43 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <Button
                 variant="primary"
                 disabled={props.busy}
-                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
+                ariaLabel={`Allow once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(true, 'once')}
               >
-                Allow once
+                Allow
               </Button>
               <Button
                 variant="danger"
                 disabled={props.busy}
-                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
+                ariaLabel={`Deny once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(false, 'once')}
               >
-                Deny once
+                Deny
               </Button>
             </>
           }
         >
-          {group(true, 'Allow', 'primary')}
-          {group(false, 'Deny', 'danger')}
+          <div data-approval-grid="true" role="group" aria-label="Approval scope">
+            <div class="agent-approval-grid__scopes" aria-hidden="true">
+              <For each={SCOPES}>
+                {({ scope, label }) => (
+                  <span data-approval-scope={scope}>
+                    <Show when={scope === 'always'} fallback={label}>
+                      {`${label} — ${effectLabel()}`}
+                    </Show>
+                  </span>
+                )}
+              </For>
+            </div>
+            <span class="agent-approval-grid__row-label" aria-hidden="true">
+              Allow
+            </span>
+            {group(true, 'Allow', 'primary')}
+            <span class="agent-approval-grid__row-label" aria-hidden="true">
+              Deny
+            </span>
+            {group(false, 'Deny', 'danger')}
+          </div>
         </Show>
       }
     >
