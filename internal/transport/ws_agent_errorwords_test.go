@@ -23,6 +23,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -31,7 +32,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // frameworkWords are the identifiers a person must never be shown. The list
@@ -120,6 +123,80 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 // object the schema the model was shown does not allow.
 func malformedReadScreen(w http.ResponseWriter, _ *http.Request) {
 	streamToolCallChunk(w, "session.read", `{"sessionId":"s","notADeclaredProperty":1}`)
+}
+
+type failingKnownMaterial struct {
+	err error
+}
+
+func (f failingKnownMaterial) FindKnown(context.Context, string) ([]assistant.KnownMatch, error) {
+	return nil, f.err
+}
+
+// TestAskFailure_EgressScreeningNamesSealedVault drives a real tool call
+// through the policy middleware, makes its known-material gate fail, and
+// reads the resulting sentence from the real runState notification.
+func TestAskFailure_EgressScreeningNamesSealedVault(t *testing.T) {
+	var sessionID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		streamToolCallChunk(w, "session.list", fmt.Sprintf(`{"sessionId":%q}`, sessionID))
+	}))
+	defer srv.Close()
+
+	rec := &recordingClient{inner: mustClient(t)}
+	h := newAskHarnessWithOpts(t, rec,
+		WithAgentPolicy(autonomousPolicyStore(t)),
+		WithAgentKnownMaterial(failingKnownMaterial{err: vault.ErrVaultSealed}),
+	)
+	h.createEndpointAt(srv.URL)
+	sessionID = openLocalSession(t, h.conn)
+	if err := h.conn.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatalf("clear read deadline: %v", err)
+	}
+	tap := newSocketTap(h.conn)
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "agent.ask",
+		"params": map[string]any{
+			"askId":           "ask-sealed-egress",
+			"sessionId":       sessionID,
+			"question":        "what is on the screen?",
+			"cwd":             "/repo",
+			"attachedContent": []any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal ask: %v", err)
+	}
+	if err := h.conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write ask: %v", err)
+	}
+	_, sentence := waitForRunState(t, tap, "failed")
+	var screeningErr *assistant.EgressScreeningError
+	if !errors.As(rec.lastError(), &screeningErr) {
+		t.Fatalf("engine error = %v, want assistant.EgressScreeningError", rec.lastError())
+	}
+	if screeningErr.Gate != "egress" {
+		t.Fatalf("screening gate = %q, want %q", screeningErr.Gate, "egress")
+	}
+	if screeningErr.Tool != "session.list" {
+		t.Fatalf("screening tool = %q, want %q", screeningErr.Tool, "session.list")
+	}
+	if !strings.Contains(screeningErr.Error(), `agent tool "session.list": egress screening failed`) {
+		t.Fatalf("screening error = %q, want the tool name in its log text", screeningErr.Error())
+	}
+	if !errors.Is(screeningErr, vault.ErrVaultSealed) {
+		t.Fatalf("screening error = %v, want vault.ErrVaultSealed in its chain", screeningErr)
+	}
+	assertNoFrameworkWords(t, sentence)
+	const wantSentence = "the vault is sealed. Unlock it in Settings → Vault, then ask again."
+	if sentence != wantSentence {
+		t.Fatalf("sentence = %q, want %q", sentence, wantSentence)
+	}
+	if strings.Contains(sentence, screeningErr.Tool) {
+		t.Fatalf("wire sentence contains tool name %q: %q", screeningErr.Tool, sentence)
+	}
 }
 
 // unreachableEndpoint is a loopback port nothing listens on. http:// is

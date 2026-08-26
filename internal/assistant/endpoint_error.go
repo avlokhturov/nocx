@@ -25,6 +25,11 @@ const UnexplainedFailureSentence = "the model failed to answer. The details are 
 // without exposing the provider's envelope.
 const UnexecutedToolCallSentence = "the model asked for a tool in a form nocx could not act on. Ask again — a different model may handle tools better."
 
+// EgressScreeningFailureSentence is what a person reads when the egress
+// gate could not inspect a tool result. It names the withheld result and the
+// configuration to check without exposing detector or framework text.
+const EgressScreeningFailureSentence = "the result could not be screened, so it was withheld. Check the vault or egress screening configuration, then ask again."
+
 // UnexecutedToolCallError marks a successful stream whose answer was only a
 // textual tool-call envelope. It is a typed outcome so the transport can
 // terminalize the run without matching provider error text.

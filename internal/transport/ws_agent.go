@@ -1802,6 +1802,20 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	if errors.As(err, &toolErr) {
 		return content.TermFailed, "the assistant's " + toolErr.Tool + " call did not finish: " + toolErr.Message()
 	}
+	// Cause 1c: the egress gate could not inspect a tool result, so the
+	// policy withheld it and failed the run closed. This arm follows the
+	// tool-failure arm because both happen after execution, but it must name
+	// the screening failure rather than expose eino's wrapper. The sealed
+	// vault case is checked by its sentinel, not by error text, so only that
+	// repair sends the person to unlock the vault.
+	var screeningErr *assistant.EgressScreeningError
+	if errors.As(err, &screeningErr) {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			return content.TermFailed, "the vault is sealed. Unlock it in Settings → Vault, then ask again."
+		}
+		return content.TermFailed, assistant.EgressScreeningFailureSentence
+	}
+
 	// Cause 2: the model produced a tool call the engine cannot act on — a
 	// name that is not a tool, or arguments the schema it was shown does not
 	// allow. NOT a refusal: there was nothing to refuse.

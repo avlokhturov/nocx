@@ -6,7 +6,9 @@ import (
 	"testing"
 
 	openai "github.com/meguminnnnnnnnn/go-openai"
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 func TestClassifyAskFailure_EndpointResponsesUseAssistantSentences(t *testing.T) {
@@ -53,5 +55,25 @@ func TestClassifyAskFailure_EndpointResponsesUseAssistantSentences(t *testing.T)
 				}
 			}
 		})
+	}
+}
+
+func TestClassifyAskFailure_EgressScreeningOtherCauseUsesGenericSentence(t *testing.T) {
+	cause := vault.ErrVaultGenerationChanged
+	reason, sentence := classifyAskFailure(&assistant.EgressScreeningError{
+		Gate: "egress",
+		Err:  cause,
+	}, "probe-model")
+	if reason != content.TermFailed {
+		t.Fatalf("reason = %q, want %q", reason, content.TermFailed)
+	}
+	if sentence != assistant.EgressScreeningFailureSentence {
+		t.Fatalf("sentence = %q, want %q", sentence, assistant.EgressScreeningFailureSentence)
+	}
+	if strings.Contains(sentence, cause.Error()) {
+		t.Fatalf("sentence leaked screening cause %q: %q", cause, sentence)
+	}
+	if strings.Contains(strings.ToLower(sentence), "unlock") {
+		t.Fatalf("generic screening sentence tells the user to unlock: %q", sentence)
 	}
 }
