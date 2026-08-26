@@ -106,6 +106,18 @@ describe('GrantController', () => {
     expect(css).not.toMatch(/\.cmd-block\[data-granted\][^{]*\{[^}]*box-shadow:/s)
     expect(css).not.toMatch(/\.cmd-block\[data-granted\]::before/)
   })
+  it('uses compact menu metrics for the grant panel variant', () => {
+    const css = readFileSync(resolve(SRC_ROOT, 'styles/components/floating-panel.css'), 'utf8')
+    expect(css).toMatch(
+      /\.ui-floating-panel\[data-variant='grant'\]\s+\.ui-floating-panel__list\s*\{[^}]*padding:\s*0/s,
+    )
+    expect(css).toMatch(
+      /\.ui-floating-panel\[data-variant='grant'\]\s+\.ui-floating-panel__row\s*\{[^}]*padding:\s*6px 12px/s,
+    )
+    expect(css).toMatch(
+      /\.ui-floating-panel\[data-variant='grant'\]\s+\.ui-floating-panel__footer\s*\{[^}]*padding:\s*6px 12px/s,
+    )
+  })
 
   it('shows the default grant as a chip and changes it when a person marks a block', () => {
     const controller = new GrantController()
@@ -124,6 +136,31 @@ describe('GrantController', () => {
     expect(one.blockEl.dataset.granted).toBe('true')
     controller.destroy()
   })
+  it('does not open the panel when no blocks are marked', () => {
+    const controller = new GrantController()
+    controller.mount(document.body)
+
+    controller.chip.click()
+
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    expect(controller.chip.title).toBe('Mark blocks to include them in a question')
+    controller.destroy()
+  })
+
+  it('closes an open panel when its last mark is removed', () => {
+    const controller = new GrantController()
+    const marked = block('removed-mark', 'git status')
+    controller.setBlocks([marked])
+    controller.mount(document.body)
+    controller.chip.click()
+
+    controller.setBlocks([])
+
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    expect(controller.current).toEqual([])
+    controller.destroy()
+  })
+
   it('opens an ask mark with the question as its row label', () => {
     const controller = new GrantController()
     const answer = block('answer-1', 'what does this do?')
@@ -155,6 +192,40 @@ describe('GrantController', () => {
     expect(document.querySelector<HTMLElement>('.ui-floating-panel__row')?.textContent).toContain(
       '(empty command)',
     )
+    controller.destroy()
+  })
+  it('closes on Escape without clearing marks', () => {
+    const controller = new GrantController()
+    const marked = block('escape-mark', 'git status')
+    controller.setBlocks([marked])
+    controller.mount(document.body)
+    controller.chip.click()
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(escape)
+
+    expect(escape.defaultPrevented).toBe(true)
+
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    expect(controller.current).toEqual([marked])
+    controller.destroy()
+  })
+
+  it('closes on an outside pointer press without clearing marks', () => {
+    const controller = new GrantController()
+    const marked = block('outside-mark', 'git status')
+    controller.setBlocks([marked])
+    controller.mount(document.body)
+    controller.chip.click()
+
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    expect(controller.current).toEqual([marked])
     controller.destroy()
   })
 

@@ -35,15 +35,17 @@ export class GrantController {
       variant: 'grant',
       role: 'listbox',
       ariaLabel: 'marked for the question',
+      dismissBoundary: this.chip,
       callbacks: {
         onPick: (index) => this.reveal(index),
+        onDismiss: () => this.panel.hide(),
       },
     })
     this.updateChip()
   }
   toggle(): void {
     if (this.panel.isOpen) this.panel.hide()
-    else this.renderPanel()
+    else if (this.blocks.length > 0) this.renderPanel()
   }
 
   mount(container: HTMLElement): void {
@@ -57,7 +59,10 @@ export class GrantController {
     this.blocks = [...blocks]
     this.repaintBlocks()
     this.updateChip()
-    if (this.panel.isOpen) this.renderPanel()
+    if (this.panel.isOpen) {
+      if (this.blocks.length > 0) this.renderPanel()
+      else this.panel.hide()
+    }
   }
 
   get current(): ReadonlyArray<GrantBlock> {
@@ -79,7 +84,8 @@ export class GrantController {
     const count = this.blocks.length
     this.chip.dataset.state = count === 0 ? 'default' : 'chosen'
     this.chip.textContent = `marked for the question · ${count}`
-    this.chip.title = 'Open the marked blocks'
+    this.chip.title =
+      count === 0 ? 'Mark blocks to include them in a question' : 'Open the marked blocks'
     this.chip.setAttribute('aria-label', `marked for the question · ${count}`)
   }
 
