@@ -530,6 +530,13 @@ export class TerminalContent extends BasePaneContent {
    *  The absent window is the explicit whole-block form. */
   private grantedBlocks: GrantBlock[] = []
   private grantController: GrantController | null = null
+  private readonly runningActions: RunningBlockActions = {
+    isActive: (blockEl) =>
+      this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
+    isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+    toggleGrant: (blockEl) => this.toggleGrant(blockEl),
+    stop: () => this.signalActiveCommand('stop'),
+  }
   private readonly onSelectionChange = (): void => {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) return
@@ -1303,13 +1310,7 @@ export class TerminalContent extends BasePaneContent {
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
-        runningActions: {
-          isActive: (blockEl) =>
-            this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
-          isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
-          toggleGrant: (blockEl) => this.toggleGrant(blockEl),
-          stop: () => this.signalActiveCommand('stop'),
-        },
+        runningActions: this.runningActions,
       })
 
       log.info('nocx: mounting renderer')
@@ -3380,6 +3381,7 @@ export class TerminalContent extends BasePaneContent {
             container,
             () => {},
             snapshotStore,
+            this.runningActions,
           ),
         )
         continue
@@ -3436,6 +3438,7 @@ export class TerminalContent extends BasePaneContent {
                 container,
                 () => {},
                 snapshotStore,
+                this.runningActions,
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -3471,6 +3474,7 @@ export class TerminalContent extends BasePaneContent {
                 container,
                 () => {},
                 snapshotStore,
+                this.runningActions,
               )
             }
             // A block the turn RAN (or a person's, if the ledger
@@ -3485,8 +3489,10 @@ export class TerminalContent extends BasePaneContent {
               container,
               () => {},
               snapshotStore,
+              this.runningActions,
             )
           },
+          this.runningActions,
         ),
       )
     }

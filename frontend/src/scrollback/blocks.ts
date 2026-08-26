@@ -1031,7 +1031,7 @@ function buildOverflowMenu(
       const grant = document.createElement('button')
       grant.className = 'cmd-overflow-menu-item'
       grant.dataset.action = 'grant'
-      grant.textContent = running.isGranted?.(blockEl) ? 'unmark' : 'ask about this block'
+      grant.textContent = running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block'
       grant.addEventListener('click', (ev) => {
         ev.stopPropagation()
         running.toggleGrant?.(blockEl)

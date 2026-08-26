@@ -2610,7 +2610,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const grant = menuItems.find((item) => item.dataset.action === 'grant')
       const stop = menuItems.find((item) => item.dataset.action === 'stop')
       expect(grant).toBeDefined()
-      expect(grant?.textContent).toBe('ask about this block')
+      expect(grant?.textContent).toBe('Ask about this block')
       grant!.click()
       const grantsBeforeAck = (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks
       expect(grantsBeforeAck[0]?.command).toBe('echo sk-proj-abcdef')
@@ -4941,7 +4941,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const mark = document.querySelector<HTMLButtonElement>(
         '.cmd-overflow-menu-item[data-action="grant"]',
       )
-      expect(mark?.textContent).toBe('ask about this block')
+      expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
 
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')
@@ -5024,7 +5024,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const unmark = document.querySelector<HTMLButtonElement>(
         '.cmd-overflow-menu-item[data-action="grant"]',
       )
-      expect(unmark?.textContent).toBe('unmark')
+      expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
       expect(chip.textContent).toContain('0')
       expect(block.dataset.granted).toBeUndefined()
@@ -6178,6 +6178,92 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
       content.setVisible(true)
       await Promise.resolve()
       expect(inner.querySelectorAll('[data-restored="true"]').length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('marks and unmarks a restored block from its menu, using the durable entry id', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      expect(block.dataset.entryId).toBe('e-1')
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const mark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(mark?.textContent).toBe('Ask about this block')
+      mark?.click()
+
+      // The production path owns this state; inspect it by name to pin the
+      // durable identity rather than infer it from the chip's count.
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+        '1',
+      )
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      chip.click()
+      expect(
+        ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')?.textContent,
+      ).toContain('make test')
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const unmark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(unmark?.textContent).toBe('Unmark')
+      unmark?.click()
+      expect(chip.textContent).toContain('0')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('marks a restored block when its output is selected', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      // The production path owns this state; inspect it by name to pin the
+      // durable identity rather than infer it from the chip's count.
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+        '1',
+      )
     } finally {
       teardown()
     }
@@ -7504,7 +7590,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
 
       const grant = itemNamed(runningBlockMenu(content), 'grant')
-      expect(grant?.textContent).toBe('ask about this block')
+      expect(grant?.textContent).toBe('Ask about this block')
       grant?.click()
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')

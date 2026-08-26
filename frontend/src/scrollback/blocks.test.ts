@@ -3297,14 +3297,14 @@ describe('the block grant menu action', () => {
     document.body.append(running, finished)
     try {
       const runningGrant = menuItems(running).find((item) => item.dataset.action === 'grant')
-      expect(runningGrant?.textContent).toBe('ask about this block')
+      expect(runningGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       runningGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(running)
       expect(isActive).not.toHaveBeenCalled()
 
       const finishedGrant = menuItems(finished).find((item) => item.dataset.action === 'grant')
-      expect(finishedGrant?.textContent).toBe('ask about this block')
+      expect(finishedGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       finishedGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(finished)
@@ -3342,7 +3342,7 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
-      expect(grant?.textContent).toBe('unmark')
+      expect(grant?.textContent).toBe('Unmark')
     } finally {
       el.remove()
     }
