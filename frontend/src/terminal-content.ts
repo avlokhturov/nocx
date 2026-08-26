@@ -3827,17 +3827,18 @@ export class TerminalContent extends BasePaneContent {
    *  same-domain completion), so nothing here re-derives it from a block's
    *  CSS class or from the byte stream. One PTY has one foreground process
    *  group, so "the active block" is unambiguous: this is the pane's one
-   *  execution, and it is what both the summon and the interrupt address. */
+   *  execution, and it is what both the summon and the interrupt address.
+   *
+   *  An assistant run has one additional authoritative local fact while its
+   *  lifecycle submit is in flight: the agent-run waiter is armed only after
+   *  the ordinary command path has opened its block. Include that interval so
+   *  Stop cannot lose the command between block creation and the lifecycle
+   *  acknowledgement. */
   private hasRunningCommand(): boolean {
     const st = this.lifecycle.state
-    // The ATTEMPT's state, not the axis's word. `running` is the kernel's
-    // name for the axis a lane is on once an attempt exists there, and it
-    // keeps that name after the attempt completes — the state carries the
-    // completed record until the next prompt fact arrives. So the axis alone
-    // would say a command is running for the whole window between its exit
-    // status and the shell's next prompt, which is exactly the window a Stop
-    // must refuse in and a summon must not open in.
-    return st.kind === 'running' && st.attempt.state === 'open'
+    if (st.kind === 'running' && st.attempt.state === 'open') return true
+    const running = this.scrollback?.blockManager.runningBlock
+    return running !== null && running !== undefined && this.agentRuns.has(running)
   }
 
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).

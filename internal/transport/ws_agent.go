@@ -179,26 +179,52 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu           sync.Mutex
-	eventsMu     sync.Mutex
-	cancelFn     context.CancelFunc
-	cancelled    bool
-	terminalized bool
+	mu             sync.Mutex
+	eventsMu       sync.Mutex
+	cancelFn       context.CancelFunc
+	cancelled      bool
+	terminalized   bool
+	cancelState    content.RunState
+	cancelReason   content.TerminationReason
+	cancelSentence string
+	cancelDone     chan struct{}
 }
 
 func (c *agentRunControl) beginCancel() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.terminalized {
+	if c.terminalized || c.cancelled {
 		return false
 	}
-	if !c.cancelled {
-		c.cancelled = true
-		if c.cancelFn != nil {
-			c.cancelFn()
-		}
-	}
+	c.cancelled = true
 	return true
+}
+
+func (c *agentRunControl) cancelContext() {
+	c.mu.Lock()
+	cancel := c.cancelFn
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string) {
+	c.mu.Lock()
+	c.cancelState = state
+	c.cancelReason = reason
+	c.cancelSentence = sentence
+	close(c.cancelDone)
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelState == "" {
+		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer"
+	}
+	return c.cancelState, c.cancelReason, c.cancelSentence
 }
 
 func (c *agentRunControl) beginEvent() func() {
@@ -407,6 +433,10 @@ type agentApproveResponse struct {
 // Responder; never the *WSServer.
 type agentHandlers struct {
 	op capability.AgentOperation // nil → content store not wired
+	// stopForeground is the parent-cancel seam. It resolves a connection-owned
+	// session and runs the shared stop ladder without holding the content
+	// queue or pending-runs mutex.
+	stopForeground func(session.ID) foregroundOutcome
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
 	configOp capability.ConfigOperation
@@ -701,7 +731,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	runCtx, runCancel := context.WithCancel(ctx)
-	runControl := &agentRunControl{cancelFn: runCancel}
+	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:    askRes.RunID,
 		control:  runControl,
@@ -1304,9 +1334,9 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 }
 
 // handleCancel stops one prepared, streaming or awaiting-approval run. The
-// run context is cancelled first, then the terminal ledger write is completed
-// before the result is answered, so no stream event can overtake the person's
-// stop decision.
+// foreground escalation completes before the run context is cancelled and the
+// terminal ledger write is completed before the result is answered, so no
+// stream event can overtake the person's stop decision.
 func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1327,8 +1357,27 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
-	h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled,
-		"the person stopped this answer", h.r)
+	state := content.RunCancelled
+	reason := content.TermUserKilled
+	sentence := "the person stopped this answer"
+	outcome := foregroundNothingRunning
+	if h.stopForeground != nil {
+		// Foreground escalation completes before cancellation lets the stream
+		// terminalize. The callback runs without pendingRunsMu or the content
+		// operation queue held.
+		outcome = h.stopForeground(rc.sessionID)
+	}
+	if outcome == foregroundUnsupported {
+		// The assistant turn is cancelled, but the command on a remote host
+		// may still be alive. Keep that distinction visible in the terminal
+		// state instead of claiming the command was stopped.
+		sentence = "the person stopped this answer, but its command could not be stopped on the host"
+		h.log.Warn("agent cancel: foreground command could not be stopped",
+			"run", rc.runID, "session", rc.sessionID)
+	}
+	rc.control.finishCancel(state, reason, sentence)
+	rc.control.cancelContext()
+	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
 		RunID:     p.RunID,
 		State:     string(content.RunCancelled),
@@ -1672,9 +1721,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		defer releaseTerminal()
 	}
 	if cancelled {
-		state = content.RunCancelled
-		reason = content.TermUserKilled
-		sentence = "the person stopped this answer"
+		if rc.control.cancelDone != nil {
+			<-rc.control.cancelDone
+		}
+		state, reason, sentence = rc.control.cancelOutcome()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -2113,6 +2163,17 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// idempotency to the connection (a reconnect mints a new one), never
 		// to a renderer-minted tab.
 		return agentHandlers{
+			stopForeground: func(sid session.ID) foregroundOutcome {
+				sess, owned := state.get(sid)
+				if !owned || sess == nil || sess.Kind() == session.KindRemote {
+					return foregroundUnsupported
+				}
+				leaseSess, ok := sess.(runLeaseSession)
+				if !ok {
+					return foregroundUnsupported
+				}
+				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
+			},
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,

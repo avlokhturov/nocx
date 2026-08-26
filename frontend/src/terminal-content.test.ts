@@ -7702,6 +7702,29 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  it('Stop remains available for an assistant command before lifecycle facts arrive', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      void content.submitAgentCommand('sleep 300')
+      await Promise.resolve()
+      const stop = itemNamed(runningBlockMenu(content), 'stop')
+      expect(stop, 'an assistant command has no Stop before lifecycle facts').toBeDefined()
+      stop!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+
   it('and Stop, which goes through the escalation ladder rather than a second answer', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
