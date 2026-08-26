@@ -370,7 +370,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             ariaLabel={`${verb} ${label} — ${approvalScopeCoverage(scope, ask().effect)}`}
             onClick={() => props.onDecide(approved, scope)}
           >
-            {verb}
+            {`${verb} ${label}`}
           </Button>
         )}
       </For>
@@ -399,7 +399,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ariaLabel={`Allow once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(true, 'once')}
               >
-                Allow
+                Allow once
               </Button>
               <Button
                 variant="danger"
@@ -407,32 +407,15 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
                 ariaLabel={`Deny once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(false, 'once')}
               >
-                Deny
+                Deny once
               </Button>
             </>
           }
         >
-          <div data-approval-grid="true" role="group" aria-label="Approval scope">
-            <div class="agent-approval-grid__scopes" aria-hidden="true">
-              <For each={SCOPES}>
-                {({ scope, label }) => (
-                  <span data-approval-scope={scope}>
-                    <Show when={scope === 'always'} fallback={label}>
-                      {`${label} — ${effectLabel()}`}
-                    </Show>
-                  </span>
-                )}
-              </For>
-            </div>
-            <span class="agent-approval-grid__row-label" aria-hidden="true">
-              Allow
-            </span>
+          <>
             {group(true, 'Allow', 'primary')}
-            <span class="agent-approval-grid__row-label" aria-hidden="true">
-              Deny
-            </span>
             {group(false, 'Deny', 'danger')}
-          </div>
+          </>
         </Show>
       }
     >

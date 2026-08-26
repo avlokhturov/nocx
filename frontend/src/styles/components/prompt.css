@@ -116,39 +116,18 @@
   margin-top: var(--space-2);
 }
 
-.ui-prompt[data-density='compact'] [data-approval-grid] {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: var(--space-1) var(--space-2);
-  align-items: center;
-}
-
-.ui-prompt[data-density='compact'] .agent-approval-grid__scopes,
-.ui-prompt[data-density='compact'] [data-approval-grid] > .ui-action-group {
-  grid-column: 2;
+/* The three answers in a row share the width evenly, so "Allow in this
+   session" and "Allow once" read as one set of choices rather than as
+   controls of different weight. Each button carries its own scope, which is
+   why there is no column heading to align to. */
+.ui-prompt[data-density='compact'] .ui-prompt__actions > .ui-action-group {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--space-2);
   min-width: 0;
 }
 
-.ui-prompt[data-density='compact'] .agent-approval-grid__scopes {
-  color: var(--color-text-muted);
-  font-size: var(--font-size-sm);
-  text-align: center;
-}
-
-.ui-prompt[data-density='compact'] .agent-approval-grid__row-label {
-  color: var(--color-text-muted);
-  font-weight: 600;
-}
-
-.ui-prompt[data-density='compact'] [data-approval-grid] > .ui-action-group {
-  flex-wrap: nowrap;
-  justify-content: stretch;
-}
-
-.ui-prompt[data-density='compact'] [data-approval-grid] > .ui-action-group > .ui-button {
+.ui-prompt[data-density='compact'] .ui-prompt__actions > .ui-action-group > .ui-button {
   width: 100%;
   min-width: 0;
 }
