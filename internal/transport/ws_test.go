@@ -1295,7 +1295,7 @@ func TestWSServer_AckTrimsRing(t *testing.T) {
 	}
 }
 
-func TestWSServer_AckRejectsSessionOwnedByAnotherConnection(t *testing.T) {
+func TestWSServer_AckRejectsStaleOwnerAfterReattach(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger))
 	ctx := context.Background()
@@ -1304,11 +1304,11 @@ func TestWSServer_AckRejectsSessionOwnedByAnotherConnection(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 
-	owner := connectWS(t, ws)
-	foreign := connectWS(t, ws)
-	t.Cleanup(func() { _ = owner.Close() })
-	t.Cleanup(func() { _ = foreign.Close() })
-	sid := openSessionOnConn(t, ws, owner, 1)
+	stale := connectWS(t, ws)
+	current := connectWS(t, ws)
+	t.Cleanup(func() { _ = stale.Close() })
+	t.Cleanup(func() { _ = current.Close() })
+	sid := openSessionOnConn(t, ws, stale, 1)
 	rx := ws.getRx(session.ID(sid))
 	if rx == nil {
 		t.Fatal("opened session has no replay ring")
@@ -1322,16 +1322,29 @@ func TestWSServer_AckRejectsSessionOwnedByAnotherConnection(t *testing.T) {
 		return rx.ring.acked
 	}
 
-	sendAck(t, foreign, sid, 4)
-	_ = openSessionOnConn(t, ws, foreign, 2) // read-loop ordering barrier
-	if got := acked(); got != 0 {
-		t.Fatalf("foreign connection advanced ack to %d, want 0", got)
+	attached := jsonrpcCallWithID(t, current, "attach", map[string]any{
+		"sessionId": sid, "offset": uint64(0),
+	}, 2)
+	var attachEnvelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(attached, &attachEnvelope); err != nil {
+		t.Fatalf("attach response: %v", err)
+	}
+	if attachEnvelope.Error != nil {
+		t.Fatalf("reattach: %+v", attachEnvelope.Error)
 	}
 
-	sendAck(t, owner, sid, 4)
-	_ = openSessionOnConn(t, ws, owner, 3) // read-loop ordering barrier
+	sendAck(t, stale, sid, 4)
+	_ = openSessionOnConn(t, ws, stale, 3) // stale read-loop ordering barrier
+	if got := acked(); got != 0 {
+		t.Fatalf("stale owner advanced ack to %d after reattach, want 0", got)
+	}
+
+	sendAck(t, current, sid, 4)
+	_ = openSessionOnConn(t, ws, current, 4) // current read-loop ordering barrier
 	if got := acked(); got != 4 {
-		t.Fatalf("owner ack = %d, want 4", got)
+		t.Fatalf("current subscriber ack = %d, want 4", got)
 	}
 }
 

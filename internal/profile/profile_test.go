@@ -40,6 +40,17 @@ func TestProfileIDNamespace(t *testing.T) {
 	}
 }
 
+func TestProfileIDSlugPreservesUnicodeLowercaseIntoASCII(t *testing.T) {
+	id := NewProfileID("ssh", "K")
+	parsed, ok := parseNamespacedID(id)
+	if !ok {
+		t.Fatalf("could not parse id %q", id)
+	}
+	if parsed.Name != "k" {
+		t.Fatalf("slug = %q, want k — bounded slugification must preserve strings.ToLower semantics", parsed.Name)
+	}
+}
+
 func TestMintedIDsRespectThe128RuneBound(t *testing.T) {
 	const wantMaxIDRunes = 128
 	longASCII := strings.Repeat("x", 10_000)

@@ -129,50 +129,49 @@ transport today, a future domain caller) passes as the namespace or the name:
 ```go
 // internal/profile/profile.go
 func mintID(namespace, name string) string {
-    namespace = boundedNamespace(namespace) // ≤ maxNamespaceRunes runes
-    budget := maxNamespaceRunes - utf8.RuneCountInString(namespace)
-    return namespace + ":custom:" + boundedSlugify(name, budget) + ":" + newUUID()
+    namespace = truncateRunes(namespace, maxIDNamespaceRunes)
+    budget := maxIDNamespaceRunes - utf8.RuneCountInString(namespace)
+    return namespace + ":custom:" + slugify(name, budget) + ":" + newUUID()
 }
 
-// boundedNamespace caps namespace to maxNamespaceRunes runes on a rune
-// boundary. Valid namespaces — "ssh", "group", "endpoint", and any
-// transport-admitted type (bounded at maxEnumRunes = 64) — are unchanged; the
-// cap fires only for a degenerate direct-domain caller, which is the
-// unconditional half of the sink invariant.
-func boundedNamespace(namespace string) string {
-    n := 0
-    for i := range namespace {
-        if n == maxNamespaceRunes {
-            return namespace[:i]
-        }
-        n++
-    }
-    return namespace
-}
-
-// boundedSlugify is slugify bounded to budget runes: it trims, lowercases and
-// maps exactly as the old slugify did (strings.TrimSpace returns a subslice, so
-// it allocates nothing), then stops emitting at budget runes. For a name whose
-// slug fits, the output is byte-for-byte slugify(name); an oversized name costs
-// O(budget) memory, not O(len(name)).
-func boundedSlugify(name string, budget int) string {
-    if budget <= 0 {
+// truncateRunes caps a string on a rune boundary. Valid namespaces — "ssh",
+// "group", "endpoint", and any transport-admitted type (bounded at
+// maxEnumRunes = 64) — are unchanged; the cap fires only for a degenerate
+// direct-domain caller.
+func truncateRunes(s string, maxRunes int) string {
+    if maxRunes <= 0 {
         return ""
     }
-    name = strings.TrimSpace(name)
-    var b strings.Builder
-    b.Grow(budget)
-    for _, r := range name {
-        switch {
-        case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
-            b.WriteRune(r)
-        case r >= 'A' && r <= 'Z':
-            b.WriteRune(r + 'a' - 'A')
-        default:
-            b.WriteRune('-')
+    count := 0
+    for i := range s {
+        if count == maxRunes {
+            return s[:i]
         }
-        if b.Len() >= budget {
+        count++
+    }
+    return s
+}
+
+// slugify preserves the old trim and Unicode-lowercase mapping while bounding
+// output to maxRunes. strings.TrimSpace returns a subslice; the loop stops once
+// the output budget is full, so no full-size intermediate string is allocated.
+func slugify(s string, maxRunes int) string {
+    if maxRunes <= 0 {
+        return ""
+    }
+    s = strings.TrimSpace(s)
+    var b strings.Builder
+    b.Grow(min(len(s), maxRunes))
+    for _, r := range s {
+        if b.Len() == maxRunes {
             break
+        }
+        r = unicode.ToLower(r)
+        switch {
+        case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-' || r == '_':
+            b.WriteRune(r)
+        default:
+            b.WriteByte('-')
         }
     }
     return b.String()
@@ -195,17 +194,16 @@ every minted id is `len(namespace) + 41 + len(slug) ≤ 87 + 41 = 128`:
 | `NewEndpointID` | `endpoint` | **79**      | 128                      |
 
 Every minted id is exactly 128 runes when the slug meets its budget, and
-strictly shorter when it does not. `boundedNamespace` guarantees the slug budget
-is never negative, so there is no slice-index hazard; `boundedSlugify` holds at
-most `budget` runes in its builder (`strings.TrimSpace` returns a subslice and
-allocates nothing), so a 10 MB name costs ~84 runes of memory, not 10 MB.
+strictly shorter when it does not. `truncateRunes` guarantees the slug budget
+is never negative, so there is no slice-index hazard; bounded `slugify` holds
+at most `budget` runes in its builder (`strings.TrimSpace` returns a subslice
+and allocates nothing), so a 10 MB name costs ~84 runes of output memory rather
+than 10 MB.
 
 `NewEndpointID` is included because it lives in the same package, mints the same
 shape, and carries the same bug; the shared helper fixes it for the same cost
 and keeps one owner rather than two. It is not a new surface, only the same
-invariant applied to the third mint. The old `slugify` (`profile.go:1014-1028`)
-has no remaining caller once the three mints route through `boundedSlugify`, and
-is deleted (greenfield: delete dead code).
+invariant applied to the third mint.
 
 ### 3.4 Rune/byte semantics and inclusive boundaries
 
@@ -220,15 +218,14 @@ upper bounds** (`>` rejects, not `>=`):
 - **Minted id (mint):** always `≤ 128` runes, by construction — the namespace is
   capped at 87 runes and the slug at `87 - len(namespace)` runes.
 
-`boundedSlugify` emits only ASCII (`[a-z0-9_-]`), so a slug's rune count equals
-its byte count and `b.Grow(budget)`/`b.Len()` count runes exactly; the fixed
-frame is ASCII too, so a minted id whose namespace is ASCII (every real one) has
-byte length equal to its rune length. A non-ASCII name is not a problem:
-`boundedSlugify` maps each non-`[a-z0-9_-]` rune to a single `-`, so rune count
-is preserved. A non-ASCII namespace — impossible through the transport's
-`maxEnumRunes` bound, but capped defensively — is truncated by `boundedNamespace`
-on a rune boundary, never a byte boundary, so the id is always valid UTF-8 and
-its rune count, not byte count, is what is bounded.
+`slugify` emits only ASCII (`[a-z0-9_-]`), so a slug's rune count equals its
+byte count and `b.Grow`/`b.Len` enforce the rune budget exactly. It applies
+`unicode.ToLower` before the allowlist, preserving the former
+`strings.ToLower` mapping for characters such as `K → k`; remaining non-ASCII
+runes become one `-`. The fixed frame is ASCII too, so a minted id whose
+namespace is ASCII (every real one) has equal byte and rune lengths. A
+non-ASCII namespace is truncated by `truncateRunes` on a rune boundary, so the
+id remains valid UTF-8 and the declared rune bound still holds.
 
 ### 3.5 Collision behavior
 
@@ -286,19 +283,16 @@ with a minted id, whose prefix is always `ssh|group|endpoint:custom:`.
 
 ## 5. Affected symbols and files
 
-- `internal/profile/profile.go` — add `MaxIDRunes` (exported), `uuidHexRunes`,
-  `mintedIDFixedRunes`, `maxNamespaceRunes`, `mintID`, `boundedNamespace`, and
-  `boundedSlugify`; `NewProfileID` (line 984) and `NewGroupID` (line 994) become
-  one-line delegations to `mintID`. `newUUID` (1118) unchanged; `slugify`
-  (1014-1028) has no remaining caller and is deleted.
-- `internal/profile/endpoint.go` — `NewEndpointID` (line 294) becomes a one-line
-  delegation to `mintID`.
-- `internal/transport/ws_config_handlers.go` — `maxConfigIDRunes` (line 77)
-  becomes `= profile.MaxIDRunes`; update its comment. `maxConfigNameRunes`
-  (200) and `configIDRunes`/`boundedRunes` unchanged.
-- Tests: `internal/profile/profile_test.go`, `internal/profile/endpoint_test.go`,
-  `internal/transport/ws_profiles_test.go`, `internal/transport/ws_groups_test.go`
-  (or `internal/transport/ws_config_handlers_test.go`).
+- `internal/profile/profile.go` — add `MaxIDRunes` (exported),
+  `uuidHexRunes`, `mintedIDFixedRunes`, `maxIDNamespaceRunes`, `mintID`, and
+  `truncateRunes`; change `slugify` to accept an output budget while preserving
+  its trim and Unicode-lowercase semantics. `NewProfileID` and `NewGroupID`
+  delegate to `mintID`; `newUUID` is unchanged.
+- `internal/profile/endpoint.go` — `NewEndpointID` delegates to `mintID`.
+- `internal/transport/ws_config_handlers.go` — `maxConfigIDRunes` becomes
+  `profile.MaxIDRunes`; `maxConfigNameRunes` and the validators are unchanged.
+- Tests live in `internal/profile/profile_test.go` and
+  `internal/transport/ws_profiles_test.go`.
 
 No migration and no shim. The fix governs only ids minted from now on; an id
 minted by the current bug (a name over the slug budget) is left exactly as it
@@ -312,9 +306,8 @@ converts them" — not a claim that every stored id already fits.
 1. Add the failing domain tests: minted-id ≤ 128 (including the oversized
    namespace case), slug-at-budget / +1, same-prefix distinct ids, for
    `NewProfileID`, `NewGroupID`, `NewEndpointID`.
-2. Add `MaxIDRunes`, `uuidHexRunes`, `mintedIDFixedRunes`, `maxNamespaceRunes`,
-   `mintID`, `boundedNamespace`, and `boundedSlugify`; route the three mints
-   through `mintID` and delete `slugify`. Domain tests go green.
+2. Add the shared bound and bounded mint helpers; route all three mints through
+   `mintID` and preserve the old slug mapping. Domain tests go green.
 3. Point `maxConfigIDRunes` at `profile.MaxIDRunes` and update its comment.
 4. Add the transport tests: name 200/201 and explicit id 128/129 for
    `profiles.create`/`groups.create`, and the no-id 200-rune-name mint

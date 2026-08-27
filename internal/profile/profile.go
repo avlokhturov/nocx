@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -179,11 +180,6 @@ type Base struct {
 	BehaviorOnSessionEnd BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 	Weight               int                  `json:"weight,omitempty"`
 	IsBuiltin            bool                 `json:"isBuiltin,omitempty"`
-	// NeedsReview marks a profile whose identity was resolved from local
-	// state during import. Such profiles must be reviewed by a human before
-	// they can be resolved for connection. The resolver refuses profiles
-	// with this flag set; the UI for clearing it belongs to a later wave.
-	NeedsReview bool `json:"needsReview,omitempty"`
 }
 
 // SSHProfileOptions is the SSH-specific options block on an SSHProfile.
@@ -1053,11 +1049,10 @@ func slugify(s string, maxRunes int) string {
 		if b.Len() == maxRunes {
 			break
 		}
+		r = unicode.ToLower(r)
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-' || r == '_':
 			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + 'a' - 'A')
 		default:
 			b.WriteByte('-')
 		}

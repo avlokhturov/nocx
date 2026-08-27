@@ -173,8 +173,8 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: session + transport + ipc + terminal.
 - Prevents: data loss or corrupt render on a dropped WS; scrollback dual-ownership.
 - Rule: the backend holds a **bounded per-session output ring** keyed by a monotonic byte-offset; the frontend acks the last-received offset. On reconnect the frontend sends its last offset and the backend replays from there, or emits an explicit `reset` (clear + resync) if the offset is past the buffer.
-  - An ack is accepted only from the WebSocket whose connection state owns that
-    session; another client cannot trim bytes from a session's replay window.
+  - An ack is accepted only from the WebSocket currently registered as the
+    session's subscriber; a stale pre-reattach client cannot trim replay bytes.
   - This replay ring is **transport buffering, not scrollback ownership** — scrollback stays frontend-owned, so AD-6 is intact.
 
 **AD-10 — Backpressure / flow-control.**
