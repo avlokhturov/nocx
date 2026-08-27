@@ -131,6 +131,8 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: all SSH connection handling.
 - Prevents: a spawn-`ssh` MVP that would need rewriting for the Phase-2 vault/profiles.
 - Rule: SSH sits behind a clean interface; honor `~/.ssh/config` via a config parser (e.g. `kevinburke/ssh_config`); SFTP via `pkg/sftp` later; the vault injects credentials through this library. The `ssh` module owns a **ref-counted `ssh.Client` connection pool** keyed by host+identity: channels multiplex over one connection, and the connection closes with the last tab that references it — preserving connection reuse and Phase-2 vault credential caching.
+  - Renderer-supplied and stored-profile hosts are positional SSH destinations, never
+    options: a host beginning with `-` is refused before `ssh -G` or a dial is attempted.
 
 **AD-5 — Two-tier shell-integration substrate.**
 

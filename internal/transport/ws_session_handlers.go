@@ -1016,7 +1016,7 @@ func validateOpenRaw(raw json.RawMessage) string {
 			return msg
 		}
 	}
-	if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
+	if msg := validateSSHHost("host", p.Host); msg != "" {
 		return msg
 	}
 	if msg := validateStringBound("user", p.User, maxUserRunes); msg != "" {

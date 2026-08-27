@@ -83,6 +83,47 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	}
 }
 
+func TestProfilesRPC_CreateRejectsOptionLikeHost(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	p := profile.SSHProfile{
+		Base:    profile.Base{ID: profile.NewProfileID("ssh", "option-host"), Type: "ssh", Name: "option-host"},
+		Options: profile.StoredSSHProfileOptions{Host: "-F/tmp/attacker_config"},
+	}
+	resp := jsonrpcCall(t, conn, "profiles.create", p)
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal create response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("option-like profile host: got %+v, want -32602", envelope.Error)
+	}
+
+	stored, err := ps.LoadProfiles()
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("refused profile was persisted: %+v", stored)
+	}
+}
+
 func TestProfilesRPC_Delete(t *testing.T) {
 	dir := t.TempDir()
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
