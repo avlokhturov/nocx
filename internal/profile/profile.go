@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // AuthMode controls which auth buckets are tried for an SSH connection.
@@ -981,8 +982,38 @@ type namespacedIDParts struct {
 
 // NewProfileID generates a namespaced profile id: "type:custom:slug:name".
 // The name is slugified for filesystem/URL safety.
+// MaxIDRunes is the shared upper bound for backend-minted profile-domain ids
+// and renderer-supplied ids accepted by the transport.
+const MaxIDRunes = 128
+
+const (
+	uuidHexRunes        = 32
+	mintedIDFixedRunes  = len(":custom::") + uuidHexRunes
+	maxIDNamespaceRunes = MaxIDRunes - mintedIDFixedRunes
+)
+
+func mintID(namespace, name string) string {
+	namespace = truncateRunes(namespace, maxIDNamespaceRunes)
+	slugBudget := maxIDNamespaceRunes - utf8.RuneCountInString(namespace)
+	return namespace + ":custom:" + slugify(name, slugBudget) + ":" + newUUID()
+}
+
+func truncateRunes(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	count := 0
+	for i := range s {
+		if count == maxRunes {
+			return s[:i]
+		}
+		count++
+	}
+	return s
+}
+
 func NewProfileID(typ, name string) string {
-	return typ + ":custom:" + slugify(name) + ":" + newUUID()
+	return mintID(typ, name)
 }
 
 // NewGroupID generates a namespaced group id: "group:custom:slug:uuid".
@@ -992,7 +1023,7 @@ func NewProfileID(typ, name string) string {
 // to know the uniqueness rule the store enforces. CreateGroup refuses an empty
 // id, so something must fill it — this is that something.
 func NewGroupID(name string) string {
-	return "group:custom:" + slugify(name) + ":" + newUUID()
+	return mintID("group", name)
 }
 
 // isNamespacedID checks whether id has the "type:custom:..." shape.
@@ -1011,17 +1042,24 @@ func parseNamespacedID(id string) (namespacedIDParts, bool) {
 }
 
 // slugify lowercases and replaces spaces/special chars with hyphens.
-func slugify(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
+func slugify(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return ""
+	}
+	s = strings.TrimSpace(s)
 	var b strings.Builder
+	b.Grow(min(len(s), maxRunes))
 	for _, r := range s {
+		if b.Len() == maxRunes {
+			break
+		}
 		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-' || r == '_':
 			b.WriteRune(r)
-		case r == '-' || r == '_':
-			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + 'a' - 'A')
 		default:
-			b.WriteRune('-')
+			b.WriteByte('-')
 		}
 	}
 	return b.String()

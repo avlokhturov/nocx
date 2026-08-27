@@ -1295,6 +1295,46 @@ func TestWSServer_AckTrimsRing(t *testing.T) {
 	}
 }
 
+func TestWSServer_AckRejectsSessionOwnedByAnotherConnection(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	owner := connectWS(t, ws)
+	foreign := connectWS(t, ws)
+	t.Cleanup(func() { _ = owner.Close() })
+	t.Cleanup(func() { _ = foreign.Close() })
+	sid := openSessionOnConn(t, ws, owner, 1)
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("opened session has no replay ring")
+	}
+	if err := rx.ring.write([]byte("test")); err != nil {
+		t.Fatalf("seed replay ring: %v", err)
+	}
+	acked := func() uint64 {
+		rx.ring.mu.Lock()
+		defer rx.ring.mu.Unlock()
+		return rx.ring.acked
+	}
+
+	sendAck(t, foreign, sid, 4)
+	_ = openSessionOnConn(t, ws, foreign, 2) // read-loop ordering barrier
+	if got := acked(); got != 0 {
+		t.Fatalf("foreign connection advanced ack to %d, want 0", got)
+	}
+
+	sendAck(t, owner, sid, 4)
+	_ = openSessionOnConn(t, ws, owner, 3) // read-loop ordering barrier
+	if got := acked(); got != 4 {
+		t.Fatalf("owner ack = %d, want 4", got)
+	}
+}
+
 func TestWSServer_TwoSessionsIndependentRings(t *testing.T) {
 	reg := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), reg)
