@@ -458,3 +458,127 @@ func TestAStaleCompletionNeverParksOnAnotherFencesInterval(t *testing.T) {
 		t.Fatalf("%d end markers, want one: a boundary nobody saw is never invented", len(rows))
 	}
 }
+
+// TestASightingNobodyAuthenticatedReturnsItsHeldRowsWhenTheSessionFails is
+// the review's finding (nocx-2v80t.3.47): a sighting authorises nothing
+// (ADR-0024 decision 1), so a fence sighted before anything authenticates it
+// only HOLDS the rows its window matches (suppressBoundaryScreenLocked) —
+// it never drops them. Eviction (evictRendezvousLocked) and an explicit
+// expiry ([Session.ExpireRendezvous]) already give a held capture back when
+// the meeting they were tracking goes away; the session's own end did not —
+// [Session.Fail] settled only the OTHER pending shape, a completion whose
+// fence never arrived (settlePendingLocked), and never walked the
+// rendezvous set for a sighting still waiting on its authenticated half. A
+// forged OSC sighting followed by the PTY exiting therefore cost those rows
+// with no stated loss at all, which is exactly what the ADR forbids: an
+// unauthenticated fence may not cost anything.
+func TestASightingNobodyAuthenticatedReturnsItsHeldRowsWhenTheSessionFails(t *testing.T) {
+	// setup drives one command's output under a pane that then shrinks by a
+	// row: the fence is sighted (forged — nothing has authenticated it), and
+	// the shrink pushes the top row of ITS OWN closing screen off before
+	// anything joins it, so the row is held rather than streamed. It answers
+	// the held row's own text, so both subtests can check it lands exactly
+	// once, wherever it ends up.
+	setup := func(t *testing.T) (*Session, *recordingRowStream, FenceNonce, string) {
+		t.Helper()
+		s, rs := streamSession(t, harnessGeometry(80, 28))
+		promptAndEcho(t, s)
+		obsFeed(t, s, 0, 100)
+		nonce := obsNonce(1)
+		s.SightFenceBoundary(t, nonce)
+		if got := s.RendezvousFor(nonce).State; got != RendezvousAwaitingAuthenticated {
+			t.Fatalf("the forged sighting reads %s, want awaiting-authenticated", rendezvousStateName(got))
+		}
+		if _, err := s.CommitGeometry(harnessGeometry(80, 27)); err != nil {
+			t.Fatalf("shrink the pane by one row: %v", err)
+		}
+		cap := s.pendingCapture
+		if cap == nil || !cap.Holding || len(cap.Held) != 1 {
+			t.Fatalf("the shrink did not leave exactly one row held on the forged sighting's window: %+v", cap)
+		}
+		held := streamRowText(cap.Held[0])
+		if held == "" {
+			t.Fatal("the held row carries no text this test can check for")
+		}
+		return s, rs, nonce, held
+	}
+
+	// The failing shape: nothing ever authenticates the sighting, and the
+	// session ends. The held row must reach the stream from Fail itself —
+	// there is no later event that could ever settle it otherwise.
+	t.Run("the session fails before anything authenticates the sighting", func(t *testing.T) {
+		s, rs, nonce, held := setup(t)
+		before := len(rs.snapshot())
+
+		if err := s.Fail("session ended"); err != nil {
+			t.Fatalf("end the session: %v", err)
+		}
+
+		var streamedRows []string
+		for _, e := range rs.snapshot()[before:] {
+			if e.kind != "rows" {
+				continue
+			}
+			for _, row := range e.rows {
+				streamedRows = append(streamedRows, streamRowText(row))
+			}
+		}
+		if len(streamedRows) != 1 || streamedRows[0] != held {
+			t.Fatalf("failing the session streamed %v for the row a forged sighting held, want exactly [%q]: "+
+				"ADR-0024 says a sighting nobody authenticated authorises nothing, so it may never cost the rows it merely located",
+				streamedRows, held)
+		}
+		if got := s.RendezvousFor(nonce).State; got != RendezvousExpired {
+			t.Fatalf("the forged sighting reads %s after the session ended, want expired", rendezvousStateName(got))
+		}
+		if s.pendingCapture != nil {
+			t.Fatal("the session's end left a capture window still installed")
+		}
+
+		// Fail is idempotent here too: a second call finds nothing left to
+		// give back and streams nothing more.
+		before = len(rs.snapshot())
+		if err := s.Fail("session ended again"); err != ErrUnavailable {
+			t.Fatalf("a second Fail returned %v, want %v", err, ErrUnavailable)
+		}
+		if streamed := rs.snapshot()[before:]; len(streamed) != 0 {
+			t.Fatalf("a second Fail streamed %d more emissions, want none", len(streamed))
+		}
+	})
+
+	// The pair, on the path that works today: the completion authenticates
+	// the sighting before the session ends. The held row is already the
+	// boundary's own closing screen, carried by ITS end marker — captured at
+	// the sighting, before the shrink — so it must appear there, and Fail
+	// afterwards has nothing left of this meeting to give back.
+	t.Run("the ordinary path: the completion authenticates the sighting before the session ends", func(t *testing.T) {
+		s, rs, nonce, held := setup(t)
+
+		s.Completed(s.Incarnation(), nonce, 0)
+		if got := s.RendezvousFor(nonce).State; got != RendezvousComplete {
+			t.Fatalf("the authenticated boundary reads %s, want complete", rendezvousStateName(got))
+		}
+		end, ok := settledEnds(rs)[nonce]
+		if !ok {
+			t.Fatal("the authenticated boundary emitted no end marker")
+		}
+		found := false
+		for _, row := range end.closing {
+			if streamRowText(row) == held {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("the authenticated boundary's own end marker does not carry the row its window held, want %q among its closing screen", held)
+		}
+
+		before := len(rs.snapshot())
+		if err := s.Fail("session ended"); err != nil {
+			t.Fatalf("end the session: %v", err)
+		}
+		if streamed := rs.snapshot()[before:]; len(streamed) != 0 {
+			t.Fatalf("ending the session after an authenticated boundary already sealed streamed %d more emissions, want none", len(streamed))
+		}
+	})
+}
