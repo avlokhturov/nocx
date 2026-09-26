@@ -831,6 +831,10 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	}
 	e.ws.blockStream.mu.Lock()
 	delete(e.ws.blockStream.pending, session.ID(sid))
+	// A real caller counts the batch as flushingBytes at the same lock hold
+	// that extracts it (nocx-2v80t.3.51); this test drives flushPendingRows
+	// directly, so it stands in for that caller here.
+	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
 
 	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
@@ -893,6 +897,9 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 
 	e.ws.blockStream.mu.Lock()
 	delete(e.ws.blockStream.pending, session.ID(sid))
+	// A real caller counts the batch as flushingBytes at the same lock hold
+	// that extracts it (nocx-2v80t.3.51).
+	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
 	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), firstBlock, pending, nil)
 
@@ -964,6 +971,9 @@ func TestFlushingBatchCountsAgainstTheBufferBound(t *testing.T) {
 	e.ws.blockStream.mu.Lock()
 	e.ws.blockStream.flushing[session.ID(sid)] = true
 	delete(e.ws.blockStream.pending, session.ID(sid))
+	// A real caller counts the batch as flushingBytes at the same lock hold
+	// that extracts it (nocx-2v80t.3.51).
+	e.ws.blockStream.beginFlushLocked(session.ID(sid), inFlight)
 	e.ws.blockStream.mu.Unlock()
 	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, inFlight, nil)
 	select {
@@ -1052,6 +1062,9 @@ func TestFlushingBatchReleasesTheBudgetOnceItLands(t *testing.T) {
 	e.ws.blockStream.mu.Lock()
 	e.ws.blockStream.flushing[session.ID(sid)] = true
 	delete(e.ws.blockStream.pending, session.ID(sid))
+	// A real caller counts the batch as flushingBytes at the same lock hold
+	// that extracts it (nocx-2v80t.3.51).
+	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
 	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
 	select {

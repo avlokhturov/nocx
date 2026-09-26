@@ -211,6 +211,34 @@ type blockStream struct {
 	// a failure moves what remains back into bs.pending (requeuePendingRows,
 	// which clears this the same call).
 	flushingBytes map[session.ID]int64
+	// attachGen counts this session's attachments, bumped once by every
+	// attach() call including the first (nocx-2v80t.3.51): a session that
+	// detaches and re-attaches under the same id gets a new generation, and
+	// an open reserved under an old one is checked against the CURRENT value
+	// at install, not merely against sources[sid]'s presence — a detach
+	// followed by a re-attach leaves sources[sid] populated again, so
+	// presence alone cannot tell the two attachments apart. Never reset by
+	// detach: the whole point is that it keeps counting across one.
+	attachGen map[session.ID]uint64
+	// orphanSeals are the rows a discarded open's own cleanup CloseBlockRows
+	// failed to seal (nocx-2v80t.3.51): the attempt is already fully
+	// forgotten everywhere else in this stream's bookkeeping and the
+	// renderer was already told kept:false, so without this the store would
+	// hold the row open forever with nothing left to name it. Retried
+	// opportunistically at the next close (closeBlockRowsNow) or flush
+	// (drainPendingCloses) and forced at detach, up to maxCloseAttempts per
+	// row; past that it is logged as a stated, permanent loss and dropped —
+	// retryOrphanSeals owns all of it. Cleared by detach once it has taken
+	// its own forced pass.
+	orphanSeals map[session.ID][]*orphanSeal
+}
+
+// orphanSeal is one row retryOrphanSeals still owes a seal, and how many
+// times sealing it has already been tried.
+type orphanSeal struct {
+	entry      string
+	artifactID string
+	tries      uint8
 }
 
 // DefaultBlockRowsBufferBytes is the coordinator's buffer when nothing is
@@ -249,6 +277,21 @@ func pendingRowsBytes(pending []pendingRows) int64 {
 		n += heldRowsBytes(d.rows)
 	}
 	return n
+}
+
+// beginFlushLocked records a batch as flushingBytes the instant it leaves
+// bs.pending, under the SAME lock that removes it (nocx-2v80t.3.51): every
+// call site that extracts a batch to hand to flushPendingRows calls this
+// before unlocking, so there is no gap where the batch counts in neither
+// place — the previous fix set flushingBytes from inside flushPendingRows
+// itself, after the caller had already unlocked with the batch already out
+// of bs.pending, and a batch injected in exactly that window was admitted
+// past the buffer's own bound instead of overflowing it.
+func (bs *blockStream) beginFlushLocked(sid session.ID, batch []pendingRows) {
+	if bs.flushingBytes == nil {
+		bs.flushingBytes = make(map[session.ID]int64)
+	}
+	bs.flushingBytes[sid] = pendingRowsBytes(batch)
 }
 
 // heldBytesLocked is what the session's buffer holds now: the rows waiting
@@ -510,6 +553,10 @@ func (bs *blockStream) takePendingRows(sid session.ID, attempt string) []pending
 			bs.pending[sid] = remaining
 		}
 	}
+	// This is the next batch flushPendingRows's own recursive continuation
+	// hands to itself — extracted here, so counted here (nocx-2v80t.3.51):
+	// see beginFlushLocked.
+	bs.beginFlushLocked(sid, next)
 	bs.mu.Unlock()
 	return next
 }
@@ -600,6 +647,13 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64
 		bs.budgets = make(map[session.ID]int64)
 	}
 	bs.budgets[sid] = budget
+	// A new generation every attach, including the first, so an open
+	// reserved under a since-detached attachment can never match the one
+	// live now (nocx-2v80t.3.51). Never reset by detach — see attachGen.
+	if bs.attachGen == nil {
+		bs.attachGen = make(map[session.ID]uint64)
+	}
+	bs.attachGen[sid]++
 }
 
 // DetachBlockRows ends a session's streaming: every still-open block is
@@ -688,6 +742,12 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 		// gone and no later fact can name this session.
 		owed = append(owed, blockClosedParams{EntryID: b.entry, Kept: sealAtDetach(ctx, store, sid, b)})
 	}
+	// The session's last chance: nothing after this detach will ever call
+	// retryOrphanSeals for it again, so a row that still fails now is a
+	// stated loss, not one more retry queued for a next flush or close that
+	// is never coming (nocx-2v80t.3.51). Deliberately NOT cleared above,
+	// under the earlier lock: this is what reads it.
+	bs.retryOrphanSeals(ctx, store, sid, true)
 	return append(owed, unended...)
 }
 
@@ -817,6 +877,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		})
 		toFlush := bs.pending[sid]
 		delete(bs.pending, sid)
+		bs.beginFlushLocked(sid, toFlush)
 		bs.flushing[sid] = true
 		confirm := bs.confirmers[sid]
 		bs.mu.Unlock()
@@ -1078,6 +1139,88 @@ func (bs *blockStream) consumeClosedWhileOpeningLocked(sid session.ID, attempt s
 	return marked
 }
 
+// recordOrphanSeal remembers a row a discarded open's own cleanup seal
+// failed to close (nocx-2v80t.3.51), for retryOrphanSeals to try again.
+func (bs *blockStream) recordOrphanSeal(sid session.ID, entry, artifactID string) {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	if bs.orphanSeals == nil {
+		bs.orphanSeals = make(map[session.ID][]*orphanSeal)
+	}
+	bs.orphanSeals[sid] = append(bs.orphanSeals[sid], &orphanSeal{entry: entry, artifactID: artifactID})
+}
+
+// retryOrphanSeals attempts, right now, to seal every row this session still
+// owes one (nocx-2v80t.3.51): recorded by recordOrphanSeal when a discarded
+// open's own cleanup CloseBlockRows failed, at a moment the attempt was
+// already forgotten everywhere else in this stream's bookkeeping and the
+// renderer already told kept:false — without this the row stands open in
+// the store forever, named nowhere. Called at every natural close
+// (closeBlockRowsNow) and flush completion (drainPendingCloses), and forced
+// at detach: each retry that still fails is kept for the NEXT one, up to
+// maxCloseAttempts, matching closeBlockRowsNow's own retry bound and for the
+// same reason — a retry that can never succeed must not run forever. Past
+// the bound, or when final is true (detach: there is no next flush or close
+// ever coming for this session again), it is logged as a permanent, stated
+// loss and dropped rather than kept for a retry that will never come.
+func (bs *blockStream) retryOrphanSeals(ctx context.Context, store blockOutputStore, sid session.ID, final bool) {
+	if store == nil {
+		return
+	}
+	bs.mu.Lock()
+	pending := bs.orphanSeals[sid]
+	delete(bs.orphanSeals, sid)
+	bs.mu.Unlock()
+	if len(pending) == 0 {
+		return
+	}
+	var remaining []*orphanSeal
+	for _, o := range pending {
+		if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
+			EntryID: o.entry, ArtifactID: o.artifactID,
+		}); err != nil {
+			o.tries++
+			if !final && o.tries < maxCloseAttempts {
+				remaining = append(remaining, o)
+				continue
+			}
+			log.From(ctx).Warn("orphaned block row abandoned: its discarded open's cleanup seal kept failing and the store row stands open with nothing left to retry it",
+				"session", sid, "entry", o.entry, "artifact", o.artifactID, "attempts", o.tries, "final", final, "error", err)
+			continue
+		}
+	}
+	if len(remaining) == 0 {
+		return
+	}
+	bs.mu.Lock()
+	if bs.orphanSeals == nil {
+		bs.orphanSeals = make(map[session.ID][]*orphanSeal)
+	}
+	bs.orphanSeals[sid] = append(bs.orphanSeals[sid], remaining...)
+	bs.mu.Unlock()
+}
+
+// enqueueReopenLocked queues attempt behind whatever is occupying the
+// session right now, coalescing a duplicate: an attempt already sitting in
+// the queue is not appended again (nocx-2v80t.3.51). The queue is a
+// FIFO SET, not a bare slice — three callers (the submit, the shell's
+// authenticated start, the ledger.bind retry) can each ask for the SAME
+// attempt while it or another is busy, and an uncapped slice would grow one
+// entry per ask, all for one eventual open, for as long as the session's
+// commands keep the store busy. Bounded instead by the number of DISTINCT
+// attempts ever queued at once, which is what the queue exists to hold.
+func (bs *blockStream) enqueueReopenLocked(sid session.ID, attempt string) {
+	for _, a := range bs.reopen[sid] {
+		if a == attempt {
+			return
+		}
+	}
+	if bs.reopen == nil {
+		bs.reopen = make(map[session.ID][]string)
+	}
+	bs.reopen[sid] = append(bs.reopen[sid], attempt)
+}
+
 // popReopenLocked answers the next attempt queued behind an open in flight,
 // and forgets it — the front of the session's FIFO queue, so a later attempt
 // (C) never runs ahead of an earlier one (B) still waiting (nocx-2v80t.3.48).
@@ -1133,12 +1276,15 @@ const (
 // longer in the queue" and "now the session's opening attempt": a close or
 // abandon landing exactly there used to see the attempt in neither
 // bs.reopen nor bs.opening and forget it outright, the same defect class as
-// the one this bead started from, one handoff earlier (nocx-2v80t.3.48).
-func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string) (attempt string, kind queuedOpenKind) {
+// the one this bead started from, one handoff earlier (nocx-2v80t.3.48). gen
+// is bs.attachGen[sid] at that same reservation, for performOpen's own
+// install check (nocx-2v80t.3.51) — meaningless for anything but
+// queuedOpenReserved.
+func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string) (attempt string, kind queuedOpenKind, gen uint64) {
 	for {
 		next, ok := bs.popReopenLocked(sid)
 		if !ok {
-			return "", queuedOpenNone
+			return "", queuedOpenNone, 0
 		}
 		if next == justSettled {
 			continue
@@ -1147,7 +1293,7 @@ func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string)
 			continue
 		}
 		if bs.open[sid][next] != nil {
-			return next, queuedOpenExisting
+			return next, queuedOpenExisting, 0
 		}
 		if bs.opening == nil {
 			bs.opening = make(map[session.ID]string)
@@ -1159,7 +1305,7 @@ func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string)
 			bs.waiting[sid] = next
 		}
 		bs.opening[sid] = next
-		return next, queuedOpenReserved
+		return next, queuedOpenReserved, bs.attachGen[sid]
 	}
 }
 
@@ -1168,12 +1314,12 @@ func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string)
 // entry point for an attempt already installed, or straight into performOpen
 // for one just reserved atomically — never openAttemptFor's own guards
 // (nocx-2v80t.3.48; see queuedOpenReserved).
-func (bs *blockStream) continueQueuedOpen(s *WSServer, sid session.ID, attempt string, kind queuedOpenKind) {
+func (bs *blockStream) continueQueuedOpen(s *WSServer, sid session.ID, attempt string, kind queuedOpenKind, gen uint64) {
 	switch kind {
 	case queuedOpenExisting:
 		bs.openAttemptFor(s, sid, attempt)
 	case queuedOpenReserved:
-		bs.performOpen(s, sid, attempt)
+		bs.performOpen(s, sid, attempt, gen)
 	case queuedOpenNone:
 	}
 }
@@ -1288,6 +1434,7 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 		if len(toFlush) > 0 {
 			s.holdEndLocked(sid, &end)
 			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
+			bs.beginFlushLocked(sid, toFlush)
 			bs.flushing[sid] = true
 			confirm := bs.confirmers[sid]
 			bs.mu.Unlock()
@@ -1337,6 +1484,11 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	// last writes this interval can cause.
 	store := s.blockStore()
 	ctx := context.Background()
+	// Every ordinary close is also a chance to retry a row a PAST discarded
+	// open never managed to seal (nocx-2v80t.3.51) — unrelated to this
+	// interval's own attempt, so it runs regardless of what this close
+	// itself decides below.
+	bs.retryOrphanSeals(ctx, store, sid, false)
 
 	promote := func() {
 		if wasCurrent && queued != "" && queued != attempt {
@@ -1818,10 +1970,7 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		// then C asking used to leave B forgotten; a different attempt B
 		// asked for while A merely held the reservation used to be dropped
 		// with nothing recorded at all).
-		if bs.reopen == nil {
-			bs.reopen = make(map[session.ID][]string)
-		}
-		bs.reopen[sid] = append(bs.reopen[sid], attempt)
+		bs.enqueueReopenLocked(sid, attempt)
 		bs.mu.Unlock()
 		return
 	}
@@ -1836,14 +1985,22 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		}
 		pending := bs.pending[sid]
 		delete(bs.pending, sid)
-		confirm := bs.confirmers[sid]
 		if len(pending) > 0 {
+			bs.beginFlushLocked(sid, pending)
 			bs.flushing[sid] = true
 		}
+		confirm := bs.confirmers[sid]
+		// A duplicate request for THIS attempt, already installed, is not
+		// the end of the session's queue: whatever was asked for behind it
+		// still owes an open, and nothing else advances the queue for this
+		// branch (nocx-2v80t.3.51) — the previous fix routed a dequeued
+		// duplicate here and returned, stranding everything queued behind it.
+		next, kind, gen := bs.dequeueNextOpenLocked(sid, "")
 		bs.mu.Unlock()
 		if len(pending) > 0 {
 			bs.flushPendingRows(s, sid, existing, pending, confirm)
 		}
+		bs.continueQueuedOpen(s, sid, next, kind, gen)
 		return
 	}
 	hasCurrent := bs.current[sid] != nil
@@ -1860,8 +2017,14 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		bs.waiting[sid] = attempt
 	}
 	bs.opening[sid] = attempt
+	// The attachment this open is FOR, captured under the same lock as the
+	// reservation (nocx-2v80t.3.51): a detach clears sources[sid], but a
+	// detach followed by a re-attach under the same session id repopulates
+	// it, so presence alone cannot tell a stale attachment from the live
+	// one at install time. gen can.
+	gen := bs.attachGen[sid]
 	bs.mu.Unlock()
-	bs.performOpen(s, sid, attempt)
+	bs.performOpen(s, sid, attempt, gen)
 }
 
 // performOpen does the store call for an attempt already reserved —
@@ -1871,8 +2034,11 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 // discard tail. Split out of openAttemptFor so a dequeued attempt can go
 // straight here without passing back through openAttemptFor's own guards,
 // which would see the reservation dequeueNextOpenLocked just made and queue
-// the attempt again instead of opening it (nocx-2v80t.3.48).
-func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) {
+// the attempt again instead of opening it (nocx-2v80t.3.48). gen is the
+// attachment this open was reserved under (nocx-2v80t.3.51): install checks
+// it against the session's CURRENT attachGen, not merely against
+// sources[sid]'s presence, which a detach-then-re-attach would repopulate.
+func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string, gen uint64) {
 	// With no store the block is still TRACKED, unkept — the same shape a
 	// refused open takes — so each of its ends says block.closed like any
 	// other: the renderer closes a block on that alone, and an untracked
@@ -1921,26 +2087,30 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) 
 		delete(bs.waiting, sid)
 	}
 	_, attached := bs.sources[sid]
+	staleAttachment := bs.attachGen[sid] != gen
 	closedEarly := bs.consumeClosedWhileOpeningLocked(sid, attempt)
-	if !attached || closedEarly {
+	if !attached || staleAttachment || closedEarly {
 		// The attempt was already said block.closed — while it was this
 		// session's opening attempt, or still queued behind one
-		// (markClosedWhileOpeningLocked) — or the session already detached,
-		// while this open's store call was still in flight (nocx-2v80t.3.48):
-		// installing now would resurrect a block the renderer was already
-		// told is gone, or repopulate a detached session's maps. Discarded
-		// instead; a row the store did create for it is sealed through the
-		// ordinary seal path so it does not stand open in history forever,
-		// and rows collected under this attempt's own reservation are
-		// dropped with the rest of it — nothing else could have claimed them
-		// while this was the only opening attempt.
+		// (markClosedWhileOpeningLocked) — or the session detached, while
+		// this open's store call was still in flight (nocx-2v80t.3.48); or
+		// it detached AND RE-ATTACHED under the same session id in that same
+		// window (nocx-2v80t.3.51) — sources[sid] is populated again by the
+		// new attachment, so attached alone cannot tell the two apart, and
+		// gen can. Installing now would resurrect a block the renderer was
+		// already told is gone, or repopulate an attachment this open was
+		// never asked for. Discarded instead; a row the store did create for
+		// it is sealed through the ordinary seal path so it does not stand
+		// open in history forever, and rows collected under this attempt's
+		// own reservation are dropped with the rest of it — nothing else
+		// could have claimed them while this was the only opening attempt.
 		var pending []pendingRows
 		if hadReservation {
 			pending = bs.pending[sid]
 			delete(bs.pending, sid)
 		}
 		confirm := bs.confirmers[sid]
-		next, kind := bs.dequeueNextOpenLocked(sid, attempt)
+		next, kind, nextGen := bs.dequeueNextOpenLocked(sid, attempt)
 		bs.mu.Unlock()
 		for _, d := range pending {
 			confirmPendingRows(confirm, d)
@@ -1953,11 +2123,12 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) 
 			if _, err := store.CloseBlockRows(context.Background(), content.CloseBlockRows{
 				EntryID: attempt, ArtifactID: openArtifact,
 			}); err != nil {
-				s.log.Warn("block rows seal refused for a late open discarded after its attempt closed or its session detached",
+				s.log.Warn("block rows seal refused for a late open discarded after its attempt closed or its session detached; retried at the next flush, close or detach",
 					"session", sid, "entry", attempt, "error", err)
+				bs.recordOrphanSeal(sid, attempt, openArtifact)
 			}
 		}
-		bs.continueQueuedOpen(s, sid, next, kind)
+		bs.continueQueuedOpen(s, sid, next, kind, nextGen)
 		return
 	}
 	if bs.open == nil {
@@ -1982,11 +2153,12 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) 
 		pending = bs.pending[sid]
 		delete(bs.pending, sid)
 	}
-	confirm := bs.confirmers[sid]
 	if len(pending) > 0 {
+		bs.beginFlushLocked(sid, pending)
 		bs.flushing[sid] = true
 	}
-	next, kind := bs.dequeueNextOpenLocked(sid, "")
+	confirm := bs.confirmers[sid]
+	next, kind, nextGen := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
 	if len(pending) > 0 {
 		bs.flushPendingRows(s, sid, b, pending, confirm)
@@ -1997,7 +2169,7 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) 
 	// open already succeeded) is safe to make too: queuedOpenExisting finds
 	// the block already installed and only reconciles pending rows and
 	// current, never reopening the store.
-	bs.continueQueuedOpen(s, sid, next, kind)
+	bs.continueQueuedOpen(s, sid, next, kind, nextGen)
 }
 
 // openFinished ends an open that did NOT produce a block — this attempt's own
@@ -2011,9 +2183,9 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) 
 func (bs *blockStream) openFinished(s *WSServer, sid session.ID) {
 	bs.mu.Lock()
 	delete(bs.opening, sid)
-	next, kind := bs.dequeueNextOpenLocked(sid, "")
+	next, kind, gen := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
-	bs.continueQueuedOpen(s, sid, next, kind)
+	bs.continueQueuedOpen(s, sid, next, kind, gen)
 }
 
 func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {
@@ -2033,17 +2205,14 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 	// This batch left bs.pending in the caller before this call — that is
 	// what let takePendingRows and requeuePendingRows treat it as one
 	// slice instead of two — but it has not landed at the store either, and
-	// the call below can block for as long as the store is slow. Without
-	// counting it somewhere, the bound sees nothing held here and lets rows
-	// that keep arriving accumulate a second buffer's worth behind this one
-	// (nocx-2v80t.3.49). flushingBytes is that count, set once for the whole
-	// batch and walked down by exactly what each call lands.
-	bs.mu.Lock()
-	if bs.flushingBytes == nil {
-		bs.flushingBytes = make(map[session.ID]int64)
-	}
-	bs.flushingBytes[sid] = pendingRowsBytes(pending)
-	bs.mu.Unlock()
+	// this call can block for as long as the store is slow. Without counting
+	// it somewhere, the bound sees nothing held here and lets rows that keep
+	// arriving accumulate a second buffer's worth behind this one
+	// (nocx-2v80t.3.49). flushingBytes is that count: EVERY caller of this
+	// function sets it via beginFlushLocked at the same lock hold that
+	// extracted this exact batch from bs.pending (nocx-2v80t.3.51) — never
+	// here, which would run after the caller had already unlocked with the
+	// batch out of bs.pending and counted nowhere in between.
 	// Owner: this stream, on behalf of the helper's attached session.
 	// Closing event: each successful append or the session detach.
 	for i, delivery := range pending {
@@ -2073,9 +2242,11 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 	}
 	next := bs.takePendingRows(sid, block.attempt)
 	if len(next) == 0 {
+		// takePendingRows already set flushingBytes to 0 for this (empty)
+		// next batch: every delivery in the one just finished landed, and
+		// nothing is left in flight.
 		bs.mu.Lock()
 		bs.flushing[sid] = false
-		delete(bs.flushingBytes, sid) // every delivery in this batch landed; nothing left in flight
 		bs.mu.Unlock()
 		bs.drainPendingCloses(s, sid)
 		return
@@ -2091,6 +2262,14 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 		if len(closes) == 0 {
 			delete(bs.closing, sid)
 			bs.mu.Unlock()
+			// A flush that lands with nothing left to close is still a
+			// chance to retry a row a past discarded open never managed to
+			// seal (nocx-2v80t.3.51).
+			//
+			// Owner: this stream, on behalf of the flush that just landed.
+			// Closing event: retryOrphanSeals' own store call for each row;
+			// nothing is held past it.
+			bs.retryOrphanSeals(log.WithLogger(context.Background(), s.log), s.blockStore(), sid, false)
 			return
 		}
 		bs.closing[sid] = true

@@ -13,6 +13,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -37,6 +38,11 @@ type raceOpenStore struct {
 	hold    chan struct{} // non-nil: the next post-bind open waits on it
 	entered chan struct{} // signalled when a held open is in flight
 	seals   int
+	// closeFailures is how many of the FIRST CloseBlockRows calls answer an
+	// injected failure before calls succeed for real (nocx-2v80t.3.51's
+	// orphan-seal retry); zero (the default) never fails.
+	closeFailures int
+	closeCalls    int
 }
 
 func (s *raceOpenStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
@@ -63,6 +69,13 @@ func (s *raceOpenStore) AppendBlockRows(ctx context.Context, in content.AppendBl
 
 func (s *raceOpenStore) CloseBlockRows(ctx context.Context, in content.CloseBlockRows) (content.BlockRowsSummary, error) {
 	s.mu.Lock()
+	s.closeCalls++
+	fail := s.closeCalls <= s.closeFailures
+	s.mu.Unlock()
+	if fail {
+		return content.BlockRowsSummary{}, errors.New("injected close failure")
+	}
+	s.mu.Lock()
 	s.seals++
 	s.mu.Unlock()
 	return s.ledger.CloseBlockRows(ctx, in)
@@ -76,6 +89,12 @@ func (s *raceOpenStore) sealCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.seals
+}
+
+func (s *raceOpenStore) closeAttempts() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.closeCalls
 }
 
 // lateOpenSetup starts a command before its ledger row is bound — the submit
