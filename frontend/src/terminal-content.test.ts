@@ -16574,3 +16574,303 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 })
+// ═══════════════════════════════════════════════════════════════════════════
+// The prompt's geometry prediction measures at the real block's width, once
+// per animation frame (nocx-2v80t.3.55)
+// ═══════════════════════════════════════════════════════════════════════════
+// Two review majors against the 3.50 prediction. The off-flow probe was
+// appended with no width, so an absolutely positioned clone rendered
+// shrink-to-fit while the real running block is a stretched flex child of
+// `.scrollback-inner` — a long title wrapped in the pane and not in the
+// probe, and the grid was fitted to the wrong height. And every keystroke
+// paid the measurement synchronously: a header built and highlighted, two
+// clones appended, two layouts forced. The mock below answers BY WIDTH —
+// one line holds floor(width / 23) characters — where the 3.46 mock answers
+// every .cmd-block with one fixed height and so hides width errors.
+describe('the prompt prediction measures at the real block width, once per frame (nocx-2v80t.3.55)', () => {
+  const COMPOSER = 130
+  const BAR = 56
+  const LINE = 20
+  const PANE = 676
+  /** The mock's wrap arithmetic: one header line holds floor(width / 23)
+   *  characters — 40 at the pane's 926. */
+  const CHAR_PX = 23
+  const linesFor = (text: string, width: number): number =>
+    width > 0 ? Math.max(1, Math.ceil(text.length / Math.floor(width / CHAR_PX))) : 1
+
+  async function paneWithWidthLayout() {
+    const client = makeClient()
+    const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    const { content, view, teardown } = mounted
+    const handler = lifecycleHandler(client)
+    const renderer = rendererOf(content)
+    const inner = content as unknown as {
+      scrollback: ScrollbackController
+      editor: CommandEditor
+      processBar: HTMLElement
+    }
+    const sb = inner.scrollback
+    const pane = PANE
+    let innerWidth = 926
+    const composerShown = (): boolean =>
+      inner.editor.isVisible && inner.editor.root.dataset.placement !== 'overlay'
+    const barShown = (): boolean => !inner.processBar.hidden
+    Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      get: () => pane - (composerShown() ? COMPOSER : 0) - (barShown() ? BAR : 0),
+    })
+    Object.defineProperty(sb.scrollbackArea, 'clientWidth', { configurable: true, value: 926 })
+    // The real block is a stretched child of scrollback-inner: its width IS
+    // this number, and the prediction must measure the probe at it.
+    Object.defineProperty(sb.scrollbackInner, 'clientWidth', {
+      configurable: true,
+      get: () => innerWidth,
+    })
+    const rect = (height: number): DOMRect =>
+      ({ height, width: 926, top: 0, left: 0, right: 926, bottom: height, x: 0, y: 0 }) as DOMRect
+    /** Every .cmd-block rectangle the mock answered, split by whether the
+     *  element is the prediction's off-flow clone (inline absolute) or a
+     *  real block in the flow. */
+    const measured: Array<{ probe: boolean; width: number; height: number }> = []
+    /* eslint-disable @typescript-eslint/unbound-method */
+    const protoRect = Element.prototype.getBoundingClientRect
+    const protoScrollTo = Element.prototype.scrollTo
+    const protoScrollIntoView = Element.prototype.scrollIntoView
+    const protoRaf = globalThis.requestAnimationFrame
+    const protoCaf = globalThis.cancelAnimationFrame
+    /* eslint-enable @typescript-eslint/unbound-method */
+    Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+      if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
+      if (this === inner.processBar) return rect(barShown() ? BAR : 0)
+      if (this.classList.contains('ui-process-bar')) return rect(BAR)
+      if (this.classList.contains('cmd-block')) {
+        const el = this as HTMLElement
+        // A clone the prediction pinned a width on measures at it. An
+        // in-flow block is a stretched child of scrollback-inner and takes
+        // the container's width. An absolute clone with NO width is the
+        // browser's shrink-to-fit — unconstrained, one line however long
+        // the title: exactly the rendering the fix removes.
+        const probe = el.style.position === 'absolute'
+        const inline = parseFloat(el.style.width)
+        const width = probe ? (Number.isFinite(inline) && inline > 0 ? inline : 0) : innerWidth
+        // The header text alone: a real block carries Stop and the ⋮ menu
+        // beside the title, and neither wraps it.
+        const title = el.querySelector('.cmd-header-text')?.textContent ?? ''
+        const height = LINE * linesFor(title, width)
+        measured.push({ probe, width, height })
+        return rect(height)
+      }
+      return rect(0)
+    }
+    Element.prototype.scrollTo = () => {}
+    Element.prototype.scrollIntoView = () => {}
+
+    let n = 0
+    /** Put a command in the composer — typing, and nothing else. */
+    const typeCommand = (text: string): void => {
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+      })
+    }
+    /** Enter: the submit, then the running fact it publishes. */
+    const submitCommand = (text: string): string => {
+      n += 1
+      const id = `att-${n}`
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id,
+          state: 'open',
+          origin: 'app',
+          submitId: submitToken(client),
+          command: text,
+        },
+      })
+      return id
+    }
+    /** Output, completion, the block's close, the return to a ready prompt. */
+    const finishCommand = (id: string): void => {
+      ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(100)
+      client._sessions[0].fireData(`out ${id}\r\n`)
+      renderer._fireWriteParsed()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id,
+          state: 'completed',
+          exitCode: 0,
+          fence: 'f'.repeat(64),
+          completedAt: '2026-09-26T00:00:00Z',
+        },
+      })
+      blockClosedHandler(client)(id)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      client._sessions[0].fireData('$ ')
+      renderer._fireWriteParsed()
+    }
+    /** Every rectangle the grid was fitted to. */
+    const fits = (): Array<{ width: number; height: number }> =>
+      (renderer.fitViewport as Mock).mock.calls.map(
+        (call) => call[0] as { width: number; height: number },
+      )
+    const probeMeasures = (): Array<{ width: number; height: number }> =>
+      measured.filter((m) => m.probe)
+    const realMeasures = (): Array<{ width: number; height: number }> =>
+      measured.filter((m) => !m.probe)
+    const setPaneWidth = (px: number): void => {
+      innerWidth = px
+    }
+    /** Hold every animation frame until `runFrame` — the browser the
+     *  coalescing tests need: a frame happens exactly when they say so. */
+    const holdFrames = (): { runFrame: () => void; restore: () => void } => {
+      const frames = new Map<number, { cb: FrameRequestCallback; cancelled: boolean }>()
+      let next = 1
+      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+        const id = next++
+        frames.set(id, { cb, cancelled: false })
+        return id
+      }
+      globalThis.cancelAnimationFrame = (id: number): void => {
+        const frame = frames.get(id)
+        if (frame) frame.cancelled = true
+      }
+      const runFrame = (): void => {
+        const due = [...frames.values()].filter((f) => !f.cancelled)
+        frames.clear()
+        for (const f of due) f.cb(0)
+      }
+      return {
+        runFrame,
+        restore: (): void => {
+          globalThis.requestAnimationFrame = protoRaf
+          globalThis.cancelAnimationFrame = protoCaf
+        },
+      }
+    }
+    /** Frames the moment they are asked for — what a browser does to a
+     *  frame that is already due, and what the 3.46 harness above plays. */
+    const runFramesAsap = (): void => {
+      globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+        cb(0)
+        return 0
+      }
+    }
+
+    content.setVisible(true)
+    runFramesAsap()
+    content.viewportChanged({ width: 936, height: pane })
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    // The opening prompt's own output settles the grid before anyone types.
+    client._sessions[0].fireData('$ ')
+    renderer._fireWriteParsed()
+
+    return {
+      typeCommand,
+      submitCommand,
+      finishCommand,
+      fits,
+      probeMeasures,
+      realMeasures,
+      setPaneWidth,
+      holdFrames,
+      restore: (): void => {
+        Element.prototype.getBoundingClientRect = protoRect
+        Element.prototype.scrollTo = protoScrollTo
+        Element.prototype.scrollIntoView = protoScrollIntoView
+        globalThis.requestAnimationFrame = protoRaf
+        globalThis.cancelAnimationFrame = protoCaf
+        teardown()
+      },
+    }
+  }
+
+  it('the probe and the real header it predicted report the same height at the pane’s width', async () => {
+    const h = await paneWithWidthLayout()
+    try {
+      const LONG = 'deploy staging && ship it && tell everyone '.repeat(6)
+      const settled = h.probeMeasures().length
+      h.typeCommand(LONG)
+      const probes = h.probeMeasures()
+      expect(probes.length).toBe(settled + 1)
+      const probe = probes[probes.length - 1]
+      // Measured at the container the real block will stretch in.
+      expect(probe.width).toBe(926)
+      expect(probe.height).toBe(LINE * linesFor(LONG, 926))
+      const id = h.submitCommand(LONG)
+      h.finishCommand(id)
+      const reals = h.realMeasures()
+      expect(reals.length).toBeGreaterThan(0)
+      // What the block opened at is what the probe said it would.
+      expect(reals[reals.length - 1].height).toBe(probe.height)
+    } finally {
+      h.restore()
+    }
+  })
+
+  it('typing N characters in one frame performs one measurement, and skips when neither the text nor the width changed', async () => {
+    const h = await paneWithWidthLayout()
+    const frames = h.holdFrames()
+    try {
+      const settled = h.probeMeasures().length
+      h.typeCommand('git')
+      h.typeCommand('git st')
+      h.typeCommand('git status')
+      // Pending: the three keystrokes share the frame that has not come.
+      expect(h.probeMeasures().length).toBe(settled)
+      frames.runFrame()
+      expect(h.probeMeasures().length).toBe(settled + 1)
+      // The text came back to what the last measurement answered: skipped.
+      h.typeCommand('git status --short')
+      h.typeCommand('git status')
+      frames.runFrame()
+      expect(h.probeMeasures().length).toBe(settled + 1)
+      // A width the last measurement never saw is a new question.
+      h.setPaneWidth(700)
+      h.typeCommand('git status -s')
+      frames.runFrame()
+      expect(h.probeMeasures().length).toBe(settled + 2)
+      expect(h.probeMeasures()[settled + 1].width).toBe(700)
+    } finally {
+      frames.restore()
+      h.restore()
+    }
+  })
+
+  it('a submit right after a keystroke flushes the pending measure, and nothing fits after start', async () => {
+    const h = await paneWithWidthLayout()
+    const frames = h.holdFrames()
+    try {
+      const LONG = 'deploy staging && ship it && tell everyone '.repeat(6)
+      const settled = h.probeMeasures().length
+      h.typeCommand(LONG)
+      // Pending, not synchronous: no measurement at the keystroke.
+      expect(h.probeMeasures().length).toBe(settled)
+      const before = h.fits().length
+      const id = h.submitCommand(LONG)
+      // The submit flushed it synchronously — the wrapped height is
+      // committed inside Enter, before the command's bytes can move.
+      expect(h.probeMeasures().length).toBe(settled + 1)
+      expect(h.fits().length).toBe(before + 1)
+      const wrapped = LINE * linesFor(LONG, 926)
+      expect(h.fits()[h.fits().length - 1]?.height).toBe(PANE - BAR - wrapped)
+      // The frame the keystroke scheduled is gone: firing it mid-command
+      // measures nothing and fits nothing.
+      frames.runFrame()
+      expect(h.probeMeasures().length).toBe(settled + 1)
+      expect(h.fits().length).toBe(before + 1)
+      h.finishCommand(id)
+    } finally {
+      frames.restore()
+      h.restore()
+    }
+  })
+})
