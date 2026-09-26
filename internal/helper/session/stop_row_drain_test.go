@@ -217,6 +217,79 @@ func TestStopWithNoMarkerOwedEndsCleanly(t *testing.T) {
 	}
 }
 
+// A sink that refuses EVERY marker send — not merely the three
+// TestStopDeliversAnOwedIncompleteMarkerBeforeEnding needs to genuinely park
+// it, but every attempt forever — must still let stop() return
+// (nocx-2v80t.3.52, round 2): once draining, a failed send is resolved
+// rather than retried forever, because the loss it names was already stated
+// the instant the buffer overflowed (enqueueRowEmission's rowsIncomplete
+// count and its own warning), independent of whether delivery ever lands on
+// a connection that is not coming back.
+func TestStopReturnsWhenTheSinkRefusesEveryMarkerSend(t *testing.T) {
+	sink := newOrderedStallingSink()
+	sink.failIncompleteTimes = -1 // never succeeds
+	close(sink.release)           // every non-marker send may still proceed at once
+	hs, _ := stopTestSession(t, sink)
+	bufferOf(hs, 2)
+	bridge := &rowBridge{hs: hs}
+	row := []emulator.Row{textRow("x")}
+
+	for i := uint64(1); i <= 5; i++ {
+		bridge.OutputRows(i, row, 0)
+	}
+	select {
+	case <-sink.failed:
+	case <-time.After(hangLimit):
+		t.Fatal("the marker's own first send never happened")
+	}
+
+	stopBounded(t, hs)
+
+	if got := hs.rowsIncomplete.Load(); got != 1 {
+		t.Fatalf("rowsIncomplete = %d, want 1 — the loss is counted at the overflow, independent of whether delivery ever lands", got)
+	}
+	for _, d := range sink.snapshot() {
+		if d.incomplete {
+			t.Fatal("a sink that refuses every send recorded a DELIVERED incomplete marker")
+		}
+	}
+}
+
+// A sink whose send never returns at all — a wedged connection, which looks
+// identical to a working one that simply never answers — must not hang
+// stop() forever either (nocx-2v80t.3.52, round 2): the Sink interface takes
+// no context and its one production implementation
+// (internal/helper/host.Host.write) is a plain, deadline-less io.Writer
+// call, so there is no cancellation this package can reach into for an
+// in-flight send. deliverForPump bounds a drain-time attempt to stopGrace —
+// the same grace the process's own tail already gets from owner.stop — and
+// abandons it past that. Three scheduled failures first, exactly as
+// TestStopDeliversAnOwedIncompleteMarkerBeforeEnding needs them, so the
+// marker is genuinely parked (not resolved by 3.49's immediate retry or the
+// one stale wake rowWake's single slot can bank) before stop() is ever
+// called and its own drain-time retry is the one that blocks.
+func TestStopReturnsWhenTheOwedMarkersSendNeverReturns(t *testing.T) {
+	sink := newOrderedStallingSink()
+	sink.failIncompleteTimes = 3
+	sink.blockAfterExhausted = true
+	close(sink.release)
+	hs, _ := stopTestSession(t, sink)
+	bufferOf(hs, 2)
+	bridge := &rowBridge{hs: hs}
+	row := []emulator.Row{textRow("x")}
+
+	for i := uint64(1); i <= 5; i++ {
+		bridge.OutputRows(i, row, 0)
+	}
+	select {
+	case <-sink.exhausted: // all three scheduled failures have happened; the marker is genuinely parked
+	case <-time.After(hangLimit):
+		t.Fatal("the marker's three scheduled sends never all happened")
+	}
+
+	stopBounded(t, hs) // must return even though the drain's own retry never does
+}
+
 // countEncodedRows decodes one rows-plane payload and answers how many rows
 // it carries — the bridge's own encoding (sessionruntime.EncodeRows), read
 // back rather than assumed.
