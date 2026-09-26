@@ -329,6 +329,9 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			delete(e.ws.blockStream.pending, sid)
 			e.ws.blockStream.flushing[sid] = false
 			block := e.ws.blockStream.current[sid]
+			// A real caller counts the batch as flushingBytes at the same
+			// lock hold that extracts it (nocx-2v80t.3.51).
+			e.ws.blockStream.beginFlushLocked(sid, pending)
 			e.ws.blockStream.mu.Unlock()
 			e.ws.blockStream.flushPendingRows(e.ws, sid, block, pending, nil)
 			if len(closing) == len(small) {
