@@ -213,14 +213,21 @@ type blockStream struct {
 	// what remains back into bs.pending (requeuePendingRows, which clears
 	// this the same call).
 	flushingBytes map[session.ID]int64
-	// attachGen counts this session's attachments, bumped once by every
-	// attach() call including the first (nocx-2v80t.3.51): a session that
+	// attachSeq is the stream's one monotonic attachment counter: attach()
+	// stamps it into attachGen[sid], so every attachment — of any session —
+	// gets a value no earlier attachment ever held (nocx-2v80t.3.53). It is
+	// what lets detach reclaim the per-session stamp: a reclaimed value can
+	// never be minted again, so a re-attach under the same id cannot accept
+	// an open reserved under an older generation.
+	attachSeq uint64
+	// attachGen is each session's CURRENT attachment generation, stamped by
+	// every attach() including the first (nocx-2v80t.3.51): a session that
 	// detaches and re-attaches under the same id gets a new generation, and
 	// an open reserved under an old one is checked against the CURRENT value
 	// at install, not merely against sources[sid]'s presence — a detach
 	// followed by a re-attach leaves sources[sid] populated again, so
-	// presence alone cannot tell the two attachments apart. Never reset by
-	// detach: the whole point is that it keeps counting across one.
+	// presence alone cannot tell the two attachments apart. Reclaimed by
+	// detach (nocx-2v80t.3.53); attachSeq keeps the next stamp unique.
 	attachGen map[session.ID]uint64
 	// orphanSeals are the rows a discarded open's own cleanup CloseBlockRows
 	// failed to seal (nocx-2v80t.3.51): the attempt is already fully
@@ -666,11 +673,16 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64
 	bs.budgets[sid] = budget
 	// A new generation every attach, including the first, so an open
 	// reserved under a since-detached attachment can never match the one
-	// live now (nocx-2v80t.3.51). Never reset by detach — see attachGen.
+	// live now (nocx-2v80t.3.51). Stamped from one stream-wide counter and
+	// reclaimed at detach (nocx-2v80t.3.53): the counter, not the stamp's
+	// survival, is what keeps a re-attach under the same id from accepting
+	// an older generation — detach forgets this sid's stamp, and the next
+	// attach mints a value no earlier open was reserved under.
 	if bs.attachGen == nil {
 		bs.attachGen = make(map[session.ID]uint64)
 	}
-	bs.attachGen[sid]++
+	bs.attachSeq++
+	bs.attachGen[sid] = bs.attachSeq
 }
 
 // DetachBlockRows ends a session's streaming: every still-open block is
@@ -744,6 +756,10 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	delete(bs.unrecorded, sid)
 	delete(bs.budgets, sid)
 	delete(bs.flushingBytes, sid)
+	// The generation stamp goes with the rest of the session's state
+	// (nocx-2v80t.3.53): attachSeq keeps the next attach's stamp strictly
+	// newer, so reclamation costs the staleness check nothing.
+	delete(bs.attachGen, sid)
 	bs.mu.Unlock()
 	owed := make([]blockClosedParams, 0, len(unsettled)+len(unended))
 	for _, b := range unsettled {
@@ -2089,29 +2105,40 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string, 
 	}
 
 	bs.mu.Lock()
+	_, attached := bs.sources[sid]
+	if !attached || bs.attachGen[sid] != gen {
+		// The attachment this open was reserved under is gone: the session
+		// detached — or detached AND re-attached under the same id in this
+		// store call's window (nocx-2v80t.3.51), which the generation
+		// comparison tells apart where sources[sid]'s repopulated presence
+		// cannot. Everything now keyed by sid belongs to the attachment
+		// that followed — its opening reservation, its waiting, its pending
+		// rows, its queue — so this open touches NONE of it: no delete, no
+		// dequeue, no queued open (nocx-2v80t.3.53; A's late return used to
+		// unreserve B and start C beside it). It only settles the row its
+		// own store call created, inline, because no attachment remains
+		// whose flush, close or detach would ever revisit an orphan parked
+		// here (nocx-2v80t.3.53).
+		bs.mu.Unlock()
+		bs.settleStaleOpenRow(s, sid, attempt, openArtifact, store)
+		return
+	}
 	delete(bs.opening, sid)
 	hadReservation := bs.waiting[sid] == attempt
 	if hadReservation {
 		delete(bs.waiting, sid)
 	}
-	_, attached := bs.sources[sid]
-	staleAttachment := bs.attachGen[sid] != gen
 	closedEarly := bs.consumeClosedWhileOpeningLocked(sid, attempt)
-	if !attached || staleAttachment || closedEarly {
+	if closedEarly {
 		// The attempt was already said block.closed — while it was this
 		// session's opening attempt, or still queued behind one
-		// (markClosedWhileOpeningLocked) — or the session detached, while
-		// this open's store call was still in flight (nocx-2v80t.3.48); or
-		// it detached AND RE-ATTACHED under the same session id in that same
-		// window (nocx-2v80t.3.51) — sources[sid] is populated again by the
-		// new attachment, so attached alone cannot tell the two apart, and
-		// gen can. Installing now would resurrect a block the renderer was
-		// already told is gone, or repopulate an attachment this open was
-		// never asked for. Discarded instead; a row the store did create for
-		// it is sealed through the ordinary seal path so it does not stand
-		// open in history forever, and rows collected under this attempt's
-		// own reservation are dropped with the rest of it — nothing else
-		// could have claimed them while this was the only opening attempt.
+		// (markClosedWhileOpeningLocked). Installing now would resurrect a
+		// block the renderer was already told is gone. Discarded instead; a
+		// row the store did create for it is sealed through the ordinary
+		// seal path so it does not stand open in history forever, and rows
+		// collected under this attempt's own reservation are dropped with
+		// the rest of it — nothing else could have claimed them while this
+		// was the only opening attempt.
 		var pending []pendingRows
 		if hadReservation {
 			pending = bs.pending[sid]
@@ -2176,6 +2203,33 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string, 
 	// the block already installed and only reconciles pending rows and
 	// current, never reopening the store.
 	bs.continueQueuedOpen(s, sid, next, kind, nextGen)
+}
+
+// settleStaleOpenRow seals the store row a stale open's own call created —
+// the one store write an open may still make once its attachment is gone. A
+// failure is retried inline up to maxCloseAttempts and then stated as a
+// permanent loss: an orphan parked here would be revisited by nothing, since
+// the session's own flushes, closes and detach have all already run
+// (nocx-2v80t.3.53). The LIVE discard's failed cleanup keeps the ordinary
+// orphan path (recordOrphanSeal), which those calls do revisit.
+func (bs *blockStream) settleStaleOpenRow(s *WSServer, sid session.ID, attempt, openArtifact string, store blockOutputStore) {
+	if openArtifact == "" || store == nil {
+		return
+	}
+	// Owner: this stream, settling a late open on behalf of the session that
+	// already ended its attachment.
+	// Closing event: this seal — the only store write a stale open may still
+	// make; nothing is held past it.
+	var err error
+	for range maxCloseAttempts {
+		if _, err = store.CloseBlockRows(context.Background(), content.CloseBlockRows{
+			EntryID: attempt, ArtifactID: openArtifact,
+		}); err == nil {
+			return
+		}
+	}
+	s.log.Warn("block rows seal refused for a late open discarded after its session detached; retried inline and lost — the store row stands open with nothing left to retry it",
+		"session", sid, "entry", attempt, "artifact", openArtifact, "attempts", maxCloseAttempts, "error", err)
 }
 
 // openFinished ends an open that did NOT produce a block — this attempt's own
