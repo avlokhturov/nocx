@@ -62,6 +62,39 @@ func (s *closeFailureBlockStore) RecordClearBoundary(ctx context.Context, in con
 	return s.ledger.RecordClearBoundary(ctx, in)
 }
 
+// blockingAppendStore blocks every AppendBlockRows call until the test opens
+// the gate (nocx-2v80t.3.49): the store side of "an append blocked in
+// storage", a real gate the test itself controls rather than a timing
+// assumption. entered signals once per call, the instant it parks, which is
+// what a test waits on to know the call is genuinely blocked.
+type blockingAppendStore struct {
+	ledger  content.LedgerRepository
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newBlockingAppendStore(ledger content.LedgerRepository) *blockingAppendStore {
+	return &blockingAppendStore{ledger: ledger, entered: make(chan struct{}, 64), release: make(chan struct{})}
+}
+
+func (s *blockingAppendStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
+	return s.ledger.OpenBlockOutput(ctx, in)
+}
+
+func (s *blockingAppendStore) AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error {
+	s.entered <- struct{}{}
+	<-s.release
+	return s.ledger.AppendBlockRows(ctx, in)
+}
+
+func (s *blockingAppendStore) CloseBlockRows(ctx context.Context, in content.CloseBlockRows) (content.BlockRowsSummary, error) {
+	return s.ledger.CloseBlockRows(ctx, in)
+}
+
+func (s *blockingAppendStore) RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
+	return s.ledger.RecordClearBoundary(ctx, in)
+}
+
 func blockRowsBody(t *testing.T, db content.ContentDB, entryID string) string {
 	t.Helper()
 	row, err := db.Ledger().Entry(context.Background(), entryID)
@@ -883,6 +916,182 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 			mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, nextSeq+2, lifecyclePromptEvt()))
 		}
 		nextSeq += 3
+	}
+}
+
+// The batch flushPendingRows hands to the store counts against the
+// coordinator bound for as long as the store has not answered
+// (nocx-2v80t.3.49, ADR-0075 decision 6, "every queue"). The caller already
+// took this batch out of bs.pending before calling flushPendingRows, so
+// nothing else counts it — and AppendBlockRows genuinely blocks here, a
+// fake's own gate rather than a timing assumption, standing in for a store
+// that has fallen behind. Rows that keep arriving while it is blocked must
+// see the blocked batch as held: the bound is four rows, two are already
+// stuck in the store, so only two more may accumulate before the overflow
+// rule fires — not four more, which is what an unheld in-flight batch would
+// allow (roughly twice the configured buffer).
+func TestFlushingBatchCountsAgainstTheBufferBound(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(session.ID(sid))
+	// SetBlockRowsBufferBytes clamps to MinBlockRowsBufferBytes (4 MiB), far
+	// above what a handful of test rows can exercise, so the bound is set
+	// directly on the attached session the way these tests already reach
+	// other blockStream fields — a four-row bound, kept small enough that the
+	// test's own arithmetic (2 in flight + 2 accepted = the bound) is exact.
+	rowBytes := heldRowsBytes([]emulator.Row{aStreamRow("x")})
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.budgets[session.ID(sid)] = rowBytes * 4
+	e.ws.blockStream.mu.Unlock()
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf rows")
+	e.ws.blockStream.mu.Lock()
+	block := e.ws.blockStream.current[session.ID(sid)]
+	e.ws.blockStream.mu.Unlock()
+	if block == nil {
+		t.Fatal("the command's block never opened")
+	}
+
+	// Two rows are handed straight to flushPendingRows, matching how a real
+	// caller reaches it: already taken out of bs.pending, with flushing set
+	// first. Its first store call parks on the fake's gate.
+	inFlight := []pendingRows{
+		{from: 0, rows: []emulator.Row{aStreamRow("x")}},
+		{from: 1, rows: []emulator.Row{aStreamRow("x")}},
+	}
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	delete(e.ws.blockStream.pending, session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, inFlight, nil)
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flush never reached the store")
+	}
+
+	accepted := 0
+	for from := uint64(2); from < 2+4; from++ {
+		// Accepted into bs.pending answers (0, false) — not yet confirmed,
+		// since nothing has reached the store. The overflow rule answers
+		// (fromRow+len, true) instead: dropped rather than held, and
+		// confirmed because nothing will ever come back for it — the
+		// unrecorded map is what tells the two apart here.
+		e.ws.BlockRowsArrived(session.ID(sid), from, 0, []emulator.Row{aStreamRow("x")})
+		e.ws.blockStream.mu.Lock()
+		_, overflowed := e.ws.blockStream.unrecorded[session.ID(sid)]
+		e.ws.blockStream.mu.Unlock()
+		if overflowed {
+			break
+		}
+		accepted++
+	}
+	if accepted != 2 {
+		t.Fatalf("the bound accepted %d rows behind the blocked batch, want 2 (a 4-row bound minus the 2 already in flight)", accepted)
+	}
+	e.ws.blockStream.mu.Lock()
+	fromOverflow, overflowed := e.ws.blockStream.unrecorded[session.ID(sid)]
+	e.ws.blockStream.mu.Unlock()
+	if !overflowed || fromOverflow != 4 {
+		t.Fatalf("unrecorded = (%d, %v), want the overflow to fire at row 4 (2 rows already in flight + 2 accepted)", fromOverflow, overflowed)
+	}
+
+	// Releasing the store lets the blocked batch land, and flushPendingRows
+	// then recurses onto the two rows the bound had accepted behind it
+	// (takePendingRows) — nothing above was ever meant to be lost, only
+	// held back until the store could take it.
+	close(store.release)
+	deadline := time.After(5 * time.Second)
+	for {
+		e.ws.blockStream.mu.Lock()
+		stillFlushing := e.ws.blockStream.flushing[session.ID(sid)]
+		e.ws.blockStream.mu.Unlock()
+		if !stillFlushing {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("the flush never finished after the store was released")
+		}
+	}
+	kept := streamRows(t, db, attempt)
+	if len(kept) != 4 {
+		t.Fatalf("stored rows = %+v, want all 4: the 2 held in the blocked batch and the 2 the bound accepted behind it", kept)
+	}
+	for i, row := range kept {
+		if row.From != uint64(i) || row.Text != "x" { //nolint:gosec // a row index, not a byte count
+			t.Fatalf("stored row %d = %+v, want from=%d text=x", i, row, i)
+		}
+	}
+}
+
+// Paired with TestFlushingBatchCountsAgainstTheBufferBound: an append that
+// LANDS drops out of the bound the instant it does, rather than staying
+// spent (nocx-2v80t.3.49). heldBytesLocked is read directly — the same
+// measure holdLocked checks against the budget — before and after the
+// store's gate opens.
+func TestFlushingBatchReleasesTheBudgetOnceItLands(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	store := newBlockingAppendStore(db.Ledger())
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(session.ID(sid))
+
+	attempt := startsACommand(t, e, pub, lane, h, 2, "printf rows")
+	e.ws.blockStream.mu.Lock()
+	block := e.ws.blockStream.current[session.ID(sid)]
+	e.ws.blockStream.mu.Unlock()
+	if block == nil {
+		t.Fatal("the command's block never opened")
+	}
+
+	pending := []pendingRows{{from: 0, rows: []emulator.Row{aStreamRow("x")}}}
+	e.ws.blockStream.mu.Lock()
+	e.ws.blockStream.flushing[session.ID(sid)] = true
+	delete(e.ws.blockStream.pending, session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
+	select {
+	case <-store.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the flush never reached the store")
+	}
+
+	e.ws.blockStream.mu.Lock()
+	held := e.ws.blockStream.heldBytesLocked(session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+	if want := heldRowsBytes([]emulator.Row{aStreamRow("x")}); held != want {
+		t.Fatalf("held bytes while the append is in flight = %d, want %d (the batch's own cost, counted until it lands)", held, want)
+	}
+
+	close(store.release)
+	deadline := time.After(5 * time.Second)
+	for {
+		e.ws.blockStream.mu.Lock()
+		stillFlushing := e.ws.blockStream.flushing[session.ID(sid)]
+		e.ws.blockStream.mu.Unlock()
+		if !stillFlushing {
+			break
+		}
+		select {
+		case <-time.After(10 * time.Millisecond):
+		case <-deadline:
+			t.Fatal("the flush never finished after the store was released")
+		}
+	}
+
+	e.ws.blockStream.mu.Lock()
+	held = e.ws.blockStream.heldBytesLocked(session.ID(sid))
+	e.ws.blockStream.mu.Unlock()
+	if held != 0 {
+		t.Fatalf("held bytes after the append landed = %d, want 0 — the budget must be released, not kept spent", held)
+	}
+	kept := streamRows(t, db, attempt)
+	if len(kept) != 1 || kept[0].Text != "x" {
+		t.Fatalf("stored rows = %+v, want the one row the batch carried", kept)
 	}
 }
 

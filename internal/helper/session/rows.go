@@ -223,27 +223,40 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 // subscriber bound there is nothing to deliver and nothing to mourn: the
 // rows were handed over once by the runtime, ghostty's scrollback is the
 // buffer, and the mark the eventual resend reads starts at zero.
+//
+// The owed marker is a gate, not a courtesy retry: while one is owed nothing
+// else is dequeued, however many attempts it takes, because the marker is the
+// only statement of the loss it names and anything delivered ahead of it
+// would overtake that statement (nocx-2v80t.3.49). A failed attempt parks on
+// the next wake rather than spinning — attach (session.go) wakes this pump
+// the moment a new subscriber binds, precisely so a marker owed to "nobody
+// bound" is retried without waiting for the next row or end to arrive.
 func (s *hostSession) serveRows() {
 	for {
-		if em, ok := s.dequeueRowEmission(); ok {
-			// The incomplete marker is the only statement of a loss
-			// (nocx-2v80t.3.38): one that no subscriber took — its send
-			// failed, or nobody was bound — is still owed, and is stated
-			// before the next thing delivered, which is what closes the
-			// interval that ran through the overflow.
-			if s.owedMarker != nil && s.deliverRowEmission(*s.owedMarker) {
+		if s.owedMarker != nil {
+			if s.deliverRowEmission(*s.owedMarker) {
 				s.owedMarker = nil
+			} else {
+				select {
+				case <-s.rowWake:
+					continue
+				case <-s.rowsDone:
+					return
+				}
 			}
-			if !s.deliverRowEmission(em) && em.incomplete {
-				owed := em
-				s.owedMarker = &owed
+		}
+		em, ok := s.dequeueRowEmission()
+		if !ok {
+			select {
+			case <-s.rowWake:
+			case <-s.rowsDone:
+				return
 			}
 			continue
 		}
-		select {
-		case <-s.rowWake:
-		case <-s.rowsDone:
-			return
+		if !s.deliverRowEmission(em) && em.incomplete {
+			owed := em
+			s.owedMarker = &owed
 		}
 	}
 }
