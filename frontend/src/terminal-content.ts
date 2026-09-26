@@ -8267,6 +8267,20 @@ export class TerminalContent extends BasePaneContent {
     this.scrollback.blockManager.bindAttempt(attempt.id)
     const opened = this.scrollback.blockManager.runningBlock
     if (!opened) return
+    // Fit NOW, synchronously, against THIS block's own header — not on the
+    // first parsed write (nocx-2v80t.3.50). The running fact lands before
+    // the shell's echo is out (ADR-0024 §5, the comment at `bindBlock`
+    // above), so nothing of this command exists at the pty yet: a resize
+    // here cannot land inside the shell's echo or its output the way one at
+    // first-output could. Deferring to first-output was the residual bug —
+    // a pane's first command has no learned chrome to predict from, and a
+    // command whose header wraps differently than the last one's makes the
+    // learned prediction wrong — so either case still committed a resize
+    // once the command was already producing bytes. Measuring the real
+    // header here, before anything is deferred, means the prediction and
+    // the reality are the same read: `refitIfResized` becomes a no-op when
+    // the first parsed write later asks the same question.
+    this.refitIfResized()
     // The block just opened — give it the where-facts known right now and
     // remember the branch it recorded (nocx-9bpeq.16, spec §3).
     this._recordBlockWhere(opened)
