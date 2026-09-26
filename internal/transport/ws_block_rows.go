@@ -164,15 +164,22 @@ type blockStream struct {
 	// in order, and popped one at a time as the open in flight (and each one
 	// after it) finishes — never dropped. Cleared by detach.
 	reopen map[session.ID][]string
-	// closedWhileOpening names an attempt that was told block.closed — by an
-	// ordinary close or by abandonAttempt — while ITS OWN open was still the
-	// one in flight (opening[sid] == the attempt), keyed by session
-	// (nocx-2v80t.3.48). At most one open is ever in flight per session, so
-	// one entry is enough. openAttemptFor consumes it at install time: a
-	// match means the store's answer arrived too late to matter, and is
-	// discarded rather than resurrecting a block the renderer was already
-	// told is gone. Cleared by that consumption and by detach.
-	closedWhileOpening map[session.ID]string
+	// closedWhileOpening names the attempts that were told block.closed — by
+	// an ordinary close or by abandonAttempt — before their OWN open ever
+	// installed a block for them (nocx-2v80t.3.48): either the session's
+	// current opening attempt right now (opening[sid]), or one still queued
+	// behind it in reopen[sid], not yet even attempted. Several queued
+	// attempts can each be closed independently while one slow open occupies
+	// the session — a fast command started and finished behind it — so this
+	// is a set per session, not one string. Marked the moment the close
+	// finds the attempt in either place (markClosedWhileOpeningLocked), kept
+	// under the attempt's own id so it survives a queued attempt's later
+	// transition into "opening" (dequeueNextOpenLocked) unchanged, and
+	// consumed at install time: a match means the store's answer arrived too
+	// late to matter, and is discarded rather than resurrecting a block the
+	// renderer was already told is gone. Cleared by that consumption and by
+	// detach.
+	closedWhileOpening map[session.ID]map[string]struct{}
 	// lost are the fences whose boundary this coordinator accepted and could
 	// never tell the helper (nocx-2v80t.3.29), newest last, bounded by
 	// maxPendingEnds. A block whose fence is here was sealed as a gap, or is
@@ -997,24 +1004,58 @@ func (bs *blockStream) markEnteredLocked(sid session.ID, attempt string) {
 }
 
 // markClosedWhileOpeningLocked remembers that attempt was said block.closed
-// before its own open ever installed a block for it (nocx-2v80t.3.48): a
-// no-op unless attempt is exactly the one whose store call is in flight right
-// now (bs.opening[sid]), the only install a close this early could still
-// race. openAttemptFor consumes the mark at install time and discards the
-// result instead of resurrecting the block this close already ended.
+// before its own open ever installed a block for it (nocx-2v80t.3.48). Two
+// places an about-to-open attempt can be found — the session's own opening
+// attempt right now (bs.opening[sid]), or still queued behind it in
+// bs.reopen[sid], not yet even attempted — and the mark applies to either: a
+// close cannot tell which one a queued attempt will be by the time its own
+// open finally runs, so both are checked, under the SAME lock as the rest of
+// the close's own bookkeeping. A no-op for anything that is neither: the far
+// more common case of an attempt whose open was never asked for at all (see
+// abandonAttempt's own comment), which would otherwise leak a mark nothing
+// ever consumes.
 func (bs *blockStream) markClosedWhileOpeningLocked(sid session.ID, attempt string) {
-	if bs.opening[sid] != attempt {
+	queued := false
+	for _, a := range bs.reopen[sid] {
+		if a == attempt {
+			queued = true
+			break
+		}
+	}
+	if bs.opening[sid] != attempt && !queued {
 		return
 	}
 	if bs.closedWhileOpening == nil {
-		bs.closedWhileOpening = make(map[session.ID]string)
+		bs.closedWhileOpening = make(map[session.ID]map[string]struct{})
 	}
-	bs.closedWhileOpening[sid] = attempt
+	if bs.closedWhileOpening[sid] == nil {
+		bs.closedWhileOpening[sid] = make(map[string]struct{})
+	}
+	bs.closedWhileOpening[sid][attempt] = struct{}{}
+}
+
+// consumeClosedWhileOpeningLocked answers whether attempt was marked by
+// markClosedWhileOpeningLocked, and forgets it either way: consumed once, at
+// the one install its own open produces.
+func (bs *blockStream) consumeClosedWhileOpeningLocked(sid session.ID, attempt string) bool {
+	m := bs.closedWhileOpening[sid]
+	if m == nil {
+		return false
+	}
+	_, marked := m[attempt]
+	delete(m, attempt)
+	if len(m) == 0 {
+		delete(bs.closedWhileOpening, sid)
+	}
+	return marked
 }
 
 // popReopenLocked answers the next attempt queued behind an open in flight,
 // and forgets it — the front of the session's FIFO queue, so a later attempt
 // (C) never runs ahead of an earlier one (B) still waiting (nocx-2v80t.3.48).
+// A primitive: callers that go on to open the popped attempt use
+// dequeueNextOpenLocked instead, which reserves it atomically in the same
+// lock hold.
 func (bs *blockStream) popReopenLocked(sid session.ID) (string, bool) {
 	q := bs.reopen[sid]
 	if len(q) == 0 {
@@ -1027,6 +1068,86 @@ func (bs *blockStream) popReopenLocked(sid session.ID) (string, bool) {
 		bs.reopen[sid] = q[1:]
 	}
 	return next, true
+}
+
+// queuedOpenKind says what dequeueNextOpenLocked found for the next attempt
+// the session's reopen queue owes an open, or that it owed nothing.
+type queuedOpenKind int
+
+const (
+	queuedOpenNone queuedOpenKind = iota
+	// queuedOpenExisting names an attempt whose block is already installed —
+	// a duplicate request queued behind one that already succeeded. Safe to
+	// hand to openAttemptFor's own entry point, which for an existing block
+	// only reconciles current and pending rows; no store call, so no window
+	// to protect.
+	queuedOpenExisting
+	// queuedOpenReserved names an attempt this call has ALREADY reserved —
+	// opening[sid] (and waiting[sid], if there is no current) set under the
+	// very lock it was dequeued in. The caller must go straight to
+	// performOpen, never back through openAttemptFor's own guards, which
+	// would see that reservation and wrongly queue the attempt again.
+	queuedOpenReserved
+)
+
+// dequeueNextOpenLocked advances the session's reopen queue by one runnable
+// entry (nocx-2v80t.3.48): FIFO, skipping any entry sealed by an environment
+// entry in the meantime (nothing to open — openAttemptFor's own entered
+// guard would decide the same), and skipping every entry equal to
+// justSettled — the attempt the caller is discarding right now — so a
+// duplicate request queued for it is not resurrected the moment this
+// discard's own mark is consumed (justSettled is empty from the success and
+// openFinished tails, where a self entry is either safe — see
+// queuedOpenExisting — or the very retry that must not be dropped).
+//
+// For the entry it settles on that needs opening, this reserves it — under
+// THIS SAME lock, before returning — so there is NO WINDOW between "no
+// longer in the queue" and "now the session's opening attempt": a close or
+// abandon landing exactly there used to see the attempt in neither
+// bs.reopen nor bs.opening and forget it outright, the same defect class as
+// the one this bead started from, one handoff earlier (nocx-2v80t.3.48).
+func (bs *blockStream) dequeueNextOpenLocked(sid session.ID, justSettled string) (attempt string, kind queuedOpenKind) {
+	for {
+		next, ok := bs.popReopenLocked(sid)
+		if !ok {
+			return "", queuedOpenNone
+		}
+		if next == justSettled {
+			continue
+		}
+		if _, sealed := bs.entered[sid][next]; sealed {
+			continue
+		}
+		if bs.open[sid][next] != nil {
+			return next, queuedOpenExisting
+		}
+		if bs.opening == nil {
+			bs.opening = make(map[session.ID]string)
+		}
+		if bs.waiting == nil {
+			bs.waiting = make(map[session.ID]string)
+		}
+		if bs.current[sid] == nil {
+			bs.waiting[sid] = next
+		}
+		bs.opening[sid] = next
+		return next, queuedOpenReserved
+	}
+}
+
+// continueQueuedOpen carries out dequeueNextOpenLocked's own result, after
+// the lock that produced it is released: nothing, the ordinary
+// entry point for an attempt already installed, or straight into performOpen
+// for one just reserved atomically — never openAttemptFor's own guards
+// (nocx-2v80t.3.48; see queuedOpenReserved).
+func (bs *blockStream) continueQueuedOpen(s *WSServer, sid session.ID, attempt string, kind queuedOpenKind) {
+	switch kind {
+	case queuedOpenExisting:
+		bs.openAttemptFor(s, sid, attempt)
+	case queuedOpenReserved:
+		bs.performOpen(s, sid, attempt)
+	case queuedOpenNone:
+	}
 }
 
 // rememberLostLocked adds a lost fence, the oldest forgotten past the bound.
@@ -1712,7 +1833,18 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	}
 	bs.opening[sid] = attempt
 	bs.mu.Unlock()
+	bs.performOpen(s, sid, attempt)
+}
 
+// performOpen does the store call for an attempt already reserved —
+// opening[sid] (and waiting[sid], if there was no current) already set,
+// either by openAttemptFor's own reservation just above or atomically by
+// dequeueNextOpenLocked for one dequeued behind it — and its install or
+// discard tail. Split out of openAttemptFor so a dequeued attempt can go
+// straight here without passing back through openAttemptFor's own guards,
+// which would see the reservation dequeueNextOpenLocked just made and queue
+// the attempt again instead of opening it (nocx-2v80t.3.48).
+func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string) {
 	// With no store the block is still TRACKED, unkept — the same shape a
 	// refused open takes — so each of its ends says block.closed like any
 	// other: the renderer closes a block on that alone, and an untracked
@@ -1761,28 +1893,26 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 		delete(bs.waiting, sid)
 	}
 	_, attached := bs.sources[sid]
-	closedEarly := bs.closedWhileOpening[sid] == attempt
-	delete(bs.closedWhileOpening, sid)
+	closedEarly := bs.consumeClosedWhileOpeningLocked(sid, attempt)
 	if !attached || closedEarly {
-		// The attempt was already said block.closed, or the session already
-		// detached, while this open's store call was still in flight
-		// (nocx-2v80t.3.48): installing now would resurrect a block the
-		// renderer was already told is gone, or repopulate a detached
-		// session's maps. Discarded instead; a row the store did create for
-		// it is sealed through the ordinary seal path so it does not stand
-		// open in history forever, and rows collected under this attempt's
-		// own reservation are dropped with the rest of it — nothing else
-		// could have claimed them while this was the only opening attempt.
+		// The attempt was already said block.closed — while it was this
+		// session's opening attempt, or still queued behind one
+		// (markClosedWhileOpeningLocked) — or the session already detached,
+		// while this open's store call was still in flight (nocx-2v80t.3.48):
+		// installing now would resurrect a block the renderer was already
+		// told is gone, or repopulate a detached session's maps. Discarded
+		// instead; a row the store did create for it is sealed through the
+		// ordinary seal path so it does not stand open in history forever,
+		// and rows collected under this attempt's own reservation are
+		// dropped with the rest of it — nothing else could have claimed them
+		// while this was the only opening attempt.
 		var pending []pendingRows
 		if hadReservation {
 			pending = bs.pending[sid]
 			delete(bs.pending, sid)
 		}
 		confirm := bs.confirmers[sid]
-		next, ok := bs.popReopenLocked(sid)
-		for ok && next == attempt {
-			next, ok = bs.popReopenLocked(sid)
-		}
+		next, kind := bs.dequeueNextOpenLocked(sid, attempt)
 		bs.mu.Unlock()
 		for _, d := range pending {
 			confirmPendingRows(confirm, d)
@@ -1799,9 +1929,7 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 					"session", sid, "entry", attempt, "error", err)
 			}
 		}
-		if ok {
-			bs.openAttemptFor(s, sid, next)
-		}
+		bs.continueQueuedOpen(s, sid, next, kind)
 		return
 	}
 	if bs.open == nil {
@@ -1830,7 +1958,7 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	if len(pending) > 0 {
 		bs.flushing[sid] = true
 	}
-	next, ok := bs.popReopenLocked(sid)
+	next, kind := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
 	if len(pending) > 0 {
 		bs.flushPendingRows(s, sid, b, pending, confirm)
@@ -1838,12 +1966,10 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 	// A later open asked for while this one was in flight is made now rather
 	// than lost, in the order asked (nocx-2v80t.3.48). One queued for this
 	// SAME attempt (the bind's own retry, arriving after another caller's
-	// open already succeeded) is safe to make too: openAttemptFor's existing
-	// path finds the block already installed and only reconciles pending
-	// rows and current, never reopening the store.
-	if ok {
-		bs.openAttemptFor(s, sid, next)
-	}
+	// open already succeeded) is safe to make too: queuedOpenExisting finds
+	// the block already installed and only reconciles pending rows and
+	// current, never reopening the store.
+	bs.continueQueuedOpen(s, sid, next, kind)
 }
 
 // openFinished ends an open that did NOT produce a block — this attempt's own
@@ -1851,18 +1977,15 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 // was asked for while it was in flight, if one was: the next one in the
 // session's queue (blockStream.reopen), FIFO (nocx-2v80t.3.48). Unlike the
 // success and discard tails, a queued entry for this SAME attempt is never
-// skipped here: this attempt has not opened, so that entry is its own retry
-// (the ledger.bind's, most often) and dropping it would leave the attempt
-// stuck exactly as nocx-2v80t.3.42 measured.
+// skipped here (justSettled: ""): this attempt has not opened, so that entry
+// is its own retry (the ledger.bind's, most often) and dropping it would
+// leave the attempt stuck exactly as nocx-2v80t.3.42 measured.
 func (bs *blockStream) openFinished(s *WSServer, sid session.ID) {
 	bs.mu.Lock()
 	delete(bs.opening, sid)
-	delete(bs.closedWhileOpening, sid)
-	next, ok := bs.popReopenLocked(sid)
+	next, kind := bs.dequeueNextOpenLocked(sid, "")
 	bs.mu.Unlock()
-	if ok {
-		bs.openAttemptFor(s, sid, next)
-	}
+	bs.continueQueuedOpen(s, sid, next, kind)
 }
 
 func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {

@@ -202,12 +202,14 @@ func TestALateOpenAfterDetachInstallsNothing(t *testing.T) {
 
 // queueingOpenStore is a store with no ledger behind it at all: OpenBlockOutput
 // always succeeds, recording the order entries were opened in, and can pause
-// on its next call, one release at a time.
+// on its next call, one release at a time. It also counts seals, so a test
+// can tell a discarded open's row was sealed exactly once.
 type queueingOpenStore struct {
 	mu      sync.Mutex
 	order   []string
 	hold    chan struct{}
 	entered chan struct{}
+	seals   int
 }
 
 func (s *queueingOpenStore) OpenBlockOutput(_ context.Context, in content.OpenBlockOutput) (string, error) {
@@ -230,6 +232,9 @@ func (s *queueingOpenStore) AppendBlockRows(context.Context, content.AppendBlock
 }
 
 func (s *queueingOpenStore) CloseBlockRows(context.Context, content.CloseBlockRows) (content.BlockRowsSummary, error) {
+	s.mu.Lock()
+	s.seals++
+	s.mu.Unlock()
 	return content.BlockRowsSummary{}, nil
 }
 
@@ -241,6 +246,12 @@ func (s *queueingOpenStore) orderSoFar() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]string(nil), s.order...)
+}
+
+func (s *queueingOpenStore) sealCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.seals
 }
 
 // TestThreeAttemptsQueuedBehindOneOpenAllOpenOnceEachInOrder is Major 3
@@ -317,5 +328,85 @@ func TestOneAttemptQueuedBehindOneOpenStillOpens(t *testing.T) {
 	got := store.orderSoFar()
 	if len(got) != 2 || got[0] != "A" || got[1] != "B" {
 		t.Fatalf("opened %v, want [A B]", got)
+	}
+}
+
+// TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing is the same defect
+// one handoff earlier (nocx-2v80t.3.48, review round 5's follow-up): B is not
+// yet even the session's opening attempt when its close arrives, only queued
+// behind A. markClosedWhileOpeningLocked used to check ONLY bs.opening[sid],
+// so a close for a merely-queued attempt was not remembered at all — its
+// later open, once the queue reached it, installed unconditionally, exactly
+// the resurrection this bead started from. Fixed by having the close search
+// the queue too, and by making the queue's advance (dequeueNextOpenLocked)
+// reserve the next attempt atomically under the same lock it is dequeued in,
+// so there is no gap where it is neither queued nor yet the opening attempt
+// for a close arriving in the handoff to miss. Paired with
+// TestOneAttemptQueuedBehindOneOpenStillOpens, the ordinary queued open with
+// no close racing it.
+func TestAQueuedAttemptClosedWhileAnotherOpensInstallsNothing(t *testing.T) {
+	e := newLifecycleTestEnv(t)
+	sid := session.ID(e.openSession(t, 1))
+	release := make(chan struct{})
+	store := &queueingOpenStore{hold: release, entered: make(chan struct{}, 1)}
+	e.ws.blockRowsStore = store
+	e.ws.AttachBlockRows(sid)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+	}()
+	select {
+	case <-store.entered:
+	case <-time.After(wantWithin):
+		t.Fatal("A's open never reached the store")
+	}
+
+	// B asks while A is still in flight: queued behind A, not yet opening.
+	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	bs := e.ws.blockStream
+	bs.mu.Lock()
+	queued := append([]string(nil), bs.reopen[sid]...)
+	bs.mu.Unlock()
+	if len(queued) != 1 || queued[0] != "B" {
+		t.Fatalf("reopen queue = %v, want [B] before its close", queued)
+	}
+
+	// B's own command completes and its interval ends while B is still only
+	// queued — well before A's open resolves, let alone before B's own open
+	// is ever attempted.
+	e.ws.closeBlockRows(sid, "B", 0, nil, "", false)
+	closedB := awaitBlockClosed(t, e)
+	if closedB.EntryID != "B" || closedB.Kept {
+		t.Fatalf("block.closed = %+v, want %q not kept", closedB, "B")
+	}
+
+	// A's open now succeeds, and the queue advances to B's — which must
+	// still be ATTEMPTED (not silently skipped: the store call and its seal
+	// are the thing under test), just not installed.
+	close(release)
+	<-done
+
+	got := store.orderSoFar()
+	if len(got) != 2 || got[0] != "A" || got[1] != "B" {
+		t.Fatalf("opened %v, want [A B] — B's own open must still be attempted", got)
+	}
+
+	bs.mu.Lock()
+	_, hasBlock := bs.open[sid]["B"]
+	current := bs.current[sid]
+	bs.mu.Unlock()
+	if hasBlock {
+		t.Fatalf("B's late open installed a block after it was closed while still queued")
+	}
+	if current == nil || current.attempt != "A" {
+		t.Fatalf("A's own block should be current, got %+v", current)
+	}
+	if n := closedCount(t, e, sid, "B"); n != 0 {
+		t.Fatalf("a resurrected block sent block.closed again for B: %d extra", n)
+	}
+	if n := store.sealCount(); n != 1 {
+		t.Fatalf("B's row was sealed %d times, want exactly 1 (the discard's own seal)", n)
 	}
 }
