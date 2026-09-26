@@ -1,8 +1,8 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.30.0 on 2026-09-26 by its setup task, "The backlog tooling here matches shady2k-skills
-0.30.0 and is proved from main" (nocx-q8yjf.12). The protocol itself ships with the skills
+0.32.0 on 2026-09-27 by its setup task, "The backlog tooling here matches shady2k-skills
+0.32.0 and is proved from main" (nocx-q8yjf.13). The protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
@@ -129,8 +129,8 @@ keeps every later change.
   [`time-format.mjs`](../../.githooks/backlog-gate/time-format.mjs) beside it, which it reads
   work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.30.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.30.0`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.32.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.32.0`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -153,6 +153,12 @@ keeps every later change.
   recovered one at a time would have cut its hours by pick-up order into figures that look
   measured and are not; the owner chose the exemption. The list only shrinks: work handed
   in unclaimed later gets the rule's own fix, never a place on it.
+- **A run's time is its coordinator's clock** (0.32.0, nocx-q8yjf.13). A leaf handed in
+  under a feature or stage whose coordinator holds a claim counts as recorded without a
+  claim of its own: the coordinator waits while its workers work, so its span covers them.
+  A worker's own span, where one is written, adds only its effort by phase; subagent
+  workers write none (the run script counts a subagent inside its coordinator's session),
+  and the run script reads omp transcripts as well as Claude Code and Codex ones.
 - **Tracker layout:** the store is the SQLite database of the main checkout, outside git;
   `br` resolves it from every worktree. Its export `.beads/issues.jsonl` is a tracked file,
   and each publish commits the WHOLE export on whichever branch commits it — a code branch
