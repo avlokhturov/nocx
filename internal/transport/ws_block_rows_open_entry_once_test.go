@@ -37,6 +37,7 @@ type raceOpenStore struct {
 	mu      sync.Mutex
 	hold    chan struct{} // non-nil: the next post-bind open waits on it
 	entered chan struct{} // signalled when a held open is in flight
+	order   []string
 	seals   int
 	// closeFailures is how many of the FIRST CloseBlockRows calls answer an
 	// injected failure before calls succeed for real (nocx-2v80t.3.51's
@@ -60,7 +61,13 @@ func (s *raceOpenStore) OpenBlockOutput(ctx context.Context, in content.OpenBloc
 		s.entered <- struct{}{}
 		<-h
 	}
-	return s.ledger.OpenBlockOutput(ctx, in)
+	art, err := s.ledger.OpenBlockOutput(ctx, in)
+	if err == nil {
+		s.mu.Lock()
+		s.order = append(s.order, in.EntryID)
+		s.mu.Unlock()
+	}
+	return art, err
 }
 
 func (s *raceOpenStore) AppendBlockRows(ctx context.Context, in content.AppendBlockRows) error {
@@ -89,6 +96,15 @@ func (s *raceOpenStore) sealCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.seals
+}
+
+// orderSoFar answers the entry ids of every OpenBlockOutput that reached the
+// ledger and succeeded, in order — the same record queueingOpenStore keeps,
+// for tests driving this store's bind gate rather than its queue.
+func (s *raceOpenStore) orderSoFar() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.order...)
 }
 
 func (s *raceOpenStore) closeAttempts() int {
