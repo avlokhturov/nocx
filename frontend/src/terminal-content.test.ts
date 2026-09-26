@@ -6123,9 +6123,10 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       })
       // A real browser gives the header its final, wrapped height the
       // instant it exists (the command text is already in the DOM) — the
-      // fit that opens the block reads it synchronously, before any output
-      // (nocx-2v80t.3.50), so the mock has to answer that early too. A
-      // class check rather than the instance: the block does not exist yet.
+      // prompt's geometry prediction measures it there, on an off-flow
+      // probe, before the command exists (nocx-2v80t.3.50), so the mock
+      // has to answer that early too. A class check rather than the
+      // instance: the block does not exist yet.
       Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
         if (this.classList.contains('cmd-block')) {
           return {
@@ -16317,6 +16318,10 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
       if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
       if (this === inner.processBar) return rect(barShown() ? BAR : 0)
+      // The prediction measures the ProcessBar off-flow, on a clone —
+      // unhidden, so it lands here: the bar takes BAR shown or measured
+      // (nocx-2v80t.3.50).
+      if (this.classList.contains('ui-process-bar')) return rect(BAR)
       if (this.classList.contains('cmd-block')) return rect(headerHeight)
       return rect(0)
     }
@@ -16335,15 +16340,23 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
 
     let n = 0
-    /** Submit a command through the composer, up to the runtime's own
-     *  "running" fact — the point `_openAuthenticatedBlock` opens the block
-     *  and (nocx-2v80t.3.50) settles the grid's geometry, before any of the
-     *  shell's own bytes for it exist. Returns the attempt id `finishCommand`
-     *  needs to close it. */
-    const openCommand = (): string => {
+    /** Put a command in the composer — typing, and nothing else. The
+     *  geometry a command will run at settles HERE, at the prompt, before a
+     *  submit exists to disturb. */
+    const typeCommand = (text: string): void => {
+      // A keystroke, not a programmatic set: the editor fires onInputChange
+      // for user-driven changes only, and the prediction rides that event.
+      mounted.view.dispatch({
+        changes: { from: 0, to: mounted.view.state.doc.length, insert: text },
+      })
+    }
+    /** Enter: the submit, the running fact it publishes before the shell's
+     *  own bytes exist (ADR-0024 §5) — the point `_openAuthenticatedBlock`
+     *  opens the block. Returns the attempt id `finishCommand` needs to
+     *  close it. */
+    const submitCommand = (text: string): string => {
       n += 1
       const id = `att-${n}`
-      mounted.ed.insertText(`printf ${n}`)
       mounted.view.contentDOM.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
       )
@@ -16357,8 +16370,32 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
           state: 'open',
           origin: 'app',
           submitId: submitToken(client),
-          command: `printf ${n}`,
+          command: text,
         },
+      })
+      return id
+    }
+    /** One composer command: type it, then submit it. */
+    const openCommand = (): string => {
+      const text = `printf ${n + 1}`
+      typeCommand(text)
+      return submitCommand(text)
+    }
+    /** A command typed at the shell instead: its bytes are already on the
+     *  grid — echoed before any running fact could exist — when the fact
+     *  arrives. The order a composer submit can never produce, and the one
+     *  where a fit at block-open lands after the command started. */
+    const openShellCommand = (): string => {
+      n += 1
+      const id = `att-${n}`
+      client._sessions[0].fireData(`$ printf ${n}\r\n`)
+      renderer._fireWriteParsed()
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id, state: 'open', origin: 'shell', command: `printf ${n}` },
       })
       return id
     }
@@ -16404,12 +16441,29 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     content.setVisible(true)
     content.viewportChanged({ width: 936, height: pane })
     handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    // The opening prompt's own output: the grid's first parse is where the
+    // prediction first reads layout, so the prompt settles the grid before
+    // anyone types (a live pane has the same prompt behind it).
+    client._sessions[0].fireData('$ ')
+    renderer._fireWriteParsed()
     /** Every rectangle the grid was fitted to — each one a pty resize. */
     const fits = (): Array<{ width: number; height: number }> =>
       (renderer.fitViewport as Mock).mock.calls.map(
         (call) => call[0] as { width: number; height: number },
       )
-    return { sb, fits, runCommand, openCommand, finishCommand, setHeaderHeight, resize, restore }
+    return {
+      sb,
+      fits,
+      runCommand,
+      typeCommand,
+      submitCommand,
+      openCommand,
+      openShellCommand,
+      finishCommand,
+      setHeaderHeight,
+      resize,
+      restore,
+    }
   }
 
   it('commits no geometry across twenty commands in a pane whose size did not change', async () => {
@@ -16426,43 +16480,76 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
   })
 
-  it('a pane’s FIRST command commits no geometry once it is running (nocx-2v80t.3.50)', async () => {
-    // No calibration command before this one — a fresh pane has no learned
-    // chrome to predict the running cap from (`_runningChromePx` is still
-    // null), which is exactly the case the residual bug left uncovered: the
-    // old code deferred the grid's fit to the first parsed write, by which
-    // time the shell's own echo was already on the wire.
-    const { fits, openCommand, finishCommand, restore } = await paneWithLayout()
+  it('a pane’s FIRST command commits no geometry from Enter to close (nocx-2v80t.3.50)', async () => {
+    // No calibration command before this one — the pane has run nothing,
+    // so no learned chrome stands behind the prediction; it is the typed
+    // text's own measured header or nothing. The snapshot sits between
+    // typing and Enter, where a person's submit begins: a fit committed at
+    // the submit, the running fact, the first parsed write or the close is
+    // a pty resize the command's own echo or output is already inside.
+    const { fits, typeCommand, submitCommand, finishCommand, resize, restore } =
+      await paneWithLayout()
     try {
-      const id = openCommand()
-      // The running fact opens the block and settles the geometry in the
-      // same tick — before the shell's echo, let alone the command's own
-      // output, reaches the renderer.
-      const afterOpen = fits().length
+      typeCommand('printf 1')
+      const before = fits().length
+      const id = submitCommand('printf 1')
       finishCommand(id)
-      expect(fits().length).toBe(afterOpen)
+      expect(fits().length).toBe(before)
+      // The pairing: the grid is not frozen — a genuine pane resize still
+      // commits, exactly once.
+      resize(776)
+      expect(fits().length).toBe(before + 1)
     } finally {
       restore()
     }
   })
 
-  it('a command whose header wraps to a second line commits no geometry once it is running (nocx-2v80t.3.50)', async () => {
+  it('a command whose header wraps to a second line commits no geometry from Enter to close (nocx-2v80t.3.50)', async () => {
     // A short title fits one line; a long one wraps to two, taking more of
-    // the pane than the LAST command's header did. The old code measured
-    // the cap the same way regardless, but only committed it on the first
-    // parsed write — after the shell's echo was already out for THIS
-    // command, whose header nothing had predicted.
-    const { fits, runCommand, openCommand, finishCommand, setHeaderHeight, restore } =
-      await paneWithLayout()
+    // the pane than the LAST command's header did — no prediction made from
+    // the last command can be this command's answer. The snapshot sits
+    // between typing and Enter: settling this command's geometry later than
+    // that is a resize inside its own echo or output.
+    const {
+      fits,
+      runCommand,
+      typeCommand,
+      submitCommand,
+      finishCommand,
+      setHeaderHeight,
+      resize,
+      restore,
+    } = await paneWithLayout()
     try {
       runCommand()
       setHeaderHeight(2 * HEADER)
-      const id = openCommand()
-      // Settled here, against the wrapped header — before this command's
-      // own echo or output exists.
-      const afterOpen = fits().length
+      typeCommand('printf 2')
+      const before = fits().length
+      const id = submitCommand('printf 2')
       finishCommand(id)
-      expect(fits().length).toBe(afterOpen)
+      expect(fits().length).toBe(before)
+      resize(776)
+      expect(fits().length).toBe(before + 1)
+    } finally {
+      restore()
+    }
+  })
+
+  it('a shell-originated start commits no geometry after its bytes are out (nocx-2v80t.3.50)', async () => {
+    // Typed at the shell, not the composer: the echo is on the grid before
+    // any running fact could exist, so the block opens AFTER the command
+    // started and a fit at the fact lands inside it. First command of the
+    // pane, so nothing was learned that could be right by luck. Whatever
+    // height the grid needs while this command runs had to be true before
+    // its bytes went out.
+    const { fits, openShellCommand, finishCommand, resize, restore } = await paneWithLayout()
+    try {
+      const before = fits().length
+      const id = openShellCommand()
+      finishCommand(id)
+      expect(fits().length).toBe(before)
+      resize(776)
+      expect(fits().length).toBe(before + 1)
     } finally {
       restore()
     }

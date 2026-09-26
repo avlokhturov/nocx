@@ -1741,6 +1741,28 @@ export function createRunningBlock(
 }
 
 /**
+ * The off-flow probe for "how tall will this command's running header be"
+ * (nocx-2v80t.3.50): the same header a running block will carry, built for
+ * MEASUREMENT alone — the caller appends it beside the real blocks, reads
+ * its height, then removes it. The prompt's geometry prediction reads it so
+ * a command's grid height is settled before the command exists; building
+ * that header a second way here would be two owners of one markup, free to
+ * drift apart and mispredict exactly the wraps the prediction is for.
+ */
+export function createRunningHeaderProbe(
+  command: string,
+  cwd: string,
+  location: string,
+  store: CommandSnapshotStore,
+): HTMLElement {
+  const wrapper = document.createElement('div')
+  wrapper.className = 'cmd-block cmd-block-running'
+  wrapper.dataset.blockKind = 'command'
+  wrapper.appendChild(createHeader('command', command, cwd, location, 'running', store, 'shell'))
+  return wrapper
+}
+
+/**
  * Freeze a running block: replace it with a frozen version.
  *
  * `status` is the presentation, never derived from the exit code alone:
