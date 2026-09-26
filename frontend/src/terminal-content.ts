@@ -105,6 +105,7 @@ import type { BlockNotice, BlockNoticeState } from './ui/block-notice'
 import type { Capture, HistoryRecorded, Redaction } from './generated/history.recorded'
 import {
   blockOutputText,
+  createRunningHeaderProbe,
   renderRecordedCommand,
   toolCallExpansion,
   setBlockWhere,
@@ -3041,6 +3042,11 @@ export class TerminalContent extends BasePaneContent {
             // fresh one (design §8.9.2); the ghost text re-anchors.
             this.completion?.onDocChanged()
             this.promptVault?.onDocChanged(text)
+            // The grid settles to the height THIS text will run at —
+            // measured while nothing is running, so Enter starts a command
+            // whose geometry is already true (nocx-2v80t.3.50). A no-op
+            // unless the text's own header changed the prediction.
+            if (this.scrollback?.mode === 'idle') this.refitIfResized()
           },
           /** A programmatic clear (submit, Esc, Ctrl-C): the vault surfaces
            *  hold stale findings over a cleared line. */
@@ -5222,6 +5228,18 @@ export class TerminalContent extends BasePaneContent {
   private refitIfResized(): void {
     const v = this._latestViewport
     if (!v) return
+    const sb = this.scrollback
+    if (sb && sb.mode === 'running') {
+      // While a command runs, the output-driven refit may only SHRINK the
+      // grid to the running cap — the zn4d rescue for a header taller than
+      // the prompt predicted. Growing here is the pty resize the command's
+      // own bytes are inside (nocx-2v80t.3.50): the height a command runs
+      // at was settled at the prompt, and a real pane resize takes
+      // viewportChanged, which never runs through here.
+      const cap = sb.runningLiveCap
+      const last = this.lastFitGeometry
+      if (cap !== null && last && last.height <= cap) return
+    }
     this.fitUsableViewport(this.usableViewport(v))
   }
 
@@ -5248,9 +5266,11 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * What the running block's header and the ProcessBar took off the pane's
-   * terminal area the last time a command ran here: the pane's terminal area
-   * less the running cap. Null until a command has run (nocx-2v80t.3.46).
+   * The chrome — ProcessBar plus running header — the LAST command took off
+   * the pane: the terminal area less its running cap. The prompt height's
+   * FALLBACK for when nothing measures (nocx-2v80t.3.46); the primary is
+   * the typed text's own measured prediction (`_promptRunningHeightPx`,
+   * nocx-2v80t.3.50). Null until a command has run.
    */
   private _runningChromePx: number | null = null
 
@@ -5287,19 +5307,18 @@ export class TerminalContent extends BasePaneContent {
    * nothing scrolls them, so the bottom of a tall inline TUI (its composer)
    * is unreachable (nocx-zn4d).
    *
-   * AT THE PROMPT IT IS THE SAME NUMBER, not the scroller. The grid is not on
-   * screen there (the live region is `height: 0`), and fitting it to the
-   * scroller made it breathe with the lifecycle: the composer at the prompt,
-   * nothing in the frame after a freeze, the ProcessBar and the header while
-   * running — 546, 676 and 560 px in one pane, 27, 33 and 28 rows, 221
-   * resizes in 500 commands. A resize that lands at a submit makes bash
-   * redraw its line with no newline, and the command's output then begins on
-   * that row, so a block's first row carried the command line. So the prompt
-   * keeps the grid a command will run in: the terminal area less the chrome
-   * the last command took. A pane that did not change size fits the same
-   * rectangle, which the guard in fitUsableViewport turns into no resize at
-   * all; a pane that did change moves the terminal area, and the grid with
-   * it, at once.
+   * AT THE PROMPT IT IS THE HEIGHT A COMMAND TYPED NOW WILL RUN AT. The
+   * grid is not on screen there (the live region is `height: 0`), and
+   * fitting it to the scroller made it breathe with the lifecycle: 546, 676
+   * and 560 px in one pane, 27, 33 and 28 rows, 221 resizes in 500
+   * commands. A resize that lands once a command's bytes are out makes
+   * bash redraw its line into the block's first output row. So the prompt
+   * holds the running height MEASURED off-flow from the typed text's own
+   * header (nocx-2v80t.3.50), falling back to the chrome the last command
+   * took when nothing measures (nocx-2v80t.3.46). A pane that did not
+   * change size fits the same rectangle, which the guard in
+   * fitUsableViewport turns into no resize at all; a pane that did change
+   * moves the terminal area, and the grid with it, at once.
    *
    * The terminal owning the pane (fullscreen, unstructured) is sized from
    * the scroller, as before.
@@ -5315,10 +5334,65 @@ export class TerminalContent extends BasePaneContent {
       this._runningChromePx = this._terminalAreaPx(area) - cap
       return cap
     }
-    if (mode === 'idle' && this._runningChromePx !== null) {
-      return this._terminalAreaPx(area) - this._runningChromePx
+    if (mode === 'idle') {
+      // The prediction is the owner of the prompt height; the learned
+      // chrome is its fallback for when measurement cannot answer.
+      const predicted = this._promptRunningHeightPx(area)
+      if (predicted !== null) return predicted
+      if (this._runningChromePx !== null) {
+        return this._terminalAreaPx(area) - this._runningChromePx
+      }
     }
     return scroller
+  }
+
+  /**
+   * The height a command typed into the composer RIGHT NOW will run at:
+   * the terminal area less the chrome a running command takes — the
+   * ProcessBar and the header this text will open — both measured
+   * off-flow, because neither is in the flow at the prompt. Null when
+   * either refuses to measure (jsdom without layout, no editor); the
+   * caller falls back to the learned chrome (nocx-2v80t.3.50).
+   */
+  private _promptRunningHeightPx(area: HTMLElement): number | null {
+    const editor = this.editor
+    const bar = this.processBar
+    const sb = this.scrollback
+    if (!editor || !sb) return null
+    const barPx = bar ? this._offFlowHeightPx(bar, bar.parentElement ?? area) : null
+    if (barPx === null) return null
+    const probe = createRunningHeaderProbe(
+      editor.getDoc() || '(empty)',
+      this._cwd,
+      this._host ?? '',
+      sb.snapshotStore,
+    )
+    const headerPx = this._offFlowHeightPx(probe, sb.scrollbackInner)
+    if (headerPx === null) return null
+    return this._terminalAreaPx(area) - barPx - headerPx
+  }
+
+  /**
+   * Measure an element that is not in the flow — the ProcessBar at the
+   * prompt, a header whose block does not exist — on a clone of it placed
+   * beside the real one: same classes, same container width, taken out of
+   * flow and hidden so nothing visible moves. Null when the clone measures
+   * nothing at all — never 0, which would read as "takes no space" and
+   * over-fit the grid.
+   */
+  private _offFlowHeightPx(el: HTMLElement, parent: HTMLElement): number | null {
+    const clone = el.cloneNode(true) as HTMLElement
+    clone.hidden = false
+    clone.style.position = 'absolute'
+    clone.style.visibility = 'hidden'
+    clone.style.left = '-9999px'
+    parent.appendChild(clone)
+    try {
+      const height = clone.getBoundingClientRect().height
+      return height > 0 ? height : null
+    } finally {
+      clone.remove()
+    }
   }
 
   private usableViewport(viewport: ContentViewport): ContentViewport {
@@ -8267,20 +8341,14 @@ export class TerminalContent extends BasePaneContent {
     this.scrollback.blockManager.bindAttempt(attempt.id)
     const opened = this.scrollback.blockManager.runningBlock
     if (!opened) return
-    // Fit NOW, synchronously, against THIS block's own header — not on the
-    // first parsed write (nocx-2v80t.3.50). The running fact lands before
-    // the shell's echo is out (ADR-0024 §5, the comment at `bindBlock`
-    // above), so nothing of this command exists at the pty yet: a resize
-    // here cannot land inside the shell's echo or its output the way one at
-    // first-output could. Deferring to first-output was the residual bug —
-    // a pane's first command has no learned chrome to predict from, and a
-    // command whose header wraps differently than the last one's makes the
-    // learned prediction wrong — so either case still committed a resize
-    // once the command was already producing bytes. Measuring the real
-    // header here, before anything is deferred, means the prediction and
-    // the reality are the same read: `refitIfResized` becomes a no-op when
-    // the first parsed write later asks the same question.
-    this.refitIfResized()
+    // NO fit at the open (nocx-2v80t.3.50): the height a command runs at
+    // was settled at the prompt, measured from the typed text, before any
+    // bytes moved. The running fact arrives AFTER the command's echo for
+    // every shell-originated start, so a fit here — the first round of
+    // this bead moved one here from the first parsed write — is a resize
+    // inside that echo, the corruption this bead exists for. The output
+    // path may still shrink the grid to the cap it fails to fit within
+    // (refitIfResized's running guard, nocx-zn4d).
     // The block just opened — give it the where-facts known right now and
     // remember the branch it recorded (nocx-9bpeq.16, spec §3).
     this._recordBlockWhere(opened)
