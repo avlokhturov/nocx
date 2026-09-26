@@ -250,39 +250,162 @@ func (s *hostSession) drainRequested() bool {
 	return s.rowsDrainDone != nil
 }
 
+// The shutdown drain's give-up machinery (nocx-2v80t.3.54). drainRequested
+// tells the pump "stop() is waiting"; these tell it "the waiting ended":
+// either the pump's own bounded send ran past stopGrace, or stop()'s wait
+// on the drain ran out and abandonRowsDrain ended the drain by fiat.
+// Either way the latch is one-way — nothing further is attempted, and
+// every emission walked past afterwards is stated as a loss rather than
+// silently dropped.
+
+// drainAbandoned answers whether the give-up latch is set.
+func (s *hostSession) drainAbandoned() bool {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	return s.rowDrainAbandoned
+}
+
+// latchDrainAbandoned sets the give-up latch: one drain-time send already
+// ran past its bound — the sink is not merely slow, it is wedged — so
+// nothing further in this drain is attempted.
+func (s *hostSession) latchDrainAbandoned() {
+	s.rowMu.Lock()
+	s.rowDrainAbandoned = true
+	s.rowMu.Unlock()
+}
+
+// abandonRowsDrain is stop()'s one bound on the drain wait. It runs only
+// when that bound ran out with the pump unreachable — stuck inside a send
+// that took deliverForPump's unbounded branch before the drain was armed,
+// which no arm can interrupt — and it ends the drain by fiat: it latches
+// the give-up flag, so a pump that much later unblocks attempts nothing
+// more; it states the in-flight send's loss by name; and it drops and
+// states every still-queued emission. The queue is emptied here exactly
+// once, so the pump's own walk-past-and-count can never state a loss
+// twice: whichever side reaches an emission first states it, and the
+// other sees it gone. The buffer's own incomplete markers are not
+// re-counted — their loss was stated at the overflow, before delivery was
+// ever attempted.
+func (s *hostSession) abandonRowsDrain() {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	s.rowDrainAbandoned = true
+	if s.rowSending {
+		if s.rowInFlight.incomplete {
+			s.log.Warn("session row pump: the send in flight at shutdown was the buffer's own incomplete marker; its loss was already counted",
+				"session", s.id.Session)
+		} else {
+			s.rowLossCountedSeq = s.rowSendSeq
+			s.stateRowLoss(s.rowInFlight)
+		}
+	}
+	for {
+		em, ok := s.dequeueRowEmissionLocked()
+		if !ok {
+			break
+		}
+		if em.incomplete {
+			s.log.Warn("session row pump: a queued incomplete marker was never delivered at shutdown; its loss was already counted",
+				"session", s.id.Session, "fromRow", em.from)
+			continue
+		}
+		s.stateRowLoss(em)
+	}
+}
+
 // deliverForPump is deliverRowEmission, bounded ONLY once stop() is
 // draining. The Sink interface takes no context and its one production
 // implementation (internal/helper/host.Host.write) is a plain,
-// deadline-less io.Writer call — there is no cancellation this package can
-// reach into for an in-flight send, checked by reading both. Outside a
-// drain this calls deliverRowEmission directly, unbounded, exactly as
-// before: a slow-but-alive subscriber is still worth an unbounded wait
-// during ordinary operation, and bounding every send would be a behaviour
-// change this bug does not ask for.
+// deadline-less io.Writer call behind a connection-wide writer mutex —
+// there is no cancellation this package can reach into for an in-flight
+// send, and no deadline a per-session drain may set: the wire is one
+// connection shared by every session on it (D12), and one session's end
+// must not poison another's writes. Outside a drain this calls
+// deliverRowEmission directly, unbounded, exactly as before: a
+// slow-but-alive subscriber is still worth an unbounded wait during
+// ordinary operation, and bounding every send would be a behaviour change
+// this bug does not ask for.
 //
 // During a drain, a send that never returns would hang stop() — and every
-// session teardown behind it — forever, with no way to interrupt it. Bounded
-// to stopGrace, the SAME grace the process's own tail already gets from
-// owner.stop, rather than a new invented duration: past it the delivery is
-// abandoned rather than waited on further. The goroutine left behind is the
-// pump's own last possible write for this session (a drain runs after
-// everything else, immediately before releaseConnection and rowsDone's
-// close), so there is no LATER frame it could ever land ahead of — the one
-// risk an abandoned write usually carries, ordering, does not apply to the
-// very last one.
-func (s *hostSession) deliverForPump(em rowEmission) bool {
+// session teardown behind it — forever, with no way to interrupt it.
+// Bounded to stopGrace, the SAME grace the process's own tail already
+// gets from owner.stop, rather than a new invented duration: past it the
+// delivery is abandoned rather than waited on further, the drain's
+// give-up latch is set, and the pump attempts nothing after it.
+//
+// Every send is registered for its duration (beginRowSend/endRowSend),
+// whichever branch runs it: the sweep that ends an overdue drain by fiat
+// must be able to name and count the one send it can no longer wait for.
+func (s *hostSession) deliverForPump(em rowEmission) (delivered, gaveUp bool) {
 	if !s.drainRequested() {
-		return s.deliverRowEmission(em)
+		s.beginRowSend(em)
+		ok := s.deliverRowEmission(em)
+		s.endRowSend()
+		return ok, false
 	}
+	s.beginRowSend(em)
+	defer s.endRowSend()
 	done := make(chan bool, 1)
 	go func() { done <- s.deliverRowEmission(em) }()
 	select {
 	case ok := <-done:
-		return ok
+		return ok, false
 	case <-time.After(stopGrace):
 		s.log.Warn("session row pump: a delivery at shutdown did not return within the grace period; abandoning it",
 			"session", s.id.Session, "incomplete", em.incomplete, "end", em.end)
-		return false
+		return false, true
+	}
+}
+
+// beginRowSend names the emission the pump is about to put on the wire, so
+// abandonRowsDrain can count a send it can no longer wait for; rowSendSeq
+// numbers the send, which is how the pump returning from the very send the
+// sweep stated recognises its loss as already stated (countRowLossOnce).
+func (s *hostSession) beginRowSend(em rowEmission) {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	s.rowSendSeq++
+	s.rowSending = true
+	s.rowInFlight = em
+}
+
+// endRowSend clears the in-flight registration; the seq stays, which is
+// what lets a sweep that ran DURING the send be attributed to it.
+func (s *hostSession) endRowSend() {
+	s.rowMu.Lock()
+	s.rowSending = false
+	s.rowMu.Unlock()
+}
+
+// stateRowLoss states one emission the drain gave up on, through the same
+// counter and log class the buffer's overflow uses: the statement is the
+// same — the block in flight ends without these rows — and rowsIncomplete
+// is the session's ONE loss counter, not a second one beside it.
+func (s *hostSession) stateRowLoss(em rowEmission) {
+	s.rowsIncomplete.Add(1)
+	kind := "rows"
+	switch {
+	case em.end:
+		kind = "interval end"
+	case em.clear:
+		kind = "clear boundary"
+	}
+	s.log.Warn("session row pump: output was not delivered at shutdown and is counted as a loss",
+		"session", s.id.Session, "kind", kind, "fromRow", em.from,
+		"lossesTotal", s.rowsIncomplete.Load())
+}
+
+// countRowLossOnce states em's loss unless it was already stated for this
+// very send by abandonRowsDrain: the sweep names the in-flight send by
+// seq, and whichever side reaches the loss first, it is stated exactly
+// once.
+func (s *hostSession) countRowLossOnce(em rowEmission) {
+	s.rowMu.Lock()
+	mine := s.rowLossCountedSeq == s.rowSendSeq
+	s.rowLossCountedSeq = 0
+	s.rowMu.Unlock()
+	if !mine {
+		s.stateRowLoss(em)
 	}
 }
 
@@ -293,6 +416,13 @@ func (s *hostSession) deliverForPump(em rowEmission) bool {
 func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 	s.rowMu.Lock()
 	defer s.rowMu.Unlock()
+	return s.dequeueRowEmissionLocked()
+}
+
+// dequeueRowEmissionLocked is dequeueRowEmission for a caller already
+// holding rowMu — abandonRowsDrain's sweep drains the queue under the lock
+// it holds rather than re-taking it per emission.
+func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 	if len(s.rowQueue) == 0 {
 		return rowEmission{}, false
 	}
@@ -344,38 +474,35 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 //     here restates nothing; it only stops waiting for a subscriber that is
 //     not coming back.
 //   - A send that BLOCKS (never returns): deliverForPump bounds it to
-//     stopGrace once draining. abandoned, once true, means one delivery
-//     already ran past that bound — the sink is not merely slow, it is
-//     wedged — so nothing further in this drain is attempted: skipping
-//     straight to "not delivered" for whatever is left avoids leaving a
-//     second abandoned goroutine racing the first one's eventual, unordered
-//     write.
+//     stopGrace once draining, and the FIRST send that runs past that
+//     bound latches the drain's give-up flag (drainAbandoned) — the sink
+//     is not merely slow, it is wedged. Past the latch nothing is
+//     attempted: no second abandoned goroutine racing the first one's
+//     eventual, unordered write, and no stopGrace per remaining item on a
+//     sink already known to be wedged. Every emission walked past then is
+//     stated as a loss (stateRowLoss), and stop() carries the same two
+//     ends on its own side: its wait on the drain is bounded by the same
+//     grace, and when a send that predates the arm never returns, its
+//     sweep (abandonRowsDrain) ends the drain by fiat and does the
+//     counting the pump cannot reach.
 func (s *hostSession) serveRows() {
-	// abandoned is local, not a field: it means "one drain-time delivery
-	// already ran past stopGrace this pump's whole lifetime", which only
-	// keeps meaning anything for the rest of THIS call — the pump never
-	// runs twice. Once true, nothing is attempted again: skipping straight
-	// to "not delivered" for whatever is left avoids leaving a second
-	// abandoned goroutine racing the first one's eventual, unordered write,
-	// and lets the drain (and stop() behind it) proceed at once rather than
-	// spending another stopGrace per remaining item on a sink already known
-	// to be wedged.
-	abandoned := false
 	for {
 		if s.owedMarker != nil {
-			delivered := false
-			if !abandoned {
-				delivered = s.deliverForPump(*s.owedMarker)
+			delivered, gaveUp := false, false
+			if !s.drainAbandoned() {
+				delivered, gaveUp = s.deliverForPump(*s.owedMarker)
+				if gaveUp {
+					s.latchDrainAbandoned()
+				}
 			}
 			switch {
 			case delivered:
 				s.owedMarker = nil
-			case abandoned || s.drainRequested():
-				if !abandoned {
+			case s.drainAbandoned() || s.drainRequested():
+				if !gaveUp {
 					s.log.Warn("session row pump: the owed incomplete marker could not be delivered at shutdown; the loss was already counted",
 						"session", s.id.Session)
 				}
-				abandoned = true
 				s.owedMarker = nil
 			default:
 				select {
@@ -400,13 +527,23 @@ func (s *hostSession) serveRows() {
 			}
 			continue
 		}
-		delivered := false
-		if !abandoned {
-			delivered = s.deliverForPump(em)
+		delivered, gaveUp := false, false
+		if !s.drainAbandoned() {
+			delivered, gaveUp = s.deliverForPump(em)
+			if gaveUp {
+				s.latchDrainAbandoned()
+			}
 		}
 		if !delivered && em.incomplete {
 			owed := em
 			s.owedMarker = &owed
+		} else if !delivered && (gaveUp || s.drainRequested()) {
+			// Not delivered at shutdown: stated as a loss, exactly once —
+			// unless the sweep already stated this very send's loss by
+			// name. A send that fails promptly outside a drain stays
+			// unstated, as before: the pump keeps retrying it the
+			// ordinary way, on the next wake.
+			s.countRowLossOnce(em)
 		}
 	}
 }

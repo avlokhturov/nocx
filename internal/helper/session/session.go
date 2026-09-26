@@ -423,8 +423,9 @@ type hostSession struct {
 	// acknowledged "written up to here" mark (rows.go).
 	// rowBufferBytes bounds the row buffer — the bytes the queue may hold,
 	// set at spawn from the person's setting (nocx-2v80t.3.36) — and
-	// rowQueuedBytes is what it holds now; rowsIncomplete counts the times
-	// it overflowed and ended a block incomplete.
+	// rowQueuedBytes is what it holds now; rowsIncomplete counts every block
+	// that ended without its rows: a buffer overflow (nocx-2v80t.3.36) and
+	// every emission the shutdown drain gave up on (nocx-2v80t.3.54).
 	// owedMarker is an incomplete marker no subscriber took, stated before
 	// the next delivery (rows.go, nocx-2v80t.3.38). The pump's alone.
 	owedMarker     *rowEmission
@@ -437,11 +438,26 @@ type hostSession struct {
 	// nocx-2v80t.3.52) — the event stop() waits on, under rowMu since it is
 	// written from stop()'s goroutine and read from the pump's.
 	rowsDrainDone chan struct{}
-	rowsConfirmed uint64
-	writer        *proto.SubscriberID
-	writerAtt     proto.AttachmentID
-	epoch         proto.LeaseEpoch
-	exit          *proto.SessionExitStatus
+	// The shutdown drain's one-way give-up state, all under rowMu
+	// (nocx-2v80t.3.54). rowDrainAbandoned latches the FIRST abandonment:
+	// one drain-time send ran past stopGrace, or stop()'s own wait on the
+	// drain ran out — past it nothing further is attempted, and whatever is
+	// left is stated as a loss rather than silently dropped.
+	// rowSending/rowInFlight name the send the pump currently has on the
+	// wire, so the side that stops waiting can still count what it cannot
+	// see finish; rowSendSeq numbers the sends and rowLossCountedSeq names
+	// the one send whose loss the sweep already stated, so the pump
+	// returning from that same send never states it twice.
+	rowDrainAbandoned bool
+	rowSending        bool
+	rowInFlight       rowEmission
+	rowSendSeq        int
+	rowLossCountedSeq int
+	rowsConfirmed     uint64
+	writer            *proto.SubscriberID
+	writerAtt         proto.AttachmentID
+	epoch             proto.LeaseEpoch
+	exit              *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -1263,11 +1279,27 @@ func (s *hostSession) stop() {
 	// sessionruntime.Session.Detach (stopSubscriber's screen-consumer
 	// cleanup) does not check availability, so it is unaffected by running
 	// after Fail.
-	<-s.requestRowsDrain()
+	// The wait itself is bounded by the same grace the process's own tail
+	// gets (stopGrace), not by the pump's good behaviour alone (finding 4):
+	// a send already in flight when the drain was armed took
+	// deliverForPump's unbounded branch — its drain check ran before the
+	// arm — and no arm reaches into a call already running. Past the bound
+	// the drain ends by fiat: abandonRowsDrain latches the pump's give-up
+	// flag, states the in-flight send's loss by name and every still-queued
+	// emission's beside it, and empties the queue, so a pump that much
+	// later unblocks attempts nothing more and this call returns within
+	// one bound whatever the sink does.
+	done := s.requestRowsDrain()
+	select {
+	case <-done:
+	case <-time.After(stopGrace):
+		s.abandonRowsDrain()
+	}
 	s.releaseConnection(nil)
-	// The row pump LAST: the drain above already delivered or resolved
-	// everything Fail could still produce, with subscribers still attached
-	// to receive it, so nothing is lost by ending the pump now.
+	// The row pump LAST: the drain above delivered or resolved everything
+	// Fail could still produce — or, having run out of grace, ended by fiat
+	// with every undelivered emission counted — so nothing is lost by
+	// ending the pump now.
 	close(s.rowsDone)
 	s.screen.Close()
 }
