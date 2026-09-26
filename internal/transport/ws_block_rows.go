@@ -36,6 +36,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"math"
 	"sync"
 	"unsafe"
 
@@ -201,15 +202,16 @@ type blockStream struct {
 	// slow before the block in flight ends incomplete.
 	budgets map[session.ID]int64
 	// flushingBytes is what a session's batch costs the buffer while
-	// flushPendingRows is delivering it to the store (nocx-2v80t.3.49). The
-	// caller takes the batch out of bs.pending before calling flushPendingRows
-	// so takePendingRows and requeuePendingRows never see it twice, but the
-	// rows have not landed either — AppendBlockRows can block for as long as
-	// the store is slow — so heldBytesLocked counts it from here, set to the
-	// batch's own cost before the first call and walked down by exactly what
-	// each call lands, until the batch is fully delivered (reaching zero) or
-	// a failure moves what remains back into bs.pending (requeuePendingRows,
-	// which clears this the same call).
+	// flushPendingRows is delivering it to the store (nocx-2v80t.3.49).
+	// takeForFlushLocked removes the batch from bs.pending and sets this in
+	// the same lock hold — the one writer in production — so
+	// requeuePendingRows never sees it twice, but the rows have not landed
+	// either — AppendBlockRows can block for as long as the store is slow —
+	// so heldBytesLocked counts it from here, set to the batch's own cost
+	// before the first call and walked down by exactly what each call lands,
+	// until the batch is fully delivered (reaching zero) or a failure moves
+	// what remains back into bs.pending (requeuePendingRows, which clears
+	// this the same call).
 	flushingBytes map[session.ID]int64
 	// attachGen counts this session's attachments, bumped once by every
 	// attach() call including the first (nocx-2v80t.3.51): a session that
@@ -267,10 +269,10 @@ func heldRowsBytes(rows []emulator.Row) int64 {
 }
 
 // pendingRowsBytes is what a whole batch of deliveries costs the buffer —
-// heldRowsBytes summed over each one — the measure flushPendingRows counts
-// its in-flight batch by (nocx-2v80t.3.49): every queue this stream holds
-// rows or closing screens in, and a batch blocked in the store is one of
-// them even though it left bs.pending to get there.
+// heldRowsBytes summed over each one — the measure beginFlushLocked counts
+// a batch's in-flight cost by (nocx-2v80t.3.49): every queue this stream
+// holds rows or closing screens in, and a batch blocked in the store is one
+// of them even though it left bs.pending to get there.
 func pendingRowsBytes(pending []pendingRows) int64 {
 	var n int64
 	for _, d := range pending {
@@ -279,19 +281,44 @@ func pendingRowsBytes(pending []pendingRows) int64 {
 	return n
 }
 
-// beginFlushLocked records a batch as flushingBytes the instant it leaves
-// bs.pending, under the SAME lock that removes it (nocx-2v80t.3.51): every
-// call site that extracts a batch to hand to flushPendingRows calls this
-// before unlocking, so there is no gap where the batch counts in neither
-// place — the previous fix set flushingBytes from inside flushPendingRows
-// itself, after the caller had already unlocked with the batch already out
-// of bs.pending, and a batch injected in exactly that window was admitted
-// past the buffer's own bound instead of overflowing it.
+// beginFlushLocked records a batch as flushingBytes (nocx-2v80t.3.51).
+// Production reaches it through takeForFlushLocked alone — the one helper
+// that extracts a batch on its way to flushPendingRows — and a test staging
+// an in-flight batch calls it to stand in for that caller.
 func (bs *blockStream) beginFlushLocked(sid session.ID, batch []pendingRows) {
 	if bs.flushingBytes == nil {
 		bs.flushingBytes = make(map[session.ID]int64)
 	}
 	bs.flushingBytes[sid] = pendingRowsBytes(batch)
+}
+
+// takeAllPendingRows is takeForFlushLocked's endRow for "the whole queue":
+// no delivery begins at or beyond the largest absolute row, so the split
+// would take everything and leave nothing behind — and is skipped entirely,
+// so the whole-queue take keeps the batch's own slice.
+const takeAllPendingRows uint64 = math.MaxUint64
+
+// takeForFlushLocked removes the session's pending batch — every delivery
+// below endRow, or the whole queue for takeAllPendingRows — from bs.pending
+// and counts it in flight, in the SAME lock hold the caller is already in
+// (nocx-2v80t.3.51). It is the only way a batch leaves bs.pending on its way
+// to flushPendingRows: while each caller extracted by hand, the count was a
+// separate step a call site could forget, and the review round proved it by
+// commenting the count out of one call site with every test staying green.
+// What a split leaves past endRow stays in bs.pending, counted where it
+// waits.
+func (bs *blockStream) takeForFlushLocked(sid session.ID, endRow uint64) []pendingRows {
+	batch := bs.pending[sid]
+	delete(bs.pending, sid)
+	if endRow != takeAllPendingRows {
+		var remaining []pendingRows
+		batch, remaining = splitPendingRowsAt(batch, endRow)
+		if len(remaining) > 0 {
+			bs.pending[sid] = remaining
+		}
+	}
+	bs.beginFlushLocked(sid, batch)
+	return batch
 }
 
 // heldBytesLocked is what the session's buffer holds now: the rows waiting
@@ -536,27 +563,17 @@ func splitPendingRowsAt(deliveries []pendingRows, endRow uint64) (before, after 
 
 func (bs *blockStream) takePendingRows(sid session.ID, attempt string) []pendingRows {
 	bs.mu.Lock()
-	next := bs.pending[sid]
-	delete(bs.pending, sid)
-	var endRow uint64
-	hasEnd := false
+	// Rows of the interval that follows wait behind the close parked for
+	// this attempt's end: everything below that end goes out with this
+	// batch, the rest stays queued for the block that follows.
+	endRow := takeAllPendingRows
 	for _, end := range bs.pendingCloses[sid] {
 		if end.attempt == attempt {
-			endRow, hasEnd = end.endRow, true
+			endRow = end.endRow
 			break
 		}
 	}
-	if hasEnd {
-		var remaining []pendingRows
-		next, remaining = splitPendingRowsAt(next, endRow)
-		if len(remaining) > 0 {
-			bs.pending[sid] = remaining
-		}
-	}
-	// This is the next batch flushPendingRows's own recursive continuation
-	// hands to itself — extracted here, so counted here (nocx-2v80t.3.51):
-	// see beginFlushLocked.
-	bs.beginFlushLocked(sid, next)
+	next := bs.takeForFlushLocked(sid, endRow)
 	bs.mu.Unlock()
 	return next
 }
@@ -875,9 +892,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		bs.pending[sid] = append(bs.pending[sid], pendingRows{
 			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
 		})
-		toFlush := bs.pending[sid]
-		delete(bs.pending, sid)
-		bs.beginFlushLocked(sid, toFlush)
+		toFlush := bs.takeForFlushLocked(sid, takeAllPendingRows)
 		bs.flushing[sid] = true
 		confirm := bs.confirmers[sid]
 		bs.mu.Unlock()
@@ -1426,15 +1441,10 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 	current := bs.current[sid]
 	if len(bs.pending[sid]) > 0 && !bs.flushing[sid] && !bs.closing[sid] &&
 		current != nil && current.attempt == attempt {
-		toFlush, remaining := splitPendingRowsAt(bs.pending[sid], endRow)
-		delete(bs.pending, sid)
-		if len(remaining) > 0 {
-			bs.pending[sid] = remaining
-		}
+		toFlush := bs.takeForFlushLocked(sid, endRow)
 		if len(toFlush) > 0 {
 			s.holdEndLocked(sid, &end)
 			bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
-			bs.beginFlushLocked(sid, toFlush)
 			bs.flushing[sid] = true
 			confirm := bs.confirmers[sid]
 			bs.mu.Unlock()
@@ -1983,10 +1993,8 @@ func (bs *blockStream) openAttemptFor(s *WSServer, sid session.ID, attempt strin
 			bs.mu.Unlock()
 			return
 		}
-		pending := bs.pending[sid]
-		delete(bs.pending, sid)
+		pending := bs.takeForFlushLocked(sid, takeAllPendingRows)
 		if len(pending) > 0 {
-			bs.beginFlushLocked(sid, pending)
 			bs.flushing[sid] = true
 		}
 		confirm := bs.confirmers[sid]
@@ -2150,11 +2158,9 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string, 
 	}
 	var pending []pendingRows
 	if !hadCurrent {
-		pending = bs.pending[sid]
-		delete(bs.pending, sid)
+		pending = bs.takeForFlushLocked(sid, takeAllPendingRows)
 	}
 	if len(pending) > 0 {
-		bs.beginFlushLocked(sid, pending)
 		bs.flushing[sid] = true
 	}
 	confirm := bs.confirmers[sid]
@@ -2203,16 +2209,16 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 		return
 	}
 	// This batch left bs.pending in the caller before this call — that is
-	// what let takePendingRows and requeuePendingRows treat it as one
+	// what let takeForFlushLocked and requeuePendingRows treat it as one
 	// slice instead of two — but it has not landed at the store either, and
 	// this call can block for as long as the store is slow. Without counting
 	// it somewhere, the bound sees nothing held here and lets rows that keep
 	// arriving accumulate a second buffer's worth behind this one
 	// (nocx-2v80t.3.49). flushingBytes is that count: EVERY caller of this
-	// function sets it via beginFlushLocked at the same lock hold that
-	// extracted this exact batch from bs.pending (nocx-2v80t.3.51) — never
-	// here, which would run after the caller had already unlocked with the
-	// batch out of bs.pending and counted nowhere in between.
+	// function extracted this exact batch through takeForFlushLocked, which
+	// set it in that same lock hold (nocx-2v80t.3.51) — never here, which
+	// would run after the caller had already unlocked with the batch out of
+	// bs.pending and counted nowhere in between.
 	// Owner: this stream, on behalf of the helper's attached session.
 	// Closing event: each successful append or the session detach.
 	for i, delivery := range pending {
