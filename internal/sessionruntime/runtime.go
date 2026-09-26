@@ -1705,6 +1705,38 @@ func (s *Session) ExpireRendezvous(nonce FenceNonce) error {
 
 // ------------------------------------------------------------------ failure
 
+// returnUnauthenticatedCapturesLocked gives every sighting-first capture
+// still waiting for its authenticated half back to the stream, for the same
+// reason eviction (evictRendezvousLocked) and an explicit expiry
+// ([Session.ExpireRendezvous]) already do: a sighting authorises nothing
+// (ADR-0024 decision 1), so it may hold rows while it waits but it may never
+// be the reason they are lost. The session's own end is the last event a
+// meeting still [RendezvousAwaitingAuthenticated] can ever be settled by —
+// there is no fence left to arrive after this — so [Session.Fail] calls this
+// exactly where it calls [Session.settlePendingLocked] for the OTHER pending
+// shape: a completion whose fence never arrived (nocx-2v80t.3.47).
+//
+// Order is [Session.rendezvousOrder]'s, oldest first, matching the order
+// [Session.evictRendezvousLocked] already settles captures in: at most one
+// meeting is ever the CURRENT holder ([Session.pendingCapture]), and giving
+// the others back first, in the order they were taken, is what lets
+// [Session.unwindCaptureWindowLocked] tell a capture that can still stream
+// its held rows in place from one a later capture's window has already
+// moved past — which it instead states as a counted loss, never invents an
+// order for.
+func (s *Session) returnUnauthenticatedCapturesLocked() {
+	for _, nonce := range s.rendezvousOrder {
+		e := s.rendezvous[nonce]
+		if e == nil || e.State != RendezvousAwaitingAuthenticated || e.captured == nil {
+			continue
+		}
+		s.returnObservationCaptureLocked(e.captured)
+		e.captured = nil
+		e.State = RendezvousExpired
+		e.PinnedSource = nil
+	}
+}
+
 // Fail ends the runtime. Its session becomes unavailable and writes are
 // revoked, and NOTHING is adopted: a surviving process under an invented
 // terminal state is not recovery, and transparent recovery needs complete
@@ -1718,6 +1750,12 @@ func (s *Session) Fail(cause string) error {
 	// It runs before the refusal below so that a second Fail is not the
 	// reason a parked record leaks.
 	s.settlePendingLocked(FenceNonce{})
+	// The other pending shape, closed the same way rather than left to leak:
+	// a sighting nobody authenticated authorised nothing while it waited, and
+	// the session ending must not be the reason its held rows are never seen
+	// (nocx-2v80t.3.47). Idempotent for the same reason: a second Fail finds
+	// every e.captured already nil.
+	s.returnUnauthenticatedCapturesLocked()
 	if s.avail == AvailabilityUnavailable {
 		return ErrUnavailable
 	}

@@ -1202,11 +1202,6 @@ func (s *hostSession) stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
-	// The row pump first: the runtime is about to be failed, and a pump
-	// draining a closed channel delivers nothing. Residual queued emissions
-	// die with the session — it is over, and nothing it streams can be
-	// attributed to anything any more.
-	close(s.rowsDone)
 	s.releaseConnection(nil)
 	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
@@ -1230,5 +1225,19 @@ func (s *hostSession) stop() {
 	if err := s.runtime.Fail("session ended"); err != nil {
 		s.log.Debug("session runtime already ended", "session", s.id.Session, "err", err)
 	}
+	// The row pump LAST, not first: Fail is itself one of the events that can
+	// still hand the bridge a row — a sighting nobody authenticated
+	// authorises nothing (ADR-0024 decision 1), so it may be holding rows
+	// when the session ends, and Fail is what gives them back
+	// (sessionruntime's returnUnauthenticatedCapturesLocked, nocx-2v80t.3.47).
+	// A pump closed before that settle cannot be handed anything it returns.
+	// serveRows (rows.go) always drains its queue to empty before it ever
+	// looks at rowsDone, so closing it here, after Fail, loses nothing Fail
+	// just enqueued; closing it BEFORE would let the pump exit on this
+	// channel while the queue is momentarily empty, orphaning whatever Fail
+	// enqueues a moment later — nobody is left to dequeue it. Once the
+	// runtime is unavailable nothing more will ever be produced, which is
+	// what makes this the right — and only safe — moment to end the pump.
+	close(s.rowsDone)
 	s.screen.Close()
 }
