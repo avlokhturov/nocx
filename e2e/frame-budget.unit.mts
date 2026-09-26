@@ -49,3 +49,18 @@ test('an idle page that cannot reach a refresh rate fails on its own', () => {
 test('no samples is a failure, not a pass', () => {
   assert.notDeepEqual(judgeFrames([], []).failures, [])
 })
+
+test('a p95 of exactly one dropped frame passes, whatever float noise its timestamps carry', () => {
+  // Measured on CI (run 36278497188, chromium): rAF intervals are differences
+  // of timestamps, so two display intervals came out 6e-11 ms over twice the
+  // idle median and failed a budget whose whole point is to allow one dropped
+  // frame at p95 (nocx-2v80t.3.60).
+  const idle = repeat(16.699999999953434, 120)
+  const scroll = [...repeat(16.699999999953434, 160), ...repeat(33.399999999965075, 19)]
+  const verdict = judgeFrames(idle, scroll)
+  assert.equal(verdict.p95Ms, 33.399999999965075)
+  assert.deepEqual(verdict.failures, [])
+  // Paired: a p95 a full frame beyond that still fails.
+  const late = [...repeat(16.699999999953434, 160), ...repeat(50.09999999997672, 19)]
+  assert.notDeepEqual(judgeFrames(idle, late).failures, [])
+})

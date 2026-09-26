@@ -29,6 +29,15 @@
 export const FRAME_TOLERANCE = 1.25
 export const P95_TOLERANCE = 2
 export const MAX_IDLE_INTERVAL_MS = 1000 / 50
+/**
+ * The noise an interval carries from being a difference of two rAF
+ * timestamps: measured at 6e-11 ms on CI (nocx-2v80t.3.60), where a p95 of
+ * exactly two display intervals — the one dropped frame the budget allows —
+ * came out over twice the idle median. A thousandth of a millisecond is far
+ * above that noise and far below any real frame difference: headless WebKit
+ * reports whole milliseconds, and a missed frame is a whole interval.
+ */
+export const FLOAT_NOISE_MS = 0.001
 
 export interface FrameVerdict {
   /** The display interval: the median of the idle intervals. */
@@ -58,12 +67,12 @@ export function judgeFrames(idle: readonly number[], scroll: readonly number[]):
         `the idle page ran at ${baselineMs} ms per frame, slower than ${MAX_IDLE_INTERVAL_MS} ms`,
       )
     }
-    if (medianMs > baselineMs * FRAME_TOLERANCE) {
+    if (medianMs > baselineMs * FRAME_TOLERANCE + FLOAT_NOISE_MS) {
       failures.push(
         `scroll median ${medianMs} ms is over ${FRAME_TOLERANCE} x the idle ${baselineMs} ms`,
       )
     }
-    if (p95Ms > baselineMs * P95_TOLERANCE) {
+    if (p95Ms > baselineMs * P95_TOLERANCE + FLOAT_NOISE_MS) {
       failures.push(`scroll p95 ${p95Ms} ms is over ${P95_TOLERANCE} x the idle ${baselineMs} ms`)
     }
   }
