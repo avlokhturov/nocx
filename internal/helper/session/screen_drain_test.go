@@ -97,6 +97,11 @@ func TestASubscriberThatReadsReceivesEveryRevisionTheScreenPublishes(t *testing.
 
 	deadline := time.Now().Add(hangLimit)
 	for {
+		// The wake-up channel is taken BEFORE the count, as every other sink
+		// wait in this package does: a frame landing after the count closes
+		// this channel, where one taken after it would be the replacement
+		// nothing closes (nocx-2v80t.3.56).
+		next := sink.waiter()
 		got := sink.wholeScreenFrames(hs.raw)
 		if len(got) >= revisions {
 			for i := range got[:revisions] {
@@ -110,7 +115,7 @@ func TestASubscriberThatReadsReceivesEveryRevisionTheScreenPublishes(t *testing.
 			t.Fatalf("only %d of %d whole screen frames arrived for the subscriber", len(got), revisions)
 		}
 		select {
-		case <-sink.waiter():
+		case <-next:
 		case <-time.After(hangLimit):
 			t.Fatalf("only %d of %d whole screen frames arrived for the subscriber", len(sink.wholeScreenFrames(hs.raw)), revisions)
 		}

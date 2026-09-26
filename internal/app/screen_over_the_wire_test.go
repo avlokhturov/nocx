@@ -155,6 +155,39 @@ func screenText(t *testing.T, payload []byte) string {
 	return b.String()
 }
 
+// waitForMarkerOnAnyRow waits, through the product's own frame read, for the
+// marker a plain printf drew. Not restart_screen_test.go's waitForMarker:
+// that one reads row 2 because its program clears the screen and places the
+// cursor on row 3, while a plain printf lands wherever the shell's prompt and
+// startup left the cursor — row 2 for bash on the Linux runner, another row on
+// macOS (nocx-2v80t.3.57).
+func waitForMarkerOnAnyRow(t *testing.T, a *App, sid string, marker string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	var lastScreen []string
+	for {
+		f, err := a.paneViews.Frame(sid)
+		if err == nil {
+			lastScreen = lastScreen[:0]
+			for row := range f.Lines {
+				line := f.Text(row)
+				if strings.Contains(line, marker) {
+					return
+				}
+				lastScreen = append(lastScreen, line)
+			}
+		} else {
+			lastErr = err
+		}
+		if !time.Now().Before(deadline) {
+			t.Fatalf("the marker %q never reached the screen read (last error: %v); the last screen read:\n%s",
+				marker, lastErr, strings.Join(lastScreen, "\n"))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 func draw(t *testing.T, opened transport.OpenedSession, text string) {
 	t.Helper()
 	if _, err := opened.Session.Write([]byte("printf '" + text + "\\n'\n")); err != nil {
@@ -186,7 +219,7 @@ func TestAScreenFrameOffTheWireConformsToContract(t *testing.T) {
 	if err := a.paneViews.Enrol(string(sid)); err != nil {
 		t.Fatalf("watching the pane: %v", err)
 	}
-	waitForMarker(t, a, sid, marker)
+	waitForMarkerOnAnyRow(t, a, string(sid), marker)
 
 	conn := dialRenderer(t, a)
 	attachRenderer(t, conn, string(sid))
@@ -227,7 +260,7 @@ func TestAMidSessionAttachReceivesTheBaselineBeforeAnyLaterFrame(t *testing.T) {
 	// screen through the product's own read.
 	const before = "DRAWN-BEFORE-THE-ATTACH"
 	draw(t, opened, before)
-	waitForMarker(t, a, sid, before)
+	waitForMarkerOnAnyRow(t, a, string(sid), before)
 
 	// The mid-session renderer attaches now — after the output exists, and
 	// before anything else is drawn. Frames published while no renderer was

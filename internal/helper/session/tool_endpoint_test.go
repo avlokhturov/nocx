@@ -38,7 +38,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"io"
 	"log/slog"
 	"net"
 	"os/exec"
@@ -51,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
+	"github.com/shady2k/nocx/internal/log/logtest"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/storage/storagetest"
 	"github.com/shady2k/nocx/internal/toolendpoint/panebind"
@@ -249,7 +249,10 @@ func TestEachCoordinatorsLocalPaneIsToldItsOwnToolEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bash is not installed and this test drives a real pane: %v", err)
 	}
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// logtest.Slog, not a discarded handler: a pane that names the wrong
+	// endpoint fails with the helper's own account of its launch beside it
+	// (nocx-2v80t.3.58).
+	log := logtest.Slog(t)
 	svc := session.New(session.Options{
 		Generation: coordinatorHash,
 		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: bash}, ""),
@@ -344,37 +347,65 @@ func mustPrintItsOwnToolEndpoint(t *testing.T, c *client.Client, endpoint, subsc
 	}
 	t.Cleanup(func() { _ = attached.Close() })
 
-	printed := `printf '` + toolEndpointMarker + `%s]\n' "$NOCX_TOOL_SOCKET"`
-	if _, err := attached.Write([]byte(printed + "\n")); err != nil {
-		t.Fatalf("ask the pane to print its tool endpoint: %v", err)
+	// The shell is asked only once it has PROMPTED: the variable is exported by
+	// the launch script (shellintegration's stage 1), and the launcher clears
+	// the one the daemon inherited, so a print typed before the script has run
+	// names "" — on a slow runner that was the first print's fate
+	// (nocx-2v80t.3.58). The prompt mark (OSC 133;A) is the shell saying the
+	// script is done, and it is read off the pane's own bytes: an event, not a
+	// duration. One reader owns the stream for both waits.
+	type readResult struct {
+		value string
+		ok    bool
+		err   error
+		seen  []byte
 	}
-
-	// The wait is on the pane's OWN bytes: the event is its printed line
-	// arriving, and toolEndpointWait only turns a shell that never speaks into a
-	// failure with a sentence.
-	deadline := time.After(toolEndpointWait)
-	read := make(chan string, 1)
+	prompted := make(chan struct{})
+	read := make(chan readResult, 1)
 	go func() {
 		var seen []byte
+		promptSeen := false
 		buf := make([]byte, 8*1024)
 		for {
 			n, readErr := attached.Read(buf)
 			if n > 0 {
 				seen = append(seen, buf[:n]...)
-				if value, ok := printedToolEndpoint(seen); ok {
-					read <- value
-					return
+				if !promptSeen && bytes.Contains(seen, []byte("\x1b]133;A")) {
+					promptSeen = true
+					close(prompted)
+				}
+				if promptSeen {
+					if value, ok := printedToolEndpoint(seen); ok {
+						read <- readResult{value: value, ok: true, seen: seen}
+						return
+					}
 				}
 			}
 			if readErr != nil {
-				read <- ""
+				read <- readResult{err: readErr, seen: seen}
 				return
 			}
 		}
 	}()
+
+	deadline := time.After(toolEndpointWait)
 	select {
-	case value := <-read:
-		return value
+	case <-prompted:
+	case r := <-read:
+		t.Fatalf("the pane's stream ended before its shell prompted: %v\npane wrote: %q", r.err, r.seen)
+	case <-deadline:
+		t.Fatalf("the pane's shell never prompted (no OSC 133;A)")
+	}
+	printed := `printf '` + toolEndpointMarker + `%s]\n' "$NOCX_TOOL_SOCKET"`
+	if _, err := attached.Write([]byte(printed + "\n")); err != nil {
+		t.Fatalf("ask the pane to print its tool endpoint: %v", err)
+	}
+	select {
+	case r := <-read:
+		if !r.ok {
+			t.Fatalf("the pane's stream ended before it printed its tool endpoint: %v\npane wrote: %q", r.err, r.seen)
+		}
+		return r.value
 	case <-deadline:
 		t.Fatalf("the pane never printed its tool endpoint")
 		return ""
