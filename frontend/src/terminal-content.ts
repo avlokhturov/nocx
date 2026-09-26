@@ -3044,9 +3044,11 @@ export class TerminalContent extends BasePaneContent {
             this.promptVault?.onDocChanged(text)
             // The grid settles to the height THIS text will run at —
             // measured while nothing is running, so Enter starts a command
-            // whose geometry is already true (nocx-2v80t.3.50). A no-op
-            // unless the text's own header changed the prediction.
-            if (this.scrollback?.mode === 'idle') this.refitIfResized()
+            // whose geometry is already true (nocx-2v80t.3.50). The
+            // measurement rides the next animation frame, however fast
+            // the keystrokes come, and the submit flushes it early
+            // (nocx-2v80t.3.55).
+            if (this.scrollback?.mode === 'idle') this._schedulePromptPrediction()
           },
           /** A programmatic clear (submit, Esc, Ctrl-C): the vault surfaces
            *  hold stale findings over a cleared line. */
@@ -5274,6 +5276,14 @@ export class TerminalContent extends BasePaneContent {
    */
   private _runningChromePx: number | null = null
 
+  /** The prediction's pending animation frame, if a keystroke scheduled
+   *  one and no frame has run since (nocx-2v80t.3.55). */
+  private _promptMeasureFrame: number | null = null
+  /** The text and width the last prediction measurement answered: a
+   *  keystroke that leaves both unchanged has nothing new to measure
+   *  (nocx-2v80t.3.55). */
+  private _promptMeasuredKey: { text: string; width: number } | null = null
+
   /**
    * The pane's TERMINAL AREA: the scroller plus whichever lifecycle chrome is
    * in the flow beside it right now — the inline composer at a prompt, the
@@ -5323,7 +5333,11 @@ export class TerminalContent extends BasePaneContent {
    * The terminal owning the pane (fullscreen, unstructured) is sized from
    * the scroller, as before.
    */
-  private _gridHeight(area: HTMLElement | undefined, viewport: ContentViewport): number {
+  private _gridHeight(
+    area: HTMLElement | undefined,
+    viewport: ContentViewport,
+    promptText: string = this.editor?.getDoc() ?? '',
+  ): number {
     const scroller = area && area.clientHeight > 0 ? area.clientHeight : viewport.height
     const sb = this.scrollback
     if (!sb || !area || area.clientHeight <= 0) return sb?.runningLiveCap ?? scroller
@@ -5337,7 +5351,7 @@ export class TerminalContent extends BasePaneContent {
     if (mode === 'idle') {
       // The prediction is the owner of the prompt height; the learned
       // chrome is its fallback for when measurement cannot answer.
-      const predicted = this._promptRunningHeightPx(area)
+      const predicted = this._promptRunningHeightPx(area, promptText)
       if (predicted !== null) return predicted
       if (this._runningChromePx !== null) {
         return this._terminalAreaPx(area) - this._runningChromePx
@@ -5347,14 +5361,66 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
+   * The typing-driven prediction, scheduled (nocx-2v80t.3.55): at most
+   * one measurement per animation frame, however fast the person types.
+   * The frame reads the text AT FIRE TIME, so a burst of keystrokes is
+   * one question about the text they left behind.
+   */
+  private _schedulePromptPrediction(): void {
+    if (this._promptMeasureFrame !== null) return
+    this._promptMeasureFrame = requestAnimationFrame(() => {
+      this._promptMeasureFrame = null
+      this._measurePromptPrediction(this.editor?.getDoc() ?? '')
+    })
+  }
+
+  /**
+   * A submit flushes the pending frame synchronously (nocx-2v80t.3.55):
+   * Enter is the last moment that is both inside the person's keystroke
+   * and before any byte of the command can move, so the height the
+   * command will run at is committed here rather than a frame later — a
+   * frame later the block is already open and the echo is on the grid.
+   * `doc` is the line being submitted, not the editor's text: the
+   * handoff emptied the composer before this call.
+   */
+  private _flushPromptPrediction(doc: string): void {
+    if (this._promptMeasureFrame === null) return
+    cancelAnimationFrame(this._promptMeasureFrame)
+    this._promptMeasureFrame = null
+    this._measurePromptPrediction(doc)
+  }
+
+  /**
+   * Measure and commit — skipped when neither the text nor the width
+   * changed since the last measurement answered that pair: the
+   * prediction it produced is already fitted, and building and wrapping
+   * the header again would buy the same rectangle. The width is the
+   * probe container's own clientWidth, the same number
+   * `_offFlowHeightPx` pins the clone to.
+   */
+  private _measurePromptPrediction(text: string): void {
+    const sb = this.scrollback
+    if (!sb || sb.mode !== 'idle') return
+    const width = sb.scrollbackInner.clientWidth
+    const key = this._promptMeasuredKey
+    if (key !== null && key.text === text && key.width === width) return
+    this._promptMeasuredKey = { text, width }
+    const v = this._latestViewport
+    if (!v) return
+    this.fitUsableViewport(this.usableViewport(v, text))
+  }
+
+  /**
    * The height a command typed into the composer RIGHT NOW will run at:
    * the terminal area less the chrome a running command takes — the
    * ProcessBar and the header this text will open — both measured
    * off-flow, because neither is in the flow at the prompt. Null when
    * either refuses to measure (jsdom without layout, no editor); the
-   * caller falls back to the learned chrome (nocx-2v80t.3.50).
+   * caller falls back to the learned chrome (nocx-2v80t.3.50). The text
+   * is passed because the submit flush calls this after the handoff
+   * emptied the editor (nocx-2v80t.3.55).
    */
-  private _promptRunningHeightPx(area: HTMLElement): number | null {
+  private _promptRunningHeightPx(area: HTMLElement, text: string): number | null {
     const editor = this.editor
     const bar = this.processBar
     const sb = this.scrollback
@@ -5362,7 +5428,7 @@ export class TerminalContent extends BasePaneContent {
     const barPx = bar ? this._offFlowHeightPx(bar, bar.parentElement ?? area) : null
     if (barPx === null) return null
     const probe = createRunningHeaderProbe(
-      editor.getDoc() || '(empty)',
+      text || '(empty)',
       this._cwd,
       this._host ?? '',
       sb.snapshotStore,
@@ -5386,6 +5452,20 @@ export class TerminalContent extends BasePaneContent {
     clone.style.position = 'absolute'
     clone.style.visibility = 'hidden'
     clone.style.left = '-9999px'
+    // The real element is a stretched flex child of this container: its
+    // width IS the container's clientWidth, and its text wraps at it. An
+    // absolute clone defaults to shrink-to-fit — wide enough to hold the
+    // whole title on one line — so a long command's wrapped height was
+    // mispredicted exactly when wrapping mattered (nocx-2v80t.3.55). The
+    // clone takes the same width, border-box, which is the box a
+    // stretched child occupies. Without a laid-out container there is no
+    // honest width, and jsdom's 0 leaves the clone as it was, so the
+    // layout mocks that answer by class keep answering.
+    const width = parent.clientWidth
+    if (width > 0) {
+      clone.style.width = `${width}px`
+      clone.style.boxSizing = 'border-box'
+    }
     parent.appendChild(clone)
     try {
       const height = clone.getBoundingClientRect().height
@@ -5395,13 +5475,16 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  private usableViewport(viewport: ContentViewport): ContentViewport {
+  private usableViewport(
+    viewport: ContentViewport,
+    promptText: string = this.editor?.getDoc() ?? '',
+  ): ContentViewport {
     const area = this.scrollback?.scrollbackArea
     // Zero before first layout — the delivered box is the better guess then,
     // and the next viewport delivery corrects it. Each axis falls back on its
     // own: jsdom reports 0 for both, a real pane mid-layout can report one.
     // The height is `_gridHeight`'s: the running cap, held at the prompt.
-    const height = this._gridHeight(area, viewport)
+    const height = this._gridHeight(area, viewport, promptText)
     // THE GRID'S BOX IS THE LIVE ROW'S CONTENT BOX (nocx-9bpeq.8). Rows carry
     // the pane gutter, the live region included, so the scroller's clientWidth
     // is the grid width PLUS that inset — fitting to clientWidth would put the
@@ -7887,6 +7970,13 @@ export class TerminalContent extends BasePaneContent {
     this._settleTimer = undefined
     clearTimeout(this.resizeTimer)
     this.resizeTimer = undefined
+    // And the prediction's pending frame: a callback landing on a disposed
+    // pane would measure nothing that exists (the same rule the paint
+    // frame's cancellation below keeps).
+    if (this._promptMeasureFrame !== null) {
+      cancelAnimationFrame(this._promptMeasureFrame)
+      this._promptMeasureFrame = null
+    }
     this._lifecycleUnsub?.()
     this._lifecycleUnsub = null
     this._integrationUnsub?.()
@@ -8138,6 +8228,12 @@ export class TerminalContent extends BasePaneContent {
     beforeWrite?: () => boolean
   }): { ledgerId: number | null; submitId: string | null } {
     const { doc, recordLine, author, takeKeys, sendLine, beforeWrite } = opts
+    // The pending prompt prediction flushes HERE (nocx-2v80t.3.55): the
+    // last moment that is both synchronous with the person's Enter and
+    // before any byte of this command can move. The handoff has already
+    // emptied the editor, so the measure runs against `doc` — the line
+    // being submitted — not against whatever the composer holds now.
+    this._flushPromptPrediction(doc)
     // The window this submission ARMS — null for the agent lane, whose bytes
     // never hold the grid's queue (takeKeys). Held by reference, not
     // re-read from the field later: see holdRawUntilSubmitted.
