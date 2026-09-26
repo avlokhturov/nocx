@@ -58,15 +58,25 @@ type orderedStallingSink struct {
 	stalled chan struct{}
 	release chan struct{}
 	changed chan struct{}
-	// failIncomplete makes the first incomplete marker's send fail, the way
-	// a dying connection answers it (nocx-2v80t.3.38).
-	failIncomplete bool
-	failed         chan struct{}
+	// failIncompleteTimes makes the incomplete marker's own send fail this
+	// many times before it starts succeeding, the way a dying connection
+	// answers it (nocx-2v80t.3.38); -1 fails forever, for a subscriber that
+	// must never be the one to take the marker.
+	failIncompleteTimes int
+	// failed closes on the marker's first failed send; exhausted closes on
+	// the LAST scheduled failure — the attempt after which failIncompleteTimes
+	// reaches zero — so a test can tell "it has failed at least once" from
+	// "every configured failure has now happened, the next attempt succeeds".
+	failed        chan struct{}
+	failedOnce    sync.Once
+	exhausted     chan struct{}
+	exhaustedOnce sync.Once
 }
 
 func newOrderedStallingSink() *orderedStallingSink {
 	return &orderedStallingSink{
 		stalled: make(chan struct{}), release: make(chan struct{}), changed: make(chan struct{}, 1),
+		failed: make(chan struct{}), exhausted: make(chan struct{}),
 	}
 }
 
@@ -99,13 +109,18 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 		return err
 	}
 	s.mu.Lock()
-	fail := doc.Incomplete && s.failIncomplete
-	if fail {
-		s.failIncomplete = false
+	fail := doc.Incomplete && s.failIncompleteTimes != 0
+	last := false
+	if fail && s.failIncompleteTimes > 0 {
+		s.failIncompleteTimes--
+		last = s.failIncompleteTimes == 0
 	}
 	s.mu.Unlock()
 	if fail {
-		close(s.failed)
+		s.failedOnce.Do(func() { close(s.failed) })
+		if last {
+			s.exhaustedOnce.Do(func() { close(s.exhausted) })
+		}
 		return errors.New("injected: the marker's send failed")
 	}
 	s.record(recordedDelivery{fromRow: f.FromRow, lostRows: doc.LostRows, rows: len(rows), incomplete: doc.Incomplete, raw: f.Payload})
@@ -355,8 +370,7 @@ func TestAWedgedSinkWithinTheBufferLosesNothing(t *testing.T) {
 // (TestAWedgedSinkPastTheBufferEndsTheBlockIncomplete delivers it once).
 func TestAFailedIncompleteMarkerIsStatedAgainBeforeTheNextDelivery(t *testing.T) {
 	sink := newOrderedStallingSink()
-	sink.failIncomplete = true
-	sink.failed = make(chan struct{})
+	sink.failIncompleteTimes = 1
 	hs := newBridgeOnlySession(t, sink)
 	bufferOf(hs, 2)
 	go hs.serveRows()
@@ -387,6 +401,104 @@ func TestAFailedIncompleteMarkerIsStatedAgainBeforeTheNextDelivery(t *testing.T)
 	}
 	if marks != 1 {
 		t.Fatalf("the marker reached the coordinator %d times, want once", marks)
+	}
+}
+
+// Two consecutive failed sends of the owed marker still do not let the end
+// that follows overtake it (nocx-2v80t.3.49): the marker is retried once
+// immediately (as the single-failure test above shows) and, when that retry
+// also fails, the pump parks rather than delivering whatever is dequeued next
+// — it only tries again on a wake, here the one enqueueing the end produces.
+// However many attempts the marker costs, nothing after it is ever sent
+// first.
+func TestTwoFailedIncompleteMarkerSendsStillPrecedeTheNextDelivery(t *testing.T) {
+	sink := newOrderedStallingSink()
+	sink.failIncompleteTimes = 2
+	hs := newBridgeOnlySession(t, sink)
+	bufferOf(hs, 2)
+	go hs.serveRows()
+	t.Cleanup(func() { close(hs.rowsDone) })
+	bridge := &rowBridge{hs: hs}
+	row := []emulator.Row{textRow("x")}
+	stallThePump(t, sink, bridge)
+
+	for i := uint64(1); i <= 10; i++ {
+		bridge.OutputRows(i, row, 0)
+	}
+	close(sink.release)
+	select {
+	case <-sink.exhausted: // both scheduled failures have happened
+	case <-time.After(2 * time.Second):
+		t.Fatal("the owed marker was not retried a second time on its own — a failed retry must not wait for the next emission")
+	}
+
+	bridge.IntervalEnd(endNonce(0xAB), 11, nil, false)
+	log := sink.waitUntil(func(log []recordedDelivery) bool {
+		last := lastOf(log)
+		return last != nil && last.end
+	})
+	if len(log) < 2 || !log[len(log)-2].incomplete || log[len(log)-2].fromRow != 3 {
+		t.Fatalf("the delivery before the end is %+v, want the owed incomplete marker at 3", log[len(log)-2])
+	}
+	marks := 0
+	for _, d := range log {
+		if d.incomplete {
+			marks++
+		}
+	}
+	if marks != 1 {
+		t.Fatalf("the marker reached the coordinator %d times, want once", marks)
+	}
+}
+
+// Attaching a subscriber wakes the row pump to retry an owed marker rather
+// than leaving it for the next row or end to arrive (session.go's attach,
+// nocx-2v80t.3.49): with the only bound subscriber failing every send, the
+// marker is owed to "nobody who will take it" until a second subscriber
+// attaches — and that attach alone, with no further output, is what lets the
+// marker finally land, on the fresh subscriber, ahead of anything else.
+func TestALateAttachReceivesTheOwedMarkerFirst(t *testing.T) {
+	stale := newOrderedStallingSink()
+	stale.failIncompleteTimes = -1 // this subscriber never takes the marker
+	hs := newBridgeOnlySession(t, stale)
+	hs.win = newWindow(2 * creditLimit)
+	hs.attachments = make(map[proto.AttachmentID]*attachment)
+	hs.now = time.Now
+	bufferOf(hs, 2)
+	go hs.serveRows()
+	t.Cleanup(func() { close(hs.rowsDone) })
+	bridge := &rowBridge{hs: hs}
+	row := []emulator.Row{textRow("x")}
+	stallThePump(t, stale, bridge)
+
+	for i := uint64(1); i <= 10; i++ {
+		bridge.OutputRows(i, row, 0)
+	}
+	close(stale.release)
+	<-stale.failed // the marker has failed at least once and is now owed
+
+	late := newRowsSink()
+	lateID := proto.SubscriberID(strings.Repeat("1a", 16)) // 32 hex chars, proto.SessionBytes's own shape
+	if _, err := hs.attach(proto.AttachParams{Subscriber: lateID, Session: hs.id, Offset: 0, Fresh: true},
+		late, func() proto.AttachmentID { return "att-late" }, hs.log); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+
+	select {
+	case <-late.changed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("attaching a subscriber never woke the pump to retry the owed marker")
+	}
+	frames := late.rowFrames()
+	if len(frames) == 0 {
+		t.Fatal("the late-attaching subscriber saw no rows-plane frame")
+	}
+	var doc proto.OutputRowsDoc
+	if err := json.Unmarshal(frames[0].Payload, &doc); err != nil {
+		t.Fatalf("decode the first frame the late attach received: %v", err)
+	}
+	if !doc.Incomplete {
+		t.Fatalf("the first frame the late attach received was %+v, want the owed incomplete marker", doc)
 	}
 }
 

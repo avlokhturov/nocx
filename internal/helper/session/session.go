@@ -695,6 +695,13 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		}
 	}
 	s.mu.Unlock()
+	// A subscriber just bound is a new fan-out target for whatever the row
+	// pump owes: an owed incomplete marker (rows.go) only ever retries on a
+	// wake, and without this the pump has no reason to try again until the
+	// next row or end arrives — which is exactly the emission that must not
+	// overtake it (nocx-2v80t.3.49). Waking here costs nothing when nothing
+	// is owed: the pump dequeues, finds the queue empty, and parks again.
+	s.wakeRows()
 	s.stopSubscriber(old)
 	go s.serve(ctx, sub, log)
 	if s.runtime != nil {

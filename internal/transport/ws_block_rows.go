@@ -200,6 +200,17 @@ type blockStream struct {
 	// server's configured value: what may be held here while the store is
 	// slow before the block in flight ends incomplete.
 	budgets map[session.ID]int64
+	// flushingBytes is what a session's batch costs the buffer while
+	// flushPendingRows is delivering it to the store (nocx-2v80t.3.49). The
+	// caller takes the batch out of bs.pending before calling flushPendingRows
+	// so takePendingRows and requeuePendingRows never see it twice, but the
+	// rows have not landed either — AppendBlockRows can block for as long as
+	// the store is slow — so heldBytesLocked counts it from here, set to the
+	// batch's own cost before the first call and walked down by exactly what
+	// each call lands, until the batch is fully delivered (reaching zero) or
+	// a failure moves what remains back into bs.pending (requeuePendingRows,
+	// which clears this the same call).
+	flushingBytes map[session.ID]int64
 }
 
 // DefaultBlockRowsBufferBytes is the coordinator's buffer when nothing is
@@ -227,12 +238,28 @@ func heldRowsBytes(rows []emulator.Row) int64 {
 	return n
 }
 
-// heldBytesLocked is what the session's buffer holds now: the rows waiting
-// for the store and the rows held past a parked boundary, and the closing
-// screens of ends waiting behind them. Derived from what is held, so it
-// cannot drift from it.
-func (bs *blockStream) heldBytesLocked(sid session.ID) int64 {
+// pendingRowsBytes is what a whole batch of deliveries costs the buffer —
+// heldRowsBytes summed over each one — the measure flushPendingRows counts
+// its in-flight batch by (nocx-2v80t.3.49): every queue this stream holds
+// rows or closing screens in, and a batch blocked in the store is one of
+// them even though it left bs.pending to get there.
+func pendingRowsBytes(pending []pendingRows) int64 {
 	var n int64
+	for _, d := range pending {
+		n += heldRowsBytes(d.rows)
+	}
+	return n
+}
+
+// heldBytesLocked is what the session's buffer holds now: the rows waiting
+// for the store, the rows held past a parked boundary, the closing screens of
+// ends waiting behind them, and whatever batch flushPendingRows currently has
+// in flight to the store (flushingBytes) — a queue by another name, since it
+// is rows this stream is holding until the store answers, and ADR-0075's
+// "every queue" rule counts it exactly as it counts the others. Derived from
+// what is held, so it cannot drift from it.
+func (bs *blockStream) heldBytesLocked(sid session.ID) int64 {
+	n := bs.flushingBytes[sid]
 	for _, set := range [][]pendingRows{bs.pending[sid], bs.beyond[sid]} {
 		for _, d := range set {
 			n += heldRowsBytes(d.rows)
@@ -645,6 +672,7 @@ func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid s
 	delete(bs.closedWhileOpening, sid)
 	delete(bs.unrecorded, sid)
 	delete(bs.budgets, sid)
+	delete(bs.flushingBytes, sid)
 	bs.mu.Unlock()
 	owed := make([]blockClosedParams, 0, len(unsettled)+len(unended))
 	for _, b := range unsettled {
@@ -2002,6 +2030,20 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 		bs.requeuePendingRows(sid, pending)
 		return
 	}
+	// This batch left bs.pending in the caller before this call — that is
+	// what let takePendingRows and requeuePendingRows treat it as one
+	// slice instead of two — but it has not landed at the store either, and
+	// the call below can block for as long as the store is slow. Without
+	// counting it somewhere, the bound sees nothing held here and lets rows
+	// that keep arriving accumulate a second buffer's worth behind this one
+	// (nocx-2v80t.3.49). flushingBytes is that count, set once for the whole
+	// batch and walked down by exactly what each call lands.
+	bs.mu.Lock()
+	if bs.flushingBytes == nil {
+		bs.flushingBytes = make(map[session.ID]int64)
+	}
+	bs.flushingBytes[sid] = pendingRowsBytes(pending)
+	bs.mu.Unlock()
 	// Owner: this stream, on behalf of the helper's attached session.
 	// Closing event: each successful append or the session detach.
 	for i, delivery := range pending {
@@ -2015,9 +2057,12 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 		}
 		// The artifact's cursor follows every committed delivery, in the
 		// deferred path exactly as in the direct one: the close places its
-		// closing screen at that cursor.
+		// closing screen at that cursor. flushingBytes drops by the same
+		// delivery, the instant it stops being "in flight to the store" and
+		// becomes rows the store already holds.
 		bs.mu.Lock()
 		block.rows = delivery.from + uint64(len(delivery.rows)) //nolint:gosec // a row count, not a byte count
+		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
 			s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
@@ -2030,6 +2075,7 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 	if len(next) == 0 {
 		bs.mu.Lock()
 		bs.flushing[sid] = false
+		delete(bs.flushingBytes, sid) // every delivery in this batch landed; nothing left in flight
 		bs.mu.Unlock()
 		bs.drainPendingCloses(s, sid)
 		return
@@ -2077,13 +2123,20 @@ func (bs *blockStream) finishPendingRows(sid session.ID) {
 	bs.mu.Lock()
 	delete(bs.pending, sid)
 	bs.flushing[sid] = false
+	delete(bs.flushingBytes, sid)
 	bs.mu.Unlock()
 }
 
+// requeuePendingRows puts a batch flushPendingRows could not finish delivering
+// back where heldBytesLocked already counts it — bs.pending — and clears
+// flushingBytes for it in the same call: the batch stops being "in flight to
+// the store" here, so counting it in both places at once would count it
+// twice (nocx-2v80t.3.49).
 func (bs *blockStream) requeuePendingRows(sid session.ID, pending []pendingRows) {
 	bs.mu.Lock()
 	bs.pending[sid] = append(pending, bs.pending[sid]...)
 	bs.flushing[sid] = false
+	delete(bs.flushingBytes, sid)
 	bs.mu.Unlock()
 }
 
