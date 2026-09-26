@@ -432,11 +432,16 @@ type hostSession struct {
 	rowQueuedBytes int64
 	rowsIncomplete atomic.Uint64
 	rowsDone       chan struct{}
-	rowsConfirmed  uint64
-	writer         *proto.SubscriberID
-	writerAtt      proto.AttachmentID
-	epoch          proto.LeaseEpoch
-	exit           *proto.SessionExitStatus
+	// rowsDrainDone, once armed by requestRowsDrain, is closed by the pump
+	// the moment its queue is next empty with nothing owed (rows.go,
+	// nocx-2v80t.3.52) — the event stop() waits on, under rowMu since it is
+	// written from stop()'s goroutine and read from the pump's.
+	rowsDrainDone chan struct{}
+	rowsConfirmed uint64
+	writer        *proto.SubscriberID
+	writerAtt     proto.AttachmentID
+	epoch         proto.LeaseEpoch
+	exit          *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -1209,7 +1214,6 @@ func (s *hostSession) stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
-	s.releaseConnection(nil)
 	if tailLost := s.owner.stop(true, time.Time{}); tailLost {
 		s.log.Warn("session owner: the drain did not reach EOF before shutdown", "session", s.id.Session)
 	}
@@ -1232,19 +1236,38 @@ func (s *hostSession) stop() {
 	if err := s.runtime.Fail("session ended"); err != nil {
 		s.log.Debug("session runtime already ended", "session", s.id.Session, "err", err)
 	}
-	// The row pump LAST, not first: Fail is itself one of the events that can
-	// still hand the bridge a row — a sighting nobody authenticated
-	// authorises nothing (ADR-0024 decision 1), so it may be holding rows
-	// when the session ends, and Fail is what gives them back
-	// (sessionruntime's returnUnauthenticatedCapturesLocked, nocx-2v80t.3.47).
-	// A pump closed before that settle cannot be handed anything it returns.
-	// serveRows (rows.go) always drains its queue to empty before it ever
-	// looks at rowsDone, so closing it here, after Fail, loses nothing Fail
-	// just enqueued; closing it BEFORE would let the pump exit on this
-	// channel while the queue is momentarily empty, orphaning whatever Fail
-	// enqueues a moment later — nobody is left to dequeue it. Once the
-	// runtime is unavailable nothing more will ever be produced, which is
-	// what makes this the right — and only safe — moment to end the pump.
+	// Fail is itself one of the events that can still hand the row bridge a
+	// row — a sighting nobody authenticated authorises nothing (ADR-0024
+	// decision 1), so it may be holding rows when the session ends, and Fail
+	// is what gives them back (sessionruntime's
+	// returnUnauthenticatedCapturesLocked, nocx-2v80t.3.47). Whoever is still
+	// attached must get them, or an owed marker already parked
+	// (nocx-2v80t.3.38) must resolve, before subscribers are removed and the
+	// pump ends — so releaseConnection moved here, AFTER Fail, and this
+	// drains the pump BY CONSTRUCTION rather than trusting a select not to
+	// race rowsDone's own close (nocx-2v80t.3.52): requestRowsDrain arms a
+	// signal the pump can only fire once its queue is actually empty with
+	// nothing owed, and Fail's return is the point past which the queue can
+	// only shrink — the runtime is unavailable, so nothing can ever enqueue
+	// anything into it again.
+	//
+	// releaseConnection used to run first, before owner.stop and Fail even
+	// started: read back to the commit that introduced it (0078b2cb3), that
+	// position predates the row bridge (nocx-2v80t.3.6) entirely and was
+	// never revisited for it. Moving it here has no other consequence found:
+	// owner.stop's own closingSignal (closed at owner.stop's own top,
+	// unconditionally) is what already refuses a write or resize reaching the
+	// PTY once shutdown has begun, not this call's position; owner.stop's
+	// read loop writes the session's output window and calls runtime.Ingest
+	// directly, with no dependency on any subscriber pump being alive; and
+	// sessionruntime.Session.Detach (stopSubscriber's screen-consumer
+	// cleanup) does not check availability, so it is unaffected by running
+	// after Fail.
+	<-s.requestRowsDrain()
+	s.releaseConnection(nil)
+	// The row pump LAST: the drain above already delivered or resolved
+	// everything Fail could still produce, with subscribers still attached
+	// to receive it, so nothing is lost by ending the pump now.
 	close(s.rowsDone)
 	s.screen.Close()
 }

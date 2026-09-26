@@ -197,6 +197,48 @@ func (s *hostSession) wakeRows() {
 	}
 }
 
+// requestRowsDrain arms a one-shot signal that the pump closes the moment it
+// next finds its own queue empty with nothing owed, and wakes the pump so it
+// does not wait for some other event to notice (nocx-2v80t.3.52).
+//
+// Called from stop() right after runtime.Fail returns, this is not a race
+// with more work arriving the way rowsDone's own close used to be: Fail is
+// the runtime's last word — nothing it marks unavailable can ever hand the
+// bridge another emission — so the queue this arms against can only ever
+// shrink from here, never grow again. Waiting for it is therefore waiting
+// for a state that is approached monotonically, not raced for: whatever Fail
+// just enqueued (a forged sighting's held rows, nocx-2v80t.3.47) and any
+// marker already owed before it are what the pump has left to resolve, and
+// the caller may safely act — remove subscribers, end the pump — only once
+// this closes.
+func (s *hostSession) requestRowsDrain() <-chan struct{} {
+	s.rowMu.Lock()
+	done := s.rowsDrainDone
+	if done == nil {
+		done = make(chan struct{})
+		s.rowsDrainDone = done
+	}
+	s.rowMu.Unlock()
+	s.wakeRows()
+	return done
+}
+
+// signalRowsDrainedIfWaiting fires a pending drain request the instant the
+// pump discovers its queue is empty with nothing owed — called from exactly
+// one place in serveRows's loop, the place both are already known to be
+// true, never guessed at. One-shot: cleared the moment it fires, so the
+// ordinary, recurring "nothing to do right now" moment that has nothing to
+// do with shutdown signals nothing.
+func (s *hostSession) signalRowsDrainedIfWaiting() {
+	s.rowMu.Lock()
+	done := s.rowsDrainDone
+	s.rowsDrainDone = nil
+	s.rowMu.Unlock()
+	if done != nil {
+		close(done)
+	}
+}
+
 // dequeueRowEmission pops the FIFO's head, or answers false with nothing
 // queued. Popping the incomplete marker is where the stream is healthy
 // again: everything queued before it has gone, so from here the bridge waits
@@ -231,6 +273,17 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 // the next wake rather than spinning — attach (session.go) wakes this pump
 // the moment a new subscriber binds, precisely so a marker owed to "nobody
 // bound" is retried without waiting for the next row or end to arrive.
+//
+// Shutdown drains by CONSTRUCTION, not by select order (nocx-2v80t.3.52):
+// stop() (session.go) calls requestRowsDrain after runtime.Fail returns —
+// Fail is itself one of the events that can still hand this bridge a row
+// (nocx-2v80t.3.47) — and waits for the signal signalRowsDrainedIfWaiting
+// fires below, before it ever removes a subscriber or closes rowsDone. A
+// racing select that could take the rowsDone arm while a wake sat unread
+// beside it, dropping whatever the wake was for, is exactly the defect this
+// replaces: rowsDone is only closed once the caller has already SEEN the
+// queue reach empty with nothing owed, so its own close settles nothing that
+// still mattered.
 func (s *hostSession) serveRows() {
 	for {
 		if s.owedMarker != nil {
@@ -247,6 +300,11 @@ func (s *hostSession) serveRows() {
 		}
 		em, ok := s.dequeueRowEmission()
 		if !ok {
+			// owedMarker is guaranteed nil here: either it was nil on entry,
+			// or the branch above just cleared it before falling through to
+			// this dequeue in the same iteration. So this is exactly the
+			// "queue empty, nothing owed" instant requestRowsDrain waits for.
+			s.signalRowsDrainedIfWaiting()
 			select {
 			case <-s.rowWake:
 			case <-s.rowsDone:
