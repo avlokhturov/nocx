@@ -41,6 +41,7 @@ package session
 import (
 	"encoding/hex"
 	"encoding/json"
+	"time"
 	"unsafe"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -197,6 +198,94 @@ func (s *hostSession) wakeRows() {
 	}
 }
 
+// requestRowsDrain arms a one-shot signal that the pump closes the moment it
+// next finds its own queue empty with nothing owed, and wakes the pump so it
+// does not wait for some other event to notice (nocx-2v80t.3.52).
+//
+// Called from stop() right after runtime.Fail returns, this is not a race
+// with more work arriving the way rowsDone's own close used to be: Fail is
+// the runtime's last word — nothing it marks unavailable can ever hand the
+// bridge another emission — so the queue this arms against can only ever
+// shrink from here, never grow again. Waiting for it is therefore waiting
+// for a state that is approached monotonically, not raced for: whatever Fail
+// just enqueued (a forged sighting's held rows, nocx-2v80t.3.47) and any
+// marker already owed before it are what the pump has left to resolve, and
+// the caller may safely act — remove subscribers, end the pump — only once
+// this closes.
+func (s *hostSession) requestRowsDrain() <-chan struct{} {
+	s.rowMu.Lock()
+	done := s.rowsDrainDone
+	if done == nil {
+		done = make(chan struct{})
+		s.rowsDrainDone = done
+	}
+	s.rowMu.Unlock()
+	s.wakeRows()
+	return done
+}
+
+// signalRowsDrainedIfWaiting fires a pending drain request the instant the
+// pump discovers its queue is empty with nothing owed — called from exactly
+// one place in serveRows's loop, the place both are already known to be
+// true, never guessed at. One-shot: cleared the moment it fires, so the
+// ordinary, recurring "nothing to do right now" moment that has nothing to
+// do with shutdown signals nothing.
+func (s *hostSession) signalRowsDrainedIfWaiting() {
+	s.rowMu.Lock()
+	done := s.rowsDrainDone
+	s.rowsDrainDone = nil
+	s.rowMu.Unlock()
+	if done != nil {
+		close(done)
+	}
+}
+
+// drainRequested answers whether stop() is waiting on requestRowsDrain right
+// now — the one question deliverForPump and the owed-marker gate need to
+// tell "still worth retrying forever" from "shutdown is waiting on this and
+// nothing will ever wake it again" (nocx-2v80t.3.52, round 2).
+func (s *hostSession) drainRequested() bool {
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	return s.rowsDrainDone != nil
+}
+
+// deliverForPump is deliverRowEmission, bounded ONLY once stop() is
+// draining. The Sink interface takes no context and its one production
+// implementation (internal/helper/host.Host.write) is a plain,
+// deadline-less io.Writer call — there is no cancellation this package can
+// reach into for an in-flight send, checked by reading both. Outside a
+// drain this calls deliverRowEmission directly, unbounded, exactly as
+// before: a slow-but-alive subscriber is still worth an unbounded wait
+// during ordinary operation, and bounding every send would be a behaviour
+// change this bug does not ask for.
+//
+// During a drain, a send that never returns would hang stop() — and every
+// session teardown behind it — forever, with no way to interrupt it. Bounded
+// to stopGrace, the SAME grace the process's own tail already gets from
+// owner.stop, rather than a new invented duration: past it the delivery is
+// abandoned rather than waited on further. The goroutine left behind is the
+// pump's own last possible write for this session (a drain runs after
+// everything else, immediately before releaseConnection and rowsDone's
+// close), so there is no LATER frame it could ever land ahead of — the one
+// risk an abandoned write usually carries, ordering, does not apply to the
+// very last one.
+func (s *hostSession) deliverForPump(em rowEmission) bool {
+	if !s.drainRequested() {
+		return s.deliverRowEmission(em)
+	}
+	done := make(chan bool, 1)
+	go func() { done <- s.deliverRowEmission(em) }()
+	select {
+	case ok := <-done:
+		return ok
+	case <-time.After(stopGrace):
+		s.log.Warn("session row pump: a delivery at shutdown did not return within the grace period; abandoning it",
+			"session", s.id.Session, "incomplete", em.incomplete, "end", em.end)
+		return false
+	}
+}
+
 // dequeueRowEmission pops the FIFO's head, or answers false with nothing
 // queued. Popping the incomplete marker is where the stream is healthy
 // again: everything queued before it has gone, so from here the bridge waits
@@ -231,12 +320,64 @@ func (s *hostSession) dequeueRowEmission() (rowEmission, bool) {
 // the next wake rather than spinning — attach (session.go) wakes this pump
 // the moment a new subscriber binds, precisely so a marker owed to "nobody
 // bound" is retried without waiting for the next row or end to arrive.
+//
+// Shutdown drains by CONSTRUCTION, not by select order (nocx-2v80t.3.52):
+// stop() (session.go) calls requestRowsDrain after runtime.Fail returns —
+// Fail is itself one of the events that can still hand this bridge a row
+// (nocx-2v80t.3.47) — and waits for the signal signalRowsDrainedIfWaiting
+// fires below, before it ever removes a subscriber or closes rowsDone. A
+// racing select that could take the rowsDone arm while a wake sat unread
+// beside it, dropping whatever the wake was for, is exactly the defect this
+// replaces: rowsDone is only closed once the caller has already SEEN the
+// queue reach empty with nothing owed, so its own close settles nothing that
+// still mattered.
+//
+// A drain must still terminate whatever the sink does (nocx-2v80t.3.52,
+// round 2), or stop() — and every session teardown behind it — hangs on a
+// dead or wedged coordinator connection forever. Two failure modes, two
+// answers:
+//
+//   - A send that FAILS (returns promptly, refused): once draining, the
+//     owed-marker gate stops retrying it forever. The loss is already
+//     stated — enqueueRowEmission counted it and logged it the instant the
+//     buffer overflowed, before delivery was ever attempted — so giving up
+//     here restates nothing; it only stops waiting for a subscriber that is
+//     not coming back.
+//   - A send that BLOCKS (never returns): deliverForPump bounds it to
+//     stopGrace once draining. abandoned, once true, means one delivery
+//     already ran past that bound — the sink is not merely slow, it is
+//     wedged — so nothing further in this drain is attempted: skipping
+//     straight to "not delivered" for whatever is left avoids leaving a
+//     second abandoned goroutine racing the first one's eventual, unordered
+//     write.
 func (s *hostSession) serveRows() {
+	// abandoned is local, not a field: it means "one drain-time delivery
+	// already ran past stopGrace this pump's whole lifetime", which only
+	// keeps meaning anything for the rest of THIS call — the pump never
+	// runs twice. Once true, nothing is attempted again: skipping straight
+	// to "not delivered" for whatever is left avoids leaving a second
+	// abandoned goroutine racing the first one's eventual, unordered write,
+	// and lets the drain (and stop() behind it) proceed at once rather than
+	// spending another stopGrace per remaining item on a sink already known
+	// to be wedged.
+	abandoned := false
 	for {
 		if s.owedMarker != nil {
-			if s.deliverRowEmission(*s.owedMarker) {
+			delivered := false
+			if !abandoned {
+				delivered = s.deliverForPump(*s.owedMarker)
+			}
+			switch {
+			case delivered:
 				s.owedMarker = nil
-			} else {
+			case abandoned || s.drainRequested():
+				if !abandoned {
+					s.log.Warn("session row pump: the owed incomplete marker could not be delivered at shutdown; the loss was already counted",
+						"session", s.id.Session)
+				}
+				abandoned = true
+				s.owedMarker = nil
+			default:
 				select {
 				case <-s.rowWake:
 					continue
@@ -247,6 +388,11 @@ func (s *hostSession) serveRows() {
 		}
 		em, ok := s.dequeueRowEmission()
 		if !ok {
+			// owedMarker is guaranteed nil here: either it was nil on entry,
+			// or the branch above just cleared it before falling through to
+			// this dequeue in the same iteration. So this is exactly the
+			// "queue empty, nothing owed" instant requestRowsDrain waits for.
+			s.signalRowsDrainedIfWaiting()
 			select {
 			case <-s.rowWake:
 			case <-s.rowsDone:
@@ -254,7 +400,11 @@ func (s *hostSession) serveRows() {
 			}
 			continue
 		}
-		if !s.deliverRowEmission(em) && em.incomplete {
+		delivered := false
+		if !abandoned {
+			delivered = s.deliverForPump(em)
+		}
+		if !delivered && em.incomplete {
 			owed := em
 			s.owedMarker = &owed
 		}

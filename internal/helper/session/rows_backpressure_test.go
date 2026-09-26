@@ -71,12 +71,19 @@ type orderedStallingSink struct {
 	failedOnce    sync.Once
 	exhausted     chan struct{}
 	exhaustedOnce sync.Once
+	// blockAfterExhausted makes the marker's send, once failIncompleteTimes
+	// is exhausted, block on neverReleased instead of succeeding — a wedged
+	// connection whose write never returns at all, for nocx-2v80t.3.52's
+	// second round: proving a drain-time delivery is bounded (deliverForPump)
+	// rather than left to hang stop() forever.
+	blockAfterExhausted bool
+	neverReleased       chan struct{} // deliberately never closed by any test
 }
 
 func newOrderedStallingSink() *orderedStallingSink {
 	return &orderedStallingSink{
 		stalled: make(chan struct{}), release: make(chan struct{}), changed: make(chan struct{}, 1),
-		failed: make(chan struct{}), exhausted: make(chan struct{}),
+		failed: make(chan struct{}), exhausted: make(chan struct{}), neverReleased: make(chan struct{}),
 	}
 }
 
@@ -115,6 +122,7 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 		s.failIncompleteTimes--
 		last = s.failIncompleteTimes == 0
 	}
+	blockNow := !fail && doc.Incomplete && s.blockAfterExhausted
 	s.mu.Unlock()
 	if fail {
 		s.failedOnce.Do(func() { close(s.failed) })
@@ -122,6 +130,9 @@ func (s *orderedStallingSink) SendOutputRows(f proto.OutputRowsFrame) error {
 			s.exhaustedOnce.Do(func() { close(s.exhausted) })
 		}
 		return errors.New("injected: the marker's send failed")
+	}
+	if blockNow {
+		<-s.neverReleased // this send never returns; the caller's own bound must
 	}
 	s.record(recordedDelivery{fromRow: f.FromRow, lostRows: doc.LostRows, rows: len(rows), incomplete: doc.Incomplete, raw: f.Payload})
 	return nil
