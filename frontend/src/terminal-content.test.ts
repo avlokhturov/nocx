@@ -6092,6 +6092,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
     /* eslint-disable @typescript-eslint/unbound-method */
     const protoScrollTo = Element.prototype.scrollTo
     const protoScrollIntoView = Element.prototype.scrollIntoView
+    const protoRect = Element.prototype.getBoundingClientRect
     const raf = globalThis.requestAnimationFrame
     const fitViewport = renderer.fitViewport
     /* eslint-enable @typescript-eslint/unbound-method */
@@ -6120,6 +6121,27 @@ describe('two attempts and the live region stay separate while running (nocx-m87
         value: 300,
         configurable: true,
       })
+      // A real browser gives the header its final, wrapped height the
+      // instant it exists (the command text is already in the DOM) — the
+      // fit that opens the block reads it synchronously, before any output
+      // (nocx-2v80t.3.50), so the mock has to answer that early too. A
+      // class check rather than the instance: the block does not exist yet.
+      Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
+        if (this.classList.contains('cmd-block')) {
+          return {
+            height: 24,
+            width: 800,
+            top: 0,
+            left: 0,
+            right: 800,
+            bottom: 24,
+            x: 0,
+            y: 0,
+            toJSON: () => ({}),
+          }
+        }
+        return protoRect.call(this)
+      }
       handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
       handler({
         lane: 'lane-1',
@@ -6131,17 +6153,6 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       expect(withScrollback.scrollback.mode).toBe('running')
       const block = withScrollback.scrollback.blockManager.runningBlock
       expect(block).not.toBeNull()
-      block!.el.getBoundingClientRect = () => ({
-        height: 24,
-        width: 800,
-        top: 0,
-        left: 0,
-        right: 800,
-        bottom: 24,
-        x: 0,
-        y: 0,
-        toJSON: () => ({}),
-      })
 
       // Output taller than the pane: the box is capped at scroller minus
       // header (276) and the grid must be fitted to the SAME 276 — not the
@@ -6158,6 +6169,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       globalThis.requestAnimationFrame = raf
       Element.prototype.scrollTo = protoScrollTo
       Element.prototype.scrollIntoView = protoScrollIntoView
+      Element.prototype.getBoundingClientRect = protoRect
       teardown()
     }
   })
@@ -16299,10 +16311,13 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     const protoScrollIntoView = Element.prototype.scrollIntoView
     const raf = globalThis.requestAnimationFrame
     /* eslint-enable @typescript-eslint/unbound-method */
+    // Mutable, not the HEADER constant: a command whose title wraps to a
+    // second line opens a taller header than the last one's (nocx-2v80t.3.50).
+    let headerHeight = HEADER
     Element.prototype.getBoundingClientRect = function (this: Element): DOMRect {
       if (this === inner.editor.root) return rect(composerShown() ? COMPOSER : 0)
       if (this === inner.processBar) return rect(barShown() ? BAR : 0)
-      if (this.classList.contains('cmd-block')) return rect(HEADER)
+      if (this.classList.contains('cmd-block')) return rect(headerHeight)
       return rect(0)
     }
     Element.prototype.scrollTo = () => {}
@@ -16320,8 +16335,12 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
     }
 
     let n = 0
-    /** One ordinary command, through the composer, to its block's close. */
-    const runCommand = (): void => {
+    /** Submit a command through the composer, up to the runtime's own
+     *  "running" fact — the point `_openAuthenticatedBlock` opens the block
+     *  and (nocx-2v80t.3.50) settles the grid's geometry, before any of the
+     *  shell's own bytes for it exist. Returns the attempt id `finishCommand`
+     *  needs to close it. */
+    const openCommand = (): string => {
       n += 1
       const id = `att-${n}`
       mounted.ed.insertText(`printf ${n}`)
@@ -16341,8 +16360,13 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
           command: `printf ${n}`,
         },
       })
+      return id
+    }
+    /** Output, completion and the block's close, through the return to a
+     *  ready prompt. */
+    const finishCommand = (id: string): void => {
       ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(100)
-      client._sessions[0].fireData(`out ${n}\r\n`)
+      client._sessions[0].fireData(`out ${id}\r\n`)
       renderer._fireWriteParsed()
       handler({
         lane: 'lane-1',
@@ -16363,9 +16387,18 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       client._sessions[0].fireData('$ ')
       renderer._fireWriteParsed()
     }
+    /** One ordinary command, through the composer, to its block's close. */
+    const runCommand = (): void => {
+      finishCommand(openCommand())
+    }
     const resize = (height: number): void => {
       pane = height
       content.viewportChanged({ width: 936, height })
+    }
+    /** A taller (or shorter) header for the NEXT command opened — a
+     *  wrapping title takes more than one line (nocx-2v80t.3.50). */
+    const setHeaderHeight = (px: number): void => {
+      headerHeight = px
     }
 
     content.setVisible(true)
@@ -16376,7 +16409,7 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       (renderer.fitViewport as Mock).mock.calls.map(
         (call) => call[0] as { width: number; height: number },
       )
-    return { sb, fits, runCommand, resize, restore }
+    return { sb, fits, runCommand, openCommand, finishCommand, setHeaderHeight, resize, restore }
   }
 
   it('commits no geometry across twenty commands in a pane whose size did not change', async () => {
@@ -16388,6 +16421,48 @@ describe('the grid is not re-measured around every command (nocx-2v80t.3.46)', (
       const before = fits().length
       for (let i = 0; i < 20; i++) runCommand()
       expect(fits().slice(before)).toEqual([])
+    } finally {
+      restore()
+    }
+  })
+
+  it('a pane’s FIRST command commits no geometry once it is running (nocx-2v80t.3.50)', async () => {
+    // No calibration command before this one — a fresh pane has no learned
+    // chrome to predict the running cap from (`_runningChromePx` is still
+    // null), which is exactly the case the residual bug left uncovered: the
+    // old code deferred the grid's fit to the first parsed write, by which
+    // time the shell's own echo was already on the wire.
+    const { fits, openCommand, finishCommand, restore } = await paneWithLayout()
+    try {
+      const id = openCommand()
+      // The running fact opens the block and settles the geometry in the
+      // same tick — before the shell's echo, let alone the command's own
+      // output, reaches the renderer.
+      const afterOpen = fits().length
+      finishCommand(id)
+      expect(fits().length).toBe(afterOpen)
+    } finally {
+      restore()
+    }
+  })
+
+  it('a command whose header wraps to a second line commits no geometry once it is running (nocx-2v80t.3.50)', async () => {
+    // A short title fits one line; a long one wraps to two, taking more of
+    // the pane than the LAST command's header did. The old code measured
+    // the cap the same way regardless, but only committed it on the first
+    // parsed write — after the shell's echo was already out for THIS
+    // command, whose header nothing had predicted.
+    const { fits, runCommand, openCommand, finishCommand, setHeaderHeight, restore } =
+      await paneWithLayout()
+    try {
+      runCommand()
+      setHeaderHeight(2 * HEADER)
+      const id = openCommand()
+      // Settled here, against the wrapped header — before this command's
+      // own echo or output exists.
+      const afterOpen = fits().length
+      finishCommand(id)
+      expect(fits().length).toBe(afterOpen)
     } finally {
       restore()
     }
