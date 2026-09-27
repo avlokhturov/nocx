@@ -196,6 +196,11 @@ type observationOpen struct {
 	// it: parking carries it, a split hands it to the capture, and whatever
 	// ends the interval releases it.
 	OutputStartTrack emulator.RowTrack
+	// OutputPrefix is what stood above the output's first row at the mark —
+	// the prompt and the echoed command line — so the cut removes those rows
+	// only while they still read as that, never output that overwrote them
+	// in place (outputPrefixStandsLocked, nocx-2v80t.7).
+	OutputPrefix []emulator.Row
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -649,7 +654,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
 	}
-	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted, rec.Closing)
+	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputPrefix, o.OutputStartRow, o.OutputMarkDeparted, rec.Closing)
 	releaseTrack(o.OutputStartTrack)
 	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip), false)
@@ -688,6 +693,7 @@ func (s *Session) parkObservationLocked(nonce FenceNonce) {
 		OutputStartRow:     o.OutputStartRow,
 		OutputMarkDeparted: o.OutputMarkDeparted,
 		OutputStartTrack:   o.OutputStartTrack,
+		OutputPrefix:       o.OutputPrefix,
 	}
 }
 
@@ -1007,6 +1013,9 @@ func (s *Session) sightOutputMarkLocked() {
 	}
 	o.OutputStartRow = startRow
 	o.OutputMarkDeparted = s.screenDepartedRows
+	if startRow > 0 {
+		o.OutputPrefix = cloneObservationRows(rows[:startRow])
+	}
 	// startRow counts from boundaryRowsTop, as the rows it was measured on
 	// do; the pin names the screen row itself.
 	if t, err := s.emulator.TrackRow(boundaryRowsTop(scr) + startRow); err == nil {
@@ -1197,17 +1206,48 @@ func closingRowsForStream(scr ObservationScreen, skip int) []emulator.Row {
 // either way nothing on this screen precedes the output. Only when no pin was
 // taken, or it cannot be located right now, does the count fall back to the
 // positional arithmetic, which is exact whenever no commit re-laid the rows.
-func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, startRow int, markDeparted uint64, scr ObservationScreen) int {
+func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, prefix []emulator.Row, startRow int, markDeparted uint64, scr ObservationScreen) int {
+	skip := outputMarkSkipLocked(startRow, markDeparted, s.screenDepartedRows)
 	if pin != nil {
 		y, err := pin.ActiveRow()
 		switch {
 		case err == nil:
-			return max(y-boundaryRowsTop(scr), 0)
+			skip = max(y-boundaryRowsTop(scr), 0)
 		case errors.Is(err, emulator.ErrOutOfRange):
-			return 0
+			skip = 0
 		}
 	}
-	return outputMarkSkipLocked(startRow, markDeparted, s.screenDepartedRows)
+	if skip > 0 && !outputPrefixStands(boundaryRowsThatLeave(scr), skip, prefix) {
+		return 0
+	}
+	return skip
+}
+
+// outputPrefixStands says the first skip rows of a closing screen are still
+// the tail of the prefix the output mark saw — the rows that have not left
+// yet, however a commit re-laid them. It compares logical lines, not rows: a
+// reflow splits and joins rows but keeps each line's text. Spaces are ignored,
+// because a reflow can land one at a wrap where it is trimmed. A prefix that
+// no longer stands was rewritten in place — an erase and the command's own
+// output over it (nocx-2v80t.7) — and none of those rows is the prefix.
+func outputPrefixStands(rows []emulator.Row, skip int, prefix []emulator.Row) bool {
+	if skip > len(rows) {
+		skip = len(rows)
+	}
+	return strings.HasSuffix(logicalText(prefix), logicalText(rows[:skip]))
+}
+
+// logicalText is rows' text with a line break only where a line ends, not
+// where it wraps, and no spaces.
+func logicalText(rows []emulator.Row) string {
+	var sb strings.Builder
+	for _, r := range rows {
+		sb.WriteString(visibleRowText(r))
+		if !r.Wrap {
+			sb.WriteByte('\n')
+		}
+	}
+	return strings.ReplaceAll(sb.String(), " ", "")
 }
 
 // outputMarkSkipLocked is the count of leading rows closingRowsForStream must
@@ -1310,6 +1350,8 @@ type observationCapture struct {
 	// fields above so an undone split restores the interval's pin rather than
 	// the rebased one's; released when the capture seals.
 	OutputStartTrack emulator.RowTrack
+	// OutputPrefix goes with the pin, for the same reason.
+	OutputPrefix []emulator.Row
 	// OutputSkip is the closing screen's cut, measured from the pin at the
 	// split — the instant Closing was read — so no later commit can move it.
 	OutputSkip int
@@ -1363,11 +1405,12 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 		OutputStartRow:     o.OutputStartRow,
 		OutputMarkDeparted: o.OutputMarkDeparted,
 		OutputStartTrack:   o.OutputStartTrack,
+		OutputPrefix:       o.OutputPrefix,
 	}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
 	}
-	cap.OutputSkip = s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted, cap.Closing)
+	cap.OutputSkip = s.outputStartSkipLocked(o.OutputStartTrack, o.OutputPrefix, o.OutputStartRow, o.OutputMarkDeparted, cap.Closing)
 	// The screen the fence sits on is this boundary's closing screen, and its
 	// rows can start leaving before the completion that authenticates the
 	// boundary arrives — it rides another carrier. A pane that shrinks in
@@ -1526,6 +1569,7 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 			OutputStartRow:     cap.OutputStartRow,
 			OutputMarkDeparted: cap.OutputMarkDeparted,
 			OutputStartTrack:   cap.OutputStartTrack,
+			OutputPrefix:       cap.OutputPrefix,
 		}
 		return
 	}
@@ -1544,6 +1588,7 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	// The rebased tail's own pin, if it sighted a C of its own, goes with it.
 	releaseTrack(o.OutputStartTrack)
 	o.OutputStartTrack = cap.OutputStartTrack
+	o.OutputPrefix = cap.OutputPrefix
 }
 
 // Observations is every sealed record the session retains, oldest first. The
