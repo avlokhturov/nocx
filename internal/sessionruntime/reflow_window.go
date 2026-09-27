@@ -1,7 +1,6 @@
 package sessionruntime
 
 import (
-	"errors"
 	"sort"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -25,23 +24,21 @@ import (
 // [emulator.RowTrack] pins the window and the output mark already hold, which
 // follow their rows through the reflow — never by re-matching text.
 
-// reflowBoundaryLocked brings the window and the output mark's position up to
-// the geometry just committed. It runs after the commit's own departures are
-// drained, so what it reads is the screen as the next feed will find it.
+// reflowBoundaryLocked brings the suppression windows up to the geometry
+// just committed. The output mark needs nothing here: its cut is read from
+// its pin when the closing screen is read (outputStartSkipLocked).
 //
 // While the alternate screen holds the pane the primary's rows were re-laid
 // out too, but no pin on them can be located (RowTrack.ActiveRow answers
 // ErrUnsupported), so the repair is OWED rather than skipped: it runs the
 // first time rows are drained with the primary back in front
-// (settleOwedReflowLocked). Skipping it would leave exactly the stale
-// positions this repair exists to correct.
+// (settleOwedReflowLocked).
 func (s *Session) reflowBoundaryLocked() {
 	if scr, err := s.emulator.Screen(); err != nil || scr != emulator.ScreenPrimary {
 		s.reflowOwed = true
 		return
 	}
 	s.reflowOwed = false
-	s.reflowOutputMarkLocked()
 	s.pendingScreen = s.reflowWindowLocked(s.pendingScreen)
 	// A capture holding its sighting's window keeps the window it replaced,
 	// to put back if nobody authenticates the fence; that one names the same
@@ -52,35 +49,13 @@ func (s *Session) reflowBoundaryLocked() {
 }
 
 // settleOwedReflowLocked runs a repair a commit owed while the alternate
-// screen was in front, once the primary is back.
+// screen was in front, once the primary is back. The feed that brought the
+// primary back may already have scrolled the window's rows away; what that
+// feed reports after such a commit is nocx-2v80t.6's to settle.
 func (s *Session) settleOwedReflowLocked() {
 	if s.reflowOwed {
 		s.reflowBoundaryLocked()
 	}
-}
-
-// reflowOutputMarkLocked re-measures the output mark's position for the
-// interval in flight: the row its pin now occupies is how many rows sit above
-// the interval's first output row, and the departure count restarts from this
-// instant so outputMarkSkipLocked subtracts only what leaves AFTER it. A pin
-// that is alive but off the active screen means the whole prefix has left,
-// which is OutputStartRow 0. A pin that cannot be located for any other reason
-// leaves the measurement as it was: a guess of 0 would store the prefix.
-func (s *Session) reflowOutputMarkLocked() {
-	o := s.observation
-	if o == nil || !o.OutputMarked || o.OutputStartTrack == nil {
-		return
-	}
-	y, err := o.OutputStartTrack.ActiveRow()
-	switch {
-	case err == nil:
-	case errors.Is(err, emulator.ErrOutOfRange) && o.OutputStartTrack.Alive():
-		y = 0
-	default:
-		return
-	}
-	o.OutputStartRow = y
-	o.OutputMarkDeparted = s.screenDepartedRows
 }
 
 // reflowWindowLocked rebuilds a window from where its pins now are. Each
@@ -93,8 +68,8 @@ func (s *Session) reflowOutputMarkLocked() {
 //
 // An entry that is alive but no longer on the active screen stays as it was,
 // ahead of the rest: the commit pushed it into the history, where the only
-// question left about it is whether it departs, and it is matched by the
-// content it had. A pinless or dead entry is left for the next purge.
+// question left about it is whether it departs. A pinless or dead entry is
+// left for the next purge.
 func (s *Session) reflowWindowLocked(window []pendingBoundaryRow) []pendingBoundaryRow {
 	if len(window) == 0 {
 		return window

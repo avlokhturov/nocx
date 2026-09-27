@@ -1,6 +1,7 @@
 package sessionruntime
 
 import (
+	"errors"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/emulator"
@@ -189,10 +190,11 @@ type observationOpen struct {
 	// counts is exactly how much of the prefix a scroll has since carried
 	// off — still by position, still never by text (outputMarkSkipLocked).
 	OutputMarkDeparted uint64
-	// OutputStartTrack pins the row OutputStartRow names, so a geometry
-	// commit can re-measure it (reflowOutputMarkLocked, nocx-2v80t.5). The
-	// interval owns it: parking carries it, a split hands it to the capture,
-	// and whatever ends the interval releases it.
+	// OutputStartTrack pins the row OutputStartRow names, so the closing
+	// screen's cut is read from where that row is NOW, whatever a geometry
+	// commit re-laid (outputStartSkipLocked, nocx-2v80t.5). The interval owns
+	// it: parking carries it, a split hands it to the capture, and whatever
+	// ends the interval releases it.
 	OutputStartTrack emulator.RowTrack
 }
 
@@ -630,7 +632,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
 	}
-	skip := outputMarkSkipLocked(o.OutputStartRow, o.OutputMarkDeparted, s.screenDepartedRows)
+	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted)
 	releaseTrack(o.OutputStartTrack)
 	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip), false)
@@ -1165,6 +1167,28 @@ func closingRowsForStream(scr ObservationScreen, skip int) []emulator.Row {
 	return rows
 }
 
+// outputStartSkipLocked is how many rows of the screen as it stands NOW sit
+// above the interval's first output row: the row its pin occupies, read at
+// the instant the closing screen is read, so a geometry commit anywhere in
+// between — a reflow that split or joined the command line — is already in
+// the answer (nocx-2v80t.5). A pin that is alive but off the active screen
+// means the whole prefix has left: nothing to cut. Without a usable pin (none
+// was taken, the row ceased, or the alternate screen is up) the count falls
+// back to the positional arithmetic, which is exact whenever no commit
+// re-laid the rows.
+func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, startRow int, markDeparted uint64) int {
+	if pin != nil {
+		y, err := pin.ActiveRow()
+		switch {
+		case err == nil:
+			return y
+		case errors.Is(err, emulator.ErrOutOfRange) && pin.Alive():
+			return 0
+		}
+	}
+	return outputMarkSkipLocked(startRow, markDeparted, s.screenDepartedRows)
+}
+
 // outputMarkSkipLocked is the count of leading rows closingRowsForStream must
 // cut for an interval whose output-mark was sighted (nocx-2v80t.3.12,
 // reopened): how much of the prefix outputMarkLocked measured is STILL on
@@ -1265,6 +1289,9 @@ type observationCapture struct {
 	// fields above so an undone split restores the interval's pin rather than
 	// the rebased one's; released when the capture seals.
 	OutputStartTrack emulator.RowTrack
+	// OutputSkip is the closing screen's cut, measured from the pin at the
+	// split — the instant Closing was read — so no later commit can move it.
+	OutputSkip int
 	// ScreenDeparted is [Session.screenDepartedRows] at this capture's own
 	// instant — EndRow's counterpart for the cut, which must count the rows
 	// the suppression window withheld as well as the ones it streamed
@@ -1319,6 +1346,7 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
 	}
+	cap.OutputSkip = s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted)
 	// The screen the fence sits on is this boundary's closing screen, and its
 	// rows can start leaving before the completion that authenticates the
 	// boundary arrives — it rides another carrier. A pane that shrinks in
@@ -1366,7 +1394,7 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Closing:      cap.Closing,
 		Loss:         cap.Loss,
 	}
-	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.ScreenDeparted)
+	skip := cap.OutputSkip
 	releaseTrack(cap.OutputStartTrack)
 	cap.OutputStartTrack = nil
 	// The window was installed at the sighting (splitObservationAtFenceLocked)

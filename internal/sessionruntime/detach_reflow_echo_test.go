@@ -254,3 +254,81 @@ func TestAnUndoneSplitGivesTheIntervalItsOwnOutputStartPinBack(t *testing.T) {
 		t.Fatalf("the block stored %d rows, want exactly tail-row, OUT-001, OUT-002:\n%s", len(got), strings.Join(got, "\n"))
 	}
 }
+
+// The feed that brings the primary screen back can also scroll it: the
+// program exits the alternate screen and prints more than a screen in one
+// chunk, so the command line's re-laid rows leave in the same report the
+// owed repair runs for (codex's second review of nocx-2v80t.5, finding 1).
+func TestTheFeedThatLeavesTheAlternateScreenAndScrollsStillKeepsTheCommandLineOut(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(150, 40))
+	line := "$ " + strings.Repeat("printf-a-long-command-line ", 7)
+	if err := s.Ingest([]byte(line + "\r\n" + outputMarkerFixed)); err != nil {
+		t.Fatalf("ingest the echo and the output mark: %v", err)
+	}
+	if err := s.Ingest([]byte("\x1b[?1049h" + "full-screen program\r\n")); err != nil {
+		t.Fatalf("enter the alternate screen: %v", err)
+	}
+	if _, err := s.CommitGeometry(harnessGeometry(80, 24)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	var want []string
+	var out strings.Builder
+	out.WriteString("\x1b[?1049l")
+	for i := 1; i <= 40; i++ {
+		m := fmt.Sprintf("OUT-%03d", i)
+		want = append(want, m)
+		out.WriteString(m + "\r\n")
+	}
+	if err := s.Ingest([]byte(out.String())); err != nil {
+		t.Fatalf("leave the alternate screen and print in one feed: %v", err)
+	}
+	nonce := obsNonce(0x56)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x56))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	// What this schedule judges is that no row of the command line is stored.
+	// That every output row arrives is a separate defect of the same schedule:
+	// a commit while the alternate screen is up loses the rows the exiting
+	// feed scrolls, on main before this change too (nocx-2v80t.6). So the
+	// stored rows are held to being output rows, in order, ending at the last.
+	got := storedRowsFor(t, rs, nonce)
+	if len(got) == 0 || got[len(got)-1] != want[len(want)-1] {
+		t.Fatalf("the block stored %d rows, want them to end at %s:\n%s", len(got), want[len(want)-1], strings.Join(got, "\n"))
+	}
+	if tail := want[len(want)-len(got):]; strings.Join(got, "|") != strings.Join(tail, "|") {
+		t.Fatalf("the block stored rows that are not its output, in order:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+// A commit while a split is pending, then the split undone: the interval's
+// cut is read from its own pin when it seals, so the commit in between is in
+// the answer (codex's second review of nocx-2v80t.5, finding 2).
+func TestACommitWhileASplitIsPendingIsInTheCutOnceTheSplitIsUndone(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(150, 40))
+	line := "$ " + strings.Repeat("printf-a-long-command-line ", 7)
+	if err := s.Ingest([]byte(line + "\r\n" + outputMarkerFixed)); err != nil {
+		t.Fatalf("ingest the echo and the output mark: %v", err)
+	}
+	forged := obsNonce(9)
+	if err := s.SightFence(forged, []byte("fence-source")); err != nil {
+		t.Fatalf("sight a fence nobody will authenticate: %v", err)
+	}
+	if _, err := s.CommitGeometry(harnessGeometry(80, 24)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := s.ExpireRendezvous(forged); err != nil {
+		t.Fatalf("expire the forged fence's meeting: %v", err)
+	}
+	if err := s.Ingest([]byte("OUT-001\r\nOUT-002\r\n")); err != nil {
+		t.Fatalf("ingest the output: %v", err)
+	}
+	nonce := obsNonce(0x57)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x57))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	if got := storedRowsFor(t, rs, nonce); strings.Join(got, "|") != "OUT-001|OUT-002" {
+		t.Fatalf("the block stored %d rows, want exactly OUT-001, OUT-002:\n%s", len(got), strings.Join(got, "\n"))
+	}
+}
