@@ -287,17 +287,8 @@ func TestTheFeedThatLeavesTheAlternateScreenAndScrollsStillKeepsTheCommandLineOu
 	if err := s.Ingest([]byte(fenceFor(0x56))); err != nil {
 		t.Fatalf("ingest the fence: %v", err)
 	}
-	// What this schedule judges is that no row of the command line is stored.
-	// That every output row arrives is a separate defect of the same schedule:
-	// a commit while the alternate screen is up loses the rows the exiting
-	// feed scrolls, on main before this change too (nocx-2v80t.6). So the
-	// stored rows are held to being output rows, in order, ending at the last.
-	got := storedRowsFor(t, rs, nonce)
-	if len(got) == 0 || got[len(got)-1] != want[len(want)-1] {
-		t.Fatalf("the block stored %d rows, want them to end at %s:\n%s", len(got), want[len(want)-1], strings.Join(got, "\n"))
-	}
-	if tail := want[len(want)-len(got):]; strings.Join(got, "|") != strings.Join(tail, "|") {
-		t.Fatalf("the block stored rows that are not its output, in order:\n%s", strings.Join(got, "\n"))
+	if got := storedRowsFor(t, rs, nonce); strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("the block stored %d rows, want exactly its %d output rows:\n%s", len(got), len(want), strings.Join(got, "\n"))
 	}
 }
 

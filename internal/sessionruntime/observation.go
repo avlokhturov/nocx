@@ -399,7 +399,20 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 		return rows
 	}
 	kept := rows[:0]
+	// lineHeld says the row before this one was the window's: a row that
+	// CONTINUES it is the rest of the same soft-wrapped line, however a
+	// geometry commit re-laid it (nocx-2v80t.6), and is the window's too.
+	lineHeld := false
 	for i, row := range rows {
+		if lineHeld && row.Continuation {
+			if c := s.pendingCapture; c != nil {
+				c.Held = append(c.Held, row)
+			} else {
+				s.suppressedScreenRows++
+			}
+			continue
+		}
+		lineHeld = false
 		at := -1
 		for j := range s.pendingScreen {
 			if sameVisibleRow(row, s.pendingScreen[j].Row) {
@@ -463,6 +476,7 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 			s.suppressedScreenRows++
 		}
 		s.pendingEntered = true
+		lineHeld = true
 	}
 	return kept
 }

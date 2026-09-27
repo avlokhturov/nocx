@@ -50,8 +50,9 @@ func (s *Session) reflowBoundaryLocked() {
 
 // settleOwedReflowLocked runs a repair a commit owed while the alternate
 // screen was in front, once the primary is back. The feed that brought the
-// primary back may already have scrolled the window's rows away; what that
-// feed reports after such a commit is nocx-2v80t.6's to settle.
+// primary back may already have scrolled the window's rows away; those are
+// refreshed through their own pins (reflowWindowLocked) and recognised whole
+// by continuation as they depart.
 func (s *Session) settleOwedReflowLocked() {
 	if s.reflowOwed {
 		s.reflowBoundaryLocked()
@@ -66,10 +67,10 @@ func (s *Session) settleOwedReflowLocked() {
 // afresh. Rows a pin names more than once (a widening joined them) are one
 // entry.
 //
-// An entry that is alive but no longer on the active screen stays as it was,
-// ahead of the rest: the commit pushed it into the history, where the only
-// question left about it is whether it departs. A pinless or dead entry is
-// left for the next purge.
+// An entry that is alive but no longer on the active screen stays ahead of
+// the rest with its content read afresh through its pin: it is in the
+// history, where the only question left about it is whether it departs. A
+// pinless or dead entry is left for the next purge.
 func (s *Session) reflowWindowLocked(window []pendingBoundaryRow) []pendingBoundaryRow {
 	if len(window) == 0 {
 		return window
@@ -84,6 +85,14 @@ func (s *Session) reflowWindowLocked(window []pendingBoundaryRow) []pendingBound
 		}
 		y, err := p.Track.ActiveRow()
 		if err != nil {
+			// Already off the active screen: the feed that brought the
+			// primary back scrolled it into the history before the owed
+			// repair could run. Its head reads as its pin's row reads now,
+			// and the rest of its line is recognised by continuation as it
+			// departs (suppressBoundaryScreenLocked).
+			if row, rerr := p.Track.Row(); rerr == nil {
+				p.Row = cloneObservationRows([]emulator.Row{row})[0]
+			}
 			kept = append(kept, p)
 			continue
 		}

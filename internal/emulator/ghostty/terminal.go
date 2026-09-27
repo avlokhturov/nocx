@@ -182,6 +182,9 @@ type terminal struct {
 	// them — it is tracked in the same pass over the bytes purely because
 	// scanMarkers is the one place bytes are scanned at all.
 	eraseIdx int
+	// altExit scans for the switch back from the alternate screen, a split
+	// point for the departure measurement (altscreen.go, nocx-2v80t.6).
+	altExit altExitScan
 	// departed holds the rows that left the screen, captured at the instant
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
@@ -247,6 +250,14 @@ type sbBaseline struct {
 	// ReportedRowsOnScreen answers, because a consumer reading the screen as
 	// rows still to come must skip exactly these.
 	owed int
+	// screenRows is the screen height this baseline was measured at, and
+	// hidden says a resize while the OTHER buffer was active left it
+	// unmeasured (rebaselineLocked). Together they are what a shrink pushed
+	// off this buffer's screen while nobody could measure it: a shrink by N
+	// rows moves up to N of its top rows into its history, rows that left
+	// the screen and are reported at its next measurement (nocx-2v80t.6).
+	screenRows int
+	hidden     bool
 }
 
 var (
@@ -467,7 +478,7 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	// A resize reflows, and reflow rewrites history's line breaks: the rows
 	// it reshapes did not leave the screen, so the departure baseline is
 	// taken again rather than let a reflowed count read as departures.
-	t.rebaselineLocked()
+	t.rebaselineLocked(beforeRows)
 	if after, aerr := t.scrollbackLocked(); aerr == nil {
 		if screen, serr := t.screenLocked(); serr == nil {
 			base := &t.sb[sbIndex(screen)]
@@ -596,6 +607,9 @@ const (
 	markKindFence
 	markKindOutputMark
 	markKindClearBoundary
+	// markKindAltExit needs nothing sighted: the split itself is the point,
+	// since the chunk it ends is measured on its own (altscreen.go).
+	markKindAltExit
 )
 
 // scanMarkers advances the fence scanner (fence.go), the output-mark scanner
@@ -654,6 +668,11 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.eraseIdx = 1
 		} else {
 			t.eraseIdx = 0
+		}
+
+		// Last, so every other scanner has already taken this byte.
+		if t.altExit.step(c) {
+			return i + 1, markKindAltExit
 		}
 	}
 	return len(b), markKindNone
@@ -766,7 +785,21 @@ func (t *terminal) noteDepartedLocked() {
 		// signal fired for zero of the runs that mattered. The scanner
 		// below fires on the SEQUENCE, not on its effect on this counter.
 	}
+	if !base.valid && base.hidden {
+		// Resized while the other buffer was active: its depth moved by the
+		// reflow as well as by what the shrinks pushed off, and only the
+		// push is a departure. Bounded by the rows the screen lost, as the
+		// active buffer's own shrink is in Resize, so a rewrap of history's
+		// line breaks is never read as rows leaving.
+		pushed := min(max(base.screenRows-t.geom.Rows, 0), max(h-base.rows, 0))
+		again := min(pushed, base.owed)
+		base.owed -= again
+		if fresh := pushed - again; fresh > 0 {
+			t.captureDepartedLocked(h-fresh, h)
+		}
+	}
 	base.rows, base.valid, base.torn = h, true, false
+	base.screenRows, base.hidden = t.geom.Rows, false
 }
 
 // captureDepartedLocked copies history rows [from, to) — the rows that just
@@ -817,7 +850,7 @@ func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 // rather than scrolls. The active buffer is measured; the hidden one cannot
 // be, so its next measurement starts a fresh baseline instead of a delta —
 // which is also why the check rides the feed and nothing else.
-func (t *terminal) rebaselineLocked() {
+func (t *terminal) rebaselineLocked(beforeRows int) {
 	// Read through the same two injectable seams noteDepartedLocked does
 	// (readScreen/readDepth): the library never fails either on request, so
 	// a test that wants THIS function's own read-failure path — as opposed
@@ -854,9 +887,18 @@ func (t *terminal) rebaselineLocked() {
 	t.sb[active].rows = h
 	t.sb[active].valid = true
 	t.sb[active].torn = false
+	t.sb[active].screenRows = t.geom.Rows
+	t.sb[active].hidden = false
 	// The hidden buffer cannot be measured from here — this read is per
 	// ACTIVE buffer, exactly as scrollbackLocked's own doc says — so its
-	// depth is unmeasured rather than assumed; only that changes.
+	// depth is unmeasured rather than assumed; only that changes. Its last
+	// measurement and the height it was taken at stay, from the FIRST resize
+	// that hid it, so its next measurement can report what shrinks pushed
+	// off its screen in between.
+	if hb := &t.sb[1-active]; hb.valid {
+		hb.hidden = true
+		hb.screenRows = beforeRows
+	}
 	t.sb[1-active].valid = false
 }
 
