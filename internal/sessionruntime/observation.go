@@ -1054,15 +1054,11 @@ func (s *Session) sightOutputMarkLocked() {
 // to reach, and there is nothing else for it to do.
 // sightEraseDisplayLocked forgets what stood above the interval's output:
 // ED2 blanked it in place, so the rows the closing screen's cut would remove
-// are whatever the command printed after it (nocx-2v80t.7). Only the primary
-// screen's erase counts; the alternate screen's own erase leaves the primary
-// as it was.
+// are whatever the command printed after it (nocx-2v80t.7). The emulator
+// sights only the primary screen's erase, on the screen active when it ran.
 func (s *Session) sightEraseDisplayLocked() {
 	o := s.observation
 	if o == nil || !o.OutputMarked {
-		return
-	}
-	if scr, err := s.emulator.Screen(); err != nil || scr != emulator.ScreenPrimary {
 		return
 	}
 	releaseTrack(o.OutputStartTrack)

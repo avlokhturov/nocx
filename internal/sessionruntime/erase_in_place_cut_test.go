@@ -60,3 +60,39 @@ func TestOutputThatReadsLikeTheErasedPromptIsKept(t *testing.T) {
 		})
 	}
 }
+
+// Only the PRIMARY screen's erase says the prompt is gone, judged on the
+// screen that was active when the erase ran, not when the feed ended (codex's
+// review of nocx-2v80t.7): one feed that enters the alternate screen, erases
+// it and leaves it erased nothing the prompt stood on.
+func TestAnEraseOnTheAlternateScreenInsideOneFeedLeavesThePromptToBeCut(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	if err := s.Ingest([]byte("$ command\r\n" + outputMarkerFixed + "\x1b[?1049h\x1b[H\x1b[2Jfull-screen\x1b[?1049l" + "OUT-001\r\nOUT-002\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	nonce := obsNonce(0x73)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x73))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	if got := storedRowsFor(t, rs, nonce); strings.Join(got, "|") != "OUT-001|OUT-002" {
+		t.Fatalf("the block stored %q, want exactly OUT-001, OUT-002", got)
+	}
+}
+
+// The inverse, in one feed: the primary is erased and the command prints,
+// then a full-screen program comes and goes. The primary's erase counts.
+func TestAPrimaryEraseFollowedByTheAlternateScreenInOneFeedStillCounts(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	if err := s.Ingest([]byte("$ command\r\n" + outputMarkerFixed + "\x1b[H\x1b[2J$ command\r\n\x1b[?1049hfull-screen\x1b[?1049lOUT-002\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	nonce := obsNonce(0x74)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x74))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	if got := storedRowsFor(t, rs, nonce); strings.Join(got, "|") != "$ command|OUT-002" {
+		t.Fatalf("the block stored %q, want exactly the reprinted line and OUT-002", got)
+	}
+}

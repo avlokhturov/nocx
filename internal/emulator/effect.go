@@ -99,9 +99,11 @@ const (
 	// owns the whole VT grammar now, not a private second reading), so the
 	// sighting IS the fact rather than a location for one.
 	EffectClearBoundary
-	// EffectEraseDisplay is the program erasing the whole display in place:
-	// ED2, `CSI 2 J`, alone — what a redraw loop, `watch` or `tput clear`
-	// emits without the saved-lines half. Body is always empty.
+	// EffectEraseDisplay is the program erasing the whole PRIMARY display in
+	// place: ED2, `CSI 2 J`, alone — what a redraw loop, `watch` or `tput
+	// clear` emits without the saved-lines half — judged on the screen active
+	// when the erase ran. An erase of the alternate screen is not one. Body
+	// is always empty.
 	//
 	// It is scanned for exactly as EffectClearBoundary is, and for one
 	// reason (nocx-2v80t.7): the rows a command's own prompt and echoed

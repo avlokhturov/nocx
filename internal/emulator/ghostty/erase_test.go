@@ -148,3 +148,14 @@ func TestEraseSavedLinesNeverEatsTheBytesAroundIt(t *testing.T) {
 		t.Fatalf("the screen reads %q, want ED3 to have cost no bytes either side", text)
 	}
 }
+
+// TestEraseDisplayOnTheAlternateScreenIsNotSighted: ED2 is sighted for the
+// primary screen only, judged when it runs (nocx-2v80t.7).
+func TestEraseDisplayOnTheAlternateScreenIsNotSighted(t *testing.T) {
+	term := departedTerm(t, 20, 4)
+	term.Effects()
+	departedFeed(t, term, "\x1b[?1049h\x1b[H\x1b[2Jfull\x1b[?1049l")
+	if got := term.Effects(); len(got) != 0 {
+		t.Fatalf("an erase of the alternate screen produced %s, want no effect", describeEffects(got))
+	}
+}
