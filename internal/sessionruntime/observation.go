@@ -1052,6 +1052,24 @@ func (s *Session) sightOutputMarkLocked() {
 // With no row stream bound (a session with nobody watching its rows yet)
 // this is a no-op, exactly as drainObservationLocked is: the fact has nobody
 // to reach, and there is nothing else for it to do.
+// sightEraseDisplayLocked forgets what stood above the interval's output:
+// ED2 blanked it in place, so the rows the closing screen's cut would remove
+// are whatever the command printed after it (nocx-2v80t.7). Only the primary
+// screen's erase counts; the alternate screen's own erase leaves the primary
+// as it was.
+func (s *Session) sightEraseDisplayLocked() {
+	o := s.observation
+	if o == nil || !o.OutputMarked {
+		return
+	}
+	if scr, err := s.emulator.Screen(); err != nil || scr != emulator.ScreenPrimary {
+		return
+	}
+	releaseTrack(o.OutputStartTrack)
+	o.OutputStartTrack, o.OutputPrefix = nil, nil
+	o.OutputStartRow, o.OutputMarkDeparted = 0, s.screenDepartedRows
+}
+
 func (s *Session) sightClearBoundaryLocked() {
 	if rs := s.rowStream; rs != nil {
 		rs.ClearBoundary()
@@ -1226,9 +1244,9 @@ func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, prefix []emulator
 // outputPrefixStands says the first skip rows of a closing screen are still
 // the tail of the prefix the output mark saw — the rows that have not left
 // yet, however a commit re-laid them. It compares logical lines, not rows: a
-// reflow splits and joins rows but keeps each line's text. Spaces are ignored,
-// because a reflow can land one at a wrap where it is trimmed. A prefix that
-// no longer stands was rewritten in place — an erase and the command's own
+// reflow splits and joins rows but keeps each line's cells, so a line's text
+// is the same at any width once only its end is trimmed. A prefix that no
+// longer stands was rewritten in place — an erase and the command's own
 // output over it (nocx-2v80t.7) — and none of those rows is the prefix.
 func outputPrefixStands(rows []emulator.Row, skip int, prefix []emulator.Row) bool {
 	if skip > len(rows) {
@@ -1237,17 +1255,30 @@ func outputPrefixStands(rows []emulator.Row, skip int, prefix []emulator.Row) bo
 	return strings.HasSuffix(logicalText(prefix), logicalText(rows[:skip]))
 }
 
-// logicalText is rows' text with a line break only where a line ends, not
-// where it wraps, and no spaces.
+// logicalText is rows' text as lines: each cell's grapheme, a blank for an
+// empty cell, nothing for the spacer columns a wide character leaves, a line
+// break only where a line ends and not where it wraps, and the blanks only at
+// a line's end trimmed.
 func logicalText(rows []emulator.Row) string {
-	var sb strings.Builder
+	var out, line strings.Builder
 	for _, r := range rows {
-		sb.WriteString(visibleRowText(r))
+		for _, c := range r.Cells {
+			switch {
+			case c.Width == emulator.WidthSpacerTail || c.Width == emulator.WidthSpacerHead:
+			case c.Grapheme == "":
+				line.WriteByte(' ')
+			default:
+				line.WriteString(c.Grapheme)
+			}
+		}
 		if !r.Wrap {
-			sb.WriteByte('\n')
+			out.WriteString(strings.TrimRight(line.String(), " "))
+			out.WriteByte('\n')
+			line.Reset()
 		}
 	}
-	return strings.ReplaceAll(sb.String(), " ", "")
+	out.WriteString(strings.TrimRight(line.String(), " "))
+	return out.String()
 }
 
 // outputMarkSkipLocked is the count of leading rows closingRowsForStream must

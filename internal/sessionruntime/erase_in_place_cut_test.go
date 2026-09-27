@@ -33,3 +33,30 @@ func TestACommandThatClearsTheScreenInPlaceKeepsItsWholeOutput(t *testing.T) {
 		})
 	}
 }
+
+// Output that reads like the prompt it replaced is output (codex's review of
+// nocx-2v80t.7): after an in-place erase the sighting itself says the prompt
+// is gone, whatever the rows now read; without an erase, output written over
+// the prompt is told from it by its text, spaces included.
+func TestOutputThatReadsLikeTheErasedPromptIsKept(t *testing.T) {
+	for _, tc := range []struct{ name, over, first string }{
+		{"erased, then the prompt's text without its space", "\x1b[H\x1b[2J", "$command"},
+		{"erased, then the prompt's exact text", "\x1b[H\x1b[2J", "$ command"},
+		{"written over without an erase, the space missing", "\x1b[H", "$command"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, rs := streamSession(t, harnessGeometry(80, 24))
+			if err := s.Ingest([]byte("$ command\r\n" + outputMarkerFixed + tc.over + tc.first + "\x1b[K\r\nOUT-002\r\n")); err != nil {
+				t.Fatalf("ingest: %v", err)
+			}
+			nonce := obsNonce(0x72)
+			s.Completed(s.Incarnation(), nonce, 0)
+			if err := s.Ingest([]byte(fenceFor(0x72))); err != nil {
+				t.Fatalf("ingest the fence: %v", err)
+			}
+			if got := storedRowsFor(t, rs, nonce); strings.Join(got, "|") != tc.first+"|OUT-002" {
+				t.Fatalf("the block stored %q, want exactly %q, OUT-002", got, tc.first)
+			}
+		})
+	}
+}

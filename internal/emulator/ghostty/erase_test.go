@@ -26,6 +26,10 @@ const clearSeq = "\x1b[H\x1b[2J\x1b[3J"
 
 func wantOneClearBoundary(t *testing.T, got []emulator.Effect) {
 	t.Helper()
+	// `clear` is ED2 then ED3, and ED2 is sighted on its own account since
+	// nocx-2v80t.7 (EffectEraseDisplay); this helper judges the clear
+	// boundary alone.
+	got = withoutEraseDisplay(got)
 	if len(got) != 1 {
 		t.Fatalf("the drain holds %s, want exactly one clear-boundary effect", describeEffects(got))
 	}
@@ -58,9 +62,23 @@ func TestEraseDisplayAloneProducesNoClearBoundary(t *testing.T) {
 	departedFeed(t, term, numbered(10))
 	term.Effects() // drain whatever the fill produced, if anything
 	departedFeed(t, term, "\x1b[H\x1b[2J")
-	if got := term.Effects(); len(got) != 0 {
-		t.Fatalf("ED2 alone produced %s, want no effect: a redrawing program must hide no block", describeEffects(got))
+	// ED2 alone is sighted as an in-place erase (nocx-2v80t.7), which hides
+	// nothing; what must never come of it is a clear boundary.
+	got := term.Effects()
+	if len(got) != 1 || got[0].Kind != emulator.EffectEraseDisplay {
+		t.Fatalf("ED2 alone produced %s, want exactly one erase-display and no clear boundary: a redrawing program must hide no block", describeEffects(got))
 	}
+}
+
+// withoutEraseDisplay drops the in-place erase sightings from a drain.
+func withoutEraseDisplay(effects []emulator.Effect) []emulator.Effect {
+	var out []emulator.Effect
+	for _, e := range effects {
+		if e.Kind != emulator.EffectEraseDisplay {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // TestEraseSavedLinesOnAScreenThatNeverScrolledStillProducesAClearBoundary

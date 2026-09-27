@@ -51,3 +51,14 @@ func eraseSavedLinesMatches(idx int, b byte) bool {
 func (t *terminal) sightEraseSavedLines() {
 	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectClearBoundary})
 }
+
+// eraseDisplayFixed is ED2 alone (nocx-2v80t.7): the display erased in place.
+const eraseDisplayFixed = "\x1b[2J"
+
+func eraseDisplayMatches(idx int, b byte) bool {
+	return idx < len(eraseDisplayFixed) && b == eraseDisplayFixed[idx]
+}
+
+func (t *terminal) sightEraseDisplay() {
+	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectEraseDisplay})
+}

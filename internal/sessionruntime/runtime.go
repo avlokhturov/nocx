@@ -1215,6 +1215,13 @@ func (s *Session) Ingest(b []byte) error {
 				s.sightOutputMarkLocked()
 				continue
 			}
+			if e.Kind == emulator.EffectEraseDisplay {
+				// An in-place erase of the whole display: what stood above
+				// the output is gone, so nothing may be cut as though it
+				// were still there (nocx-2v80t.7). Not a consumer payload.
+				s.sightEraseDisplayLocked()
+				continue
+			}
 			if e.Kind == emulator.EffectClearBoundary {
 				// Unlike the fence and the output mark this is not a
 				// rendezvous with an authenticated event — ED3 is a real VT

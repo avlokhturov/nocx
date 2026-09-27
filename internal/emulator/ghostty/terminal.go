@@ -182,6 +182,8 @@ type terminal struct {
 	// them — it is tracked in the same pass over the bytes purely because
 	// scanMarkers is the one place bytes are scanned at all.
 	eraseIdx int
+	// eraseDisplayIdx scans for ED2 alone (erase.go, nocx-2v80t.7).
+	eraseDisplayIdx int
 	// altExit scans for the switch back from the alternate screen, a split
 	// point for the departure measurement (altscreen.go, nocx-2v80t.6).
 	altExit altExitScan
@@ -594,6 +596,8 @@ func (t *terminal) ingestLocked(b []byte) {
 			t.sightOutputMark()
 		case markKindClearBoundary:
 			t.sightEraseSavedLines()
+		case markKindEraseDisplay:
+			t.sightEraseDisplay()
 		}
 		start += n
 	}
@@ -610,6 +614,7 @@ const (
 	// markKindAltExit needs nothing sighted: the split itself is the point,
 	// since the chunk it ends is measured on its own (altscreen.go).
 	markKindAltExit
+	markKindEraseDisplay
 )
 
 // scanMarkers advances the fence scanner (fence.go), the output-mark scanner
@@ -668,6 +673,18 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.eraseIdx = 1
 		} else {
 			t.eraseIdx = 0
+		}
+
+		if eraseDisplayMatches(t.eraseDisplayIdx, c) {
+			if t.eraseDisplayIdx == len(eraseDisplayFixed)-1 {
+				t.eraseDisplayIdx = 0
+				return i + 1, markKindEraseDisplay
+			}
+			t.eraseDisplayIdx++
+		} else if c == eraseDisplayFixed[0] {
+			t.eraseDisplayIdx = 1
+		} else {
+			t.eraseDisplayIdx = 0
 		}
 
 		// Last, so every other scanner has already taken this byte.
