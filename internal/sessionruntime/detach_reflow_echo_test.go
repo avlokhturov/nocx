@@ -332,3 +332,68 @@ func TestACommitWhileASplitIsPendingIsInTheCutOnceTheSplitIsUndone(t *testing.T)
 		t.Fatalf("the block stored %d rows, want exactly OUT-001, OUT-002:\n%s", len(got), strings.Join(got, "\n"))
 	}
 }
+
+// A pane that grows pulls rows back out of the history ABOVE the command; the
+// closing screen is cut from below them, and so is the output's own start
+// (codex's third review of nocx-2v80t.5, finding 1).
+func TestAGrowingPaneDoesNotCutTheCommandsOwnOutput(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 27))
+	obsFeed(t, s, 0, 60)
+	obsSeal(t, s, obsNonce(1))
+	if err := s.Ingest([]byte("$ a-command\r\n" + outputMarkerFixed + "OUT-001\r\nOUT-002\r\nOUT-003\r\n")); err != nil {
+		t.Fatalf("ingest the command: %v", err)
+	}
+	if _, err := s.CommitGeometry(harnessGeometry(80, 33)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	nonce := obsNonce(0x58)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x58))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	got := closingTexts(t, rs, nonce)
+	if strings.Join(got, "|") != "OUT-001|OUT-002|OUT-003" {
+		t.Fatalf("the closing screen holds %q, want exactly the three output rows", got)
+	}
+}
+
+// A reset destroys the row the output mark was pinned on, and every row
+// above it: what the command prints after it is all output (codex's third
+// review of nocx-2v80t.5, finding 2).
+func TestAResetAfterTheOutputMarkLeavesNothingToCut(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	if err := s.Ingest([]byte("earlier\r\nearlier\r\n$ reset-then-print\r\n" + outputMarkerFixed + "\x1bc" + "OUT-001\r\nOUT-002\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	nonce := obsNonce(0x59)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x59))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	if got := closingTexts(t, rs, nonce); strings.Join(got, "|") != "OUT-001|OUT-002" {
+		t.Fatalf("the closing screen holds %q, want exactly OUT-001, OUT-002", got)
+	}
+}
+
+// Paired: the pane grew BEFORE the output mark, so rows pulled back from the
+// history already sit above the command when the mark's row is pinned. The
+// pin names the screen row itself, not its index below those rows.
+func TestAnOutputMarkBelowPulledBackRowsPinsItsOwnRow(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 27))
+	obsFeed(t, s, 0, 60)
+	obsSeal(t, s, obsNonce(1))
+	if _, err := s.CommitGeometry(harnessGeometry(80, 33)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	if err := s.Ingest([]byte("$ a-command\r\n" + outputMarkerFixed + "OUT-001\r\nOUT-002\r\n")); err != nil {
+		t.Fatalf("ingest the command: %v", err)
+	}
+	nonce := obsNonce(0x5a)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x5a))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	if got := closingTexts(t, rs, nonce); strings.Join(got, "|") != "OUT-001|OUT-002" {
+		t.Fatalf("the closing screen holds %q, want exactly OUT-001, OUT-002", got)
+	}
+}

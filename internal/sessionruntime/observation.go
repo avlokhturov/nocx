@@ -632,7 +632,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		rec.Closing = scr
 	}
-	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted)
+	skip := s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted, rec.Closing)
 	releaseTrack(o.OutputStartTrack)
 	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip), false)
@@ -990,7 +990,9 @@ func (s *Session) sightOutputMarkLocked() {
 	}
 	o.OutputStartRow = startRow
 	o.OutputMarkDeparted = s.screenDepartedRows
-	if t, err := s.emulator.TrackRow(startRow); err == nil {
+	// startRow counts from boundaryRowsTop, as the rows it was measured on
+	// do; the pin names the screen row itself.
+	if t, err := s.emulator.TrackRow(boundaryRowsTop(scr) + startRow); err == nil {
 		o.OutputStartTrack = t
 	}
 	if len(rows) <= 1 {
@@ -1167,22 +1169,24 @@ func closingRowsForStream(scr ObservationScreen, skip int) []emulator.Row {
 	return rows
 }
 
-// outputStartSkipLocked is how many rows of the screen as it stands NOW sit
-// above the interval's first output row: the row its pin occupies, read at
-// the instant the closing screen is read, so a geometry commit anywhere in
-// between — a reflow that split or joined the command line — is already in
-// the answer (nocx-2v80t.5). A pin that is alive but off the active screen
-// means the whole prefix has left: nothing to cut. Without a usable pin (none
-// was taken, the row ceased, or the alternate screen is up) the count falls
-// back to the positional arithmetic, which is exact whenever no commit
-// re-laid the rows.
-func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, startRow int, markDeparted uint64) int {
+// outputStartSkipLocked is how many rows of the closing screen scr — counted
+// from boundaryRowsTop, as closingRowsForStream cuts them — sit above the
+// interval's first output row. It is read from the row's pin at the instant
+// scr was read, so a geometry commit anywhere in between, a reflow that split
+// or joined the command line, is already in the answer (nocx-2v80t.5).
+//
+// A pin that is alive but off the active screen means the whole prefix has
+// left, and one whose row CEASED (a reset) means the prefix ceased with it:
+// either way nothing on this screen precedes the output. Only when no pin was
+// taken, or it cannot be located right now, does the count fall back to the
+// positional arithmetic, which is exact whenever no commit re-laid the rows.
+func (s *Session) outputStartSkipLocked(pin emulator.RowTrack, startRow int, markDeparted uint64, scr ObservationScreen) int {
 	if pin != nil {
 		y, err := pin.ActiveRow()
 		switch {
 		case err == nil:
-			return y
-		case errors.Is(err, emulator.ErrOutOfRange) && pin.Alive():
+			return max(y-boundaryRowsTop(scr), 0)
+		case errors.Is(err, emulator.ErrOutOfRange):
 			return 0
 		}
 	}
@@ -1346,7 +1350,7 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
 	}
-	cap.OutputSkip = s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted)
+	cap.OutputSkip = s.outputStartSkipLocked(o.OutputStartTrack, o.OutputStartRow, o.OutputMarkDeparted, cap.Closing)
 	// The screen the fence sits on is this boundary's closing screen, and its
 	// rows can start leaving before the completion that authenticates the
 	// boundary arrives — it rides another carrier. A pane that shrinks in
