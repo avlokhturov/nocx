@@ -979,6 +979,7 @@ func (s *Session) sightOutputMarkLocked() {
 	}
 	o.OutputStartRow = startRow
 	o.OutputMarkDeparted = s.screenDepartedRows
+	s.trackOutputStartLocked(startRow)
 	if len(rows) <= 1 {
 		// Nothing above the cursor to protect: a blank screen with the
 		// cursor already at the top, or the alternate buffer. The window

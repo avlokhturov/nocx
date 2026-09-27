@@ -352,3 +352,47 @@ func TestTrackRowReadAcrossARewrap(t *testing.T) {
 		t.Fatalf("after narrowing the tracked row reads %q (wrap=%v), want %q wrapped", got, row.Wrap, line[:40])
 	}
 }
+
+// TestTrackRowReportsWhichActiveRowItIsNow is the position half of a row's
+// identity (nocx-2v80t.5): a caller that pinned a row before a resize must be
+// able to ask where that row sits on the active screen AFTER the reflow, since
+// a narrower grid re-lays a soft-wrapped line into more rows and moves every
+// row below it. A row that scrolled into the history is not on the active
+// screen, and says so without being dead.
+func TestTrackRowReportsWhichActiveRowItIsNow(t *testing.T) {
+	term := departedTerm(t, 80, 24)
+	long := strings.Repeat("w", 100) // wraps once at 80 columns
+	if _, err := term.Ingest([]byte(long + "\r\nbelow\r\n")); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	track, err := term.TrackRow(2)
+	if err != nil {
+		t.Fatalf("TrackRow: %v", err)
+	}
+	defer track.Release()
+	if y, err := track.ActiveRow(); err != nil || y != 2 {
+		t.Fatalf("ActiveRow before any resize = %d, %v; want 2", y, err)
+	}
+
+	// At 40 columns the 100-cell line takes three rows, so "below" moves down one.
+	if _, err := term.Resize(emulator.Geometry{Cols: 40, Rows: 24, CellWidthPx: 10, CellHeightPx: 20}); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	if y, err := track.ActiveRow(); err != nil || y != 3 {
+		t.Fatalf("ActiveRow after narrowing = %d, %v; want 3", y, err)
+	}
+	if got, _ := trackedText(t, track); got != "below" {
+		t.Fatalf("the tracked row reads %q; want the row it pinned", got)
+	}
+
+	// Scrolled off the top: alive, and not on the active screen.
+	if _, err := term.Ingest([]byte(strings.Repeat("x\r\n", 40))); err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	if !track.Alive() {
+		t.Fatal("a row that scrolled into the history must still be alive")
+	}
+	if _, err := track.ActiveRow(); !errors.Is(err, emulator.ErrOutOfRange) {
+		t.Fatalf("ActiveRow of a row in the history = %v; want ErrOutOfRange", err)
+	}
+}

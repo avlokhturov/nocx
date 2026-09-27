@@ -283,6 +283,10 @@ type Session struct {
 	// (outputMarkSkipLocked, nocx-2v80t.3.24). departedRows stays the
 	// stream's index space; this is never an index.
 	screenDepartedRows uint64
+	// outputStartTrack pins the row the interval in flight's output starts
+	// at, so a geometry commit can say where that row went
+	// (reflowOutputMarkLocked, nocx-2v80t.5).
+	outputStartTrack emulator.RowTrack
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at
@@ -1051,6 +1055,9 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 	// feed — not at whichever ingest comes next, which may carry the fence
 	// that closes this interval, or open another one.
 	s.drainObservationLocked(0)
+	// The rows the boundary bookkeeping names were just re-laid out; bring it
+	// up to the new grid before anything else reads it (nocx-2v80t.5).
+	s.reflowBoundaryLocked()
 	if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
 		// Both sides took it, but the program's own report of the new size
 		// never reached it: the attempt did not complete, so it does not
@@ -1085,8 +1092,12 @@ func (s *Session) repairLocked() error {
 	}
 	if replies, err := s.emulator.Resize(s.geom.Geometry); err != nil {
 		failed = append(failed, err)
-	} else if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
-		failed = append(failed, writeErr)
+	} else {
+		// The rows re-laid out a second time, back to the commit in force.
+		s.reflowBoundaryLocked()
+		if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
+			failed = append(failed, writeErr)
+		}
 	}
 	return errors.Join(failed...)
 }

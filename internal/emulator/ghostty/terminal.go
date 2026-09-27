@@ -1134,6 +1134,38 @@ func (rt *rowTrack) Row() (emulator.Row, error) {
 	return t.rowAt(pointScreen, int(pt.y))
 }
 
+// ActiveRow resolves the reference in the ACTIVE area, where the library
+// answers no value for a row the active area does not hold — one in the
+// history as much as one that ceased — so both are ErrOutOfRange here and
+// Alive is how a caller tells them apart.
+func (rt *rowTrack) ActiveRow() (int, error) {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	t := rt.term
+	if t.t == nil {
+		return 0, emulator.ErrClosed
+	}
+	if rt.released {
+		return 0, fmt.Errorf("ghostty: tracked row released: %w", emulator.ErrOutOfRange)
+	}
+	screen, err := t.screenLocked()
+	if err != nil {
+		return 0, err
+	}
+	if screen != emulator.ScreenPrimary {
+		return 0, fmt.Errorf("ghostty: tracked row located while the alternate screen is active: %w", emulator.ErrUnsupported)
+	}
+	var pt C.GhosttyPointCoordinate
+	switch r := C.ghostty_tracked_grid_ref_point(rt.ref, pointActive, &pt); r {
+	case C.GHOSTTY_SUCCESS:
+		return int(pt.y), nil
+	case C.GHOSTTY_NO_VALUE:
+		return 0, fmt.Errorf("ghostty: tracked row is not on the active area: %w", emulator.ErrOutOfRange)
+	default:
+		return 0, resultError("tracked_grid_ref_point", r)
+	}
+}
+
 // Release frees the handle and forgets it, so the terminal's own close does
 // not try to free it a second time. Idempotent — a second call finds
 // released already true and does nothing — and safe after the terminal has
