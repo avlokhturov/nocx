@@ -1,8 +1,8 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.32.0 on 2026-09-27 by its setup task, "The backlog tooling here matches shady2k-skills
-0.32.0 and is proved from main" (nocx-q8yjf.13). The protocol itself ships with the skills
+0.33.0 on 2026-09-27 by its setup task, "The backlog tooling here matches shady2k-skills
+0.33.0 and is proved from main" (nocx-q8yjf.14). The protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
@@ -129,8 +129,8 @@ keeps every later change.
   [`time-format.mjs`](../../.githooks/backlog-gate/time-format.mjs) beside it, which it reads
   work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
   [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.32.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.32.0`,
+  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.33.0, never
+  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.33.0`,
   and the selftests run from the plugin directory because the fixtures live there:
   `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
@@ -174,7 +174,11 @@ keeps every later change.
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
   automatic check did not run. No document policy, baseline, receipts or synchronization
-  are wired, and nothing about documents is enforced by CI.
+  are wired, and nothing about documents is enforced by CI. Since 0.33.0 a required check
+  may name the paths it does not read (`ignores`), and its receipt is then pinned to a
+  revision of its own inputs (`checkRevisions`, from `checkRevision` in the plugin's
+  `document-format.mjs`); wiring the gate finds those paths from each check's command and
+  proves the pin on two commits, a prose edit and an edit to a file the check reads.
 - **Document evidence level: records** (owner, 2026-09-19). The owner may push to `main`
   directly and CI cannot block that, so there is no protected CI to verify receipts
   against. When the document gate lands, acceptance evidence is the stage's acceptance
