@@ -283,10 +283,11 @@ type Session struct {
 	// (outputMarkSkipLocked, nocx-2v80t.3.24). departedRows stays the
 	// stream's index space; this is never an index.
 	screenDepartedRows uint64
-	// outputStartTrack pins the row the interval in flight's output starts
-	// at, so a geometry commit can say where that row went
-	// (reflowOutputMarkLocked, nocx-2v80t.5).
-	outputStartTrack emulator.RowTrack
+	// reflowOwed says a geometry commit landed while the alternate screen
+	// held the pane, so the primary screen's rows were re-laid out where no
+	// pin could be located; the repair runs when the primary is back
+	// (settleOwedReflowLocked, nocx-2v80t.5).
+	reflowOwed bool
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at

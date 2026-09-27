@@ -189,6 +189,11 @@ type observationOpen struct {
 	// counts is exactly how much of the prefix a scroll has since carried
 	// off — still by position, still never by text (outputMarkSkipLocked).
 	OutputMarkDeparted uint64
+	// OutputStartTrack pins the row OutputStartRow names, so a geometry
+	// commit can re-measure it (reflowOutputMarkLocked, nocx-2v80t.5). The
+	// interval owns it: parking carries it, a split hands it to the capture,
+	// and whatever ends the interval releases it.
+	OutputStartTrack emulator.RowTrack
 }
 
 // takeObservationScreenLocked reads one instant of the emulator. It assumes
@@ -482,6 +487,7 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 // marker, as a loss-only emission, so a hole at the very end of an interval
 // is never silently dropped.
 func (s *Session) drainObservationLocked(feedBytes int) {
+	s.settleOwedReflowLocked()
 	if s.observation == nil {
 		// No interval is in flight; nothing may claim the report's rows, so
 		// they stay where they are for the interval that opens next.
@@ -625,6 +631,7 @@ func (s *Session) sealObservationLocked(nonce FenceNonce) {
 		rec.Closing = scr
 	}
 	skip := outputMarkSkipLocked(o.OutputStartRow, o.OutputMarkDeparted, s.screenDepartedRows)
+	releaseTrack(o.OutputStartTrack)
 	s.expectBoundaryScreenLocked(rec.Closing)
 	s.emitIntervalEndLocked(nonce, s.departedRows, closingRowsForStream(rec.Closing, skip), false)
 	// The next interval opens on the boundary screen, at the boundary
@@ -661,6 +668,7 @@ func (s *Session) parkObservationLocked(nonce FenceNonce) {
 		OutputMarked:       o.OutputMarked,
 		OutputStartRow:     o.OutputStartRow,
 		OutputMarkDeparted: o.OutputMarkDeparted,
+		OutputStartTrack:   o.OutputStartTrack,
 	}
 }
 
@@ -679,6 +687,7 @@ func (s *Session) parkObservationLocked(nonce FenceNonce) {
 // record is evidence of what the command printed up to its own end, and its
 // Completeness rides the record's own losses.
 func (s *Session) sealPendingWithoutScreenLocked(nonce FenceNonce, parked *observationOpen) {
+	releaseTrack(parked.OutputStartTrack)
 	rec := ObservationRecord{
 		Nonce:        nonce,
 		At:           s.inc,
@@ -979,7 +988,9 @@ func (s *Session) sightOutputMarkLocked() {
 	}
 	o.OutputStartRow = startRow
 	o.OutputMarkDeparted = s.screenDepartedRows
-	s.trackOutputStartLocked(startRow)
+	if t, err := s.emulator.TrackRow(startRow); err == nil {
+		o.OutputStartTrack = t
+	}
 	if len(rows) <= 1 {
 		// Nothing above the cursor to protect: a blank screen with the
 		// cursor already at the top, or the alternate buffer. The window
@@ -1250,6 +1261,10 @@ type observationCapture struct {
 	// mark it may already have sighted.
 	OutputStartRow     int
 	OutputMarkDeparted uint64
+	// OutputStartTrack is the split interval's own pin, handed over with the
+	// fields above so an undone split restores the interval's pin rather than
+	// the rebased one's; released when the capture seals.
+	OutputStartTrack emulator.RowTrack
 	// ScreenDeparted is [Session.screenDepartedRows] at this capture's own
 	// instant — EndRow's counterpart for the cut, which must count the rows
 	// the suppression window withheld as well as the ones it streamed
@@ -1299,6 +1314,7 @@ func (s *Session) splitObservationAtFenceLocked(rebase FenceNonce) *observationC
 		OutputMarked:       o.OutputMarked,
 		OutputStartRow:     o.OutputStartRow,
 		OutputMarkDeparted: o.OutputMarkDeparted,
+		OutputStartTrack:   o.OutputStartTrack,
 	}
 	if scr, ok := s.takeObservationScreenLocked(); ok {
 		cap.Closing = scr
@@ -1351,6 +1367,8 @@ func (s *Session) sealObservationFromCaptureLocked(nonce FenceNonce, cap *observ
 		Loss:         cap.Loss,
 	}
 	skip := outputMarkSkipLocked(cap.OutputStartRow, cap.OutputMarkDeparted, cap.ScreenDeparted)
+	releaseTrack(cap.OutputStartTrack)
+	cap.OutputStartTrack = nil
 	// The window was installed at the sighting (splitObservationAtFenceLocked)
 	// and has been doing its work since: installing it again here would name
 	// rows that may already have left, and pin whatever row now sits where
@@ -1422,6 +1440,13 @@ func (s *Session) unwindCaptureWindowLocked(cap *observationCapture) {
 	}
 }
 
+// releaseTrack frees a pin that may be absent.
+func releaseTrack(t emulator.RowTrack) {
+	if t != nil {
+		t.Release()
+	}
+}
+
 // releaseBoundaryRows frees the pins of window entries that are no longer
 // any window's.
 func releaseBoundaryRows(rows []pendingBoundaryRow) {
@@ -1451,6 +1476,7 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 			OutputMarked:       cap.OutputMarked,
 			OutputStartRow:     cap.OutputStartRow,
 			OutputMarkDeparted: cap.OutputMarkDeparted,
+			OutputStartTrack:   cap.OutputStartTrack,
 		}
 		return
 	}
@@ -1466,6 +1492,9 @@ func (s *Session) returnObservationCaptureLocked(cap *observationCapture) {
 	o.OutputMarked = cap.OutputMarked
 	o.OutputStartRow = cap.OutputStartRow
 	o.OutputMarkDeparted = cap.OutputMarkDeparted
+	// The rebased tail's own pin, if it sighted a C of its own, goes with it.
+	releaseTrack(o.OutputStartTrack)
+	o.OutputStartTrack = cap.OutputStartTrack
 }
 
 // Observations is every sealed record the session retains, oldest first. The
