@@ -57,6 +57,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type pwSSHServer struct {
+	// counted is signalled each time a connection is counted, so a test can
+	// wait for the count it expects instead of reading it before the
+	// fixture's own goroutine has caught up (awaitConns, nocx-2v80t.10).
+	counted chan struct{}
+
 	hostSigner gossh.Signer
 	listener   net.Listener
 	addr       string
@@ -167,6 +172,7 @@ func startPasswordSFTPSSHServer(t *testing.T, root string) *pwSSHServer {
 	s := &pwSSHServer{
 		hostSigner: hostSigner, listener: listener, addr: listener.Addr().String(),
 		rootDir: root, live: make(map[*gossh.ServerConn]struct{}),
+		counted: make(chan struct{}, 1),
 	}
 
 	config := &gossh.ServerConfig{
@@ -225,6 +231,10 @@ func (s *pwSSHServer) serveConn(conn net.Conn, config *gossh.ServerConfig) {
 	s.mu.Lock()
 	s.conns++
 	s.mu.Unlock()
+	select {
+	case s.counted <- struct{}{}:
+	default:
+	}
 	s.liveMu.Lock()
 	s.live[sshConn] = struct{}{}
 	s.liveMu.Unlock()
@@ -766,5 +776,26 @@ func openPasswordConfig(srv *pwSSHServer, remote *ssh.ConnectConfig) session.Con
 		ProfileID: "ssh:password-proof",
 		Cols:      80, Rows: 24,
 		Remote: remote,
+	}
+}
+
+// awaitConns answers the authenticated-connection count once it has reached
+// want, or what it is when the bound runs out. The fixture counts a
+// connection in its own goroutine after the handshake returns there, and the
+// client can finish its whole probe first: a count read straight after the
+// probe raced that goroutine and read 0, 1 run in a full gate
+// (nocx-2v80t.10). The caller still asserts the exact number, so a count
+// that overshoots fails exactly as before.
+func (s *pwSSHServer) awaitConns(want int) int {
+	deadline := time.After(10 * time.Second)
+	for {
+		if got := s.connCount(); got >= want {
+			return got
+		}
+		select {
+		case <-s.counted:
+		case <-deadline:
+			return s.connCount()
+		}
 	}
 }
