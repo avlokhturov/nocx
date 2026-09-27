@@ -797,6 +797,13 @@ func (t *terminal) noteDepartedLocked() {
 		if fresh := pushed - again; fresh > 0 {
 			t.captureDepartedLocked(h-fresh, h)
 		}
+		// And the inverse, as Resize books it for the active buffer: a
+		// growth refilled the screen from the history, rows that were
+		// reported when they first left, so each owes the departure it will
+		// not report again. Bounded by the rows the screen gained.
+		if refill := min(max(t.geom.Rows-base.screenRows, 0), max(base.rows-h, 0)); refill > 0 {
+			base.owed = min(base.owed+refill, t.geom.Rows)
+		}
 	}
 	base.rows, base.valid, base.torn = h, true, false
 	base.screenRows, base.hidden = t.geom.Rows, false

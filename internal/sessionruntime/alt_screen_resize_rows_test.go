@@ -110,3 +110,86 @@ func TestAShrinkWhileTheAlternateScreenIsUpKeepsTheRowsItPushedOff(t *testing.T)
 		t.Fatalf("the block stored %d rows, want exactly its %d output rows:\n%s", len(stored), len(want), strings.Join(stored, "\n"))
 	}
 }
+
+// A window row that continues the one before it is consumed as ITSELF when it
+// departs, so no entry outlives the row it named: output whose first row
+// reads exactly like that continuation is output (codex's review of
+// nocx-2v80t.6, finding 3).
+func TestAContinuationTheWindowNamedLeavesNoEntryToSwallowOutput(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	line := "$ " + strings.Repeat("x", 78) + strings.Repeat("continuation-text ", 2)
+	if err := s.Ingest([]byte(line + "\r\n" + outputMarkerFixed)); err != nil {
+		t.Fatalf("ingest the echo and the output mark: %v", err)
+	}
+	tail := strings.TrimRight(line[80:], " ")
+	want := []string{tail}
+	var out strings.Builder
+	out.WriteString(tail + "\r\n")
+	for i := 1; i <= 40; i++ {
+		m := fmt.Sprintf("OUT-%03d", i)
+		want = append(want, m)
+		out.WriteString(m + "\r\n")
+	}
+	if err := s.Ingest([]byte(out.String())); err != nil {
+		t.Fatalf("ingest the output: %v", err)
+	}
+	nonce := obsNonce(0x63)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x63))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	got := storedRowsFor(t, rs, nonce)
+	if strings.Join(got, "|") != strings.Join(want, "|") {
+		t.Fatalf("the block stored %d rows, want its %d output rows, the first reading like the echo's continuation:\n%s", len(got), len(want), strings.Join(got, "\n"))
+	}
+}
+
+// A pane that GROWS while the alternate screen is up pulls rows the primary
+// already reported back out of its history. When they leave again they are
+// not the next command's: the next block holds only its own output (codex's
+// review of nocx-2v80t.6, finding 4).
+func TestAGrowthWhileTheAlternateScreenIsUpDoesNotReportRowsTwice(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+	obsFeed(t, s, 0, 60)
+	obsSeal(t, s, obsNonce(1))
+	if err := s.Ingest([]byte("$ run-a-program\r\n" + outputMarkerFixed + "\x1b[?1049h" + "full-screen program\r\n")); err != nil {
+		t.Fatalf("enter the alternate screen: %v", err)
+	}
+	if _, err := s.CommitGeometry(harnessGeometry(80, 40)); err != nil {
+		t.Fatalf("commit: %v", err)
+	}
+	var want []string
+	var out strings.Builder
+	out.WriteString("\x1b[?1049l")
+	for i := 1; i <= 60; i++ {
+		m := fmt.Sprintf("OUT-%03d", i)
+		want = append(want, m)
+		out.WriteString(m + "\r\n")
+	}
+	if err := s.Ingest([]byte(out.String())); err != nil {
+		t.Fatalf("leave the alternate screen and print: %v", err)
+	}
+	nonce := obsNonce(0x64)
+	s.Completed(s.Incarnation(), nonce, 0)
+	if err := s.Ingest([]byte(fenceFor(0x64))); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	// The block before is every row streamed up to its end marker; this one
+	// is what streamed after it plus its own closing screen.
+	var mine []string
+	after := false
+	for _, e := range rs.snapshot() {
+		switch {
+		case e.kind == "end" && e.nonce == obsNonce(1):
+			after = true
+		case e.kind == "rows" && after:
+			for _, r := range e.rows {
+				mine = append(mine, streamRowText(r))
+			}
+		}
+	}
+	mine = append(mine, closingTexts(t, rs, nonce)...)
+	if strings.Join(mine, "|") != strings.Join(want, "|") {
+		t.Fatalf("the block stored %d rows, want exactly its %d output rows:\n%s", len(mine), len(want), strings.Join(mine, "\n"))
+	}
+}

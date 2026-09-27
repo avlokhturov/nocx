@@ -404,7 +404,17 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 	// geometry commit re-laid it (nocx-2v80t.6), and is the window's too.
 	lineHeld := false
 	for i, row := range rows {
-		if lineHeld && row.Continuation {
+		at := -1
+		for j := range s.pendingScreen {
+			if sameVisibleRow(row, s.pendingScreen[j].Row) {
+				at = j
+				break
+			}
+		}
+		// A row the window names is consumed as itself, so no entry outlives
+		// the row it named. Only a continuation the window no longer names
+		// in its re-laid form is taken by the shortcut.
+		if at < 0 && lineHeld && row.Continuation {
 			if c := s.pendingCapture; c != nil {
 				c.Held = append(c.Held, row)
 			} else {
@@ -413,13 +423,6 @@ func (s *Session) suppressBoundaryScreenLocked(rows []emulator.Row) []emulator.R
 			continue
 		}
 		lineHeld = false
-		at := -1
-		for j := range s.pendingScreen {
-			if sameVisibleRow(row, s.pendingScreen[j].Row) {
-				at = j
-				break
-			}
-		}
 		if at < 0 && len(s.pendingScreen) == 1 && s.pendingScreen[0].Cursor {
 			// The one entry left is the boundary's own cursor row (see
 			// pendingBoundaryRow.Cursor): every other entry has already
