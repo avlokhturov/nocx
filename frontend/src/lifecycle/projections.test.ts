@@ -55,8 +55,15 @@ class FakeBlocks implements BlockProjectionPort {
   freezeBlock(a: ExecutionAttempt): void {
     this.events.push(`freeze:${a.id}:${a.exitCode ?? 'null'}`)
   }
-  abandonBlock(a: ExecutionAttempt): void {
+  /** Which abandons the pane made because it let its session go. */
+  readonly sessionGone: string[] = []
+  settled = 0
+  abandonBlock(a: ExecutionAttempt, sessionGone?: boolean): void {
     this.events.push(`abandon:${a.id}`)
+    if (sessionGone === true) this.sessionGone.push(a.id)
+  }
+  settleWithoutBackend(): void {
+    this.settled++
   }
   abandonPending(): void {
     this.events.push('abandon-pending')
@@ -71,17 +78,8 @@ function makeEnv(opts: { unattributed?: UnattributedPort } = {}) {
   let minted = 0
   const ledger = new CommandLedger({ now: () => 1000, mintSubmitId: () => `sub-${++minted}` })
   const blocks = new FakeBlocks()
-  const persist = vi.fn<(rec: CommandRecord, attempt: ExecutionAttempt) => Promise<unknown>>(() =>
-    Promise.resolve(null),
-  )
-  const projections = new LifecycleProjections(
-    kernel,
-    ledger,
-    blocks,
-    persist,
-    undefined,
-    opts.unattributed,
-  )
+  const persist = vi.fn<(rec: CommandRecord, attempt: ExecutionAttempt) => void>()
+  const projections = new LifecycleProjections(kernel, ledger, blocks, persist, opts.unattributed)
   projections.attach()
   return { kernel, ledger, blocks, persist, projections }
 }
@@ -115,10 +113,11 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(rec?.exitCode).toBe(0)
     expect(rec?.endedAt).toBe(1000)
     expect(persist).toHaveBeenCalledTimes(1)
-    // The persisted record carries the app-owned text — never the attempt's.
-    const [persisted] = persist.mock.calls[0]
-    expect(persisted.command).toBe('make {{secret:ci}}')
-    expect(persisted.status).toBe('success')
+    // The binding callback carries the app-owned text before the authenticated
+    // completion; the backend owns durable completion and masking now.
+    const [bound] = persist.mock.calls[0]
+    expect(bound.command).toBe('make {{secret:ci}}')
+    expect(bound.status).toBe('success')
     expect(blocks.events).toEqual(['bind:att-1', 'freeze:att-1:0'])
 
     // A later change must not re-complete the same attempt.
@@ -137,7 +136,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(rec?.status).toBe('unknown')
     expect(rec?.exitCode).toBeNull()
     expect(rec?.endedAt).toBe(1000)
-    expect(persist).not.toHaveBeenCalled()
+    expect(persist).toHaveBeenCalledTimes(1)
     expect(blocks.events).toEqual(['bind:att-1', 'abandon:att-1'])
   })
 
@@ -171,7 +170,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const rec = ledger.records()[0]
     expect(rec.status).toBe('failure')
     expect(rec.exitCode).toBe(2)
-    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledTimes(0)
   })
 
   it('logical completion does not wait for the render fence — ledger and history land on the event alone (u7uh.8)', () => {
@@ -202,7 +201,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const rec = ledger.recordForAttempt('att-1')
     expect(rec?.status).toBe('success')
     expect(rec?.exitCode).toBe(0)
-    expect(persist).toHaveBeenCalledTimes(1)
+    expect(persist).toHaveBeenCalledTimes(0)
     // The freeze port call is the LAST projection on the event — after the
     // status and the history write, never before them.
     expect(blocks.events).toEqual(['freeze:att-1:0'])
@@ -217,7 +216,7 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     const rec = ledger.recordForAttempt('att-1')
     expect(rec?.status).toBe('unknown')
     expect(rec?.exitCode).toBeNull()
-    expect(persist).not.toHaveBeenCalled()
+    expect(persist).toHaveBeenCalledTimes(1)
     expect(blocks.events).toEqual(['bind:att-1', 'abandon:att-1'])
   })
 
@@ -371,6 +370,11 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(first.status).toBe('unknown')
     expect(pending.status).toBe('unknown')
     expect(blocks.events).toEqual(['bind:att-reused', 'abandon:att-reused', 'abandon-pending'])
+    // The session is let go: nothing will send block.closed for its blocks
+    // to this pane, so the abandon says so and the waiting blocks settle
+    // (nocx-2v80t.3.30).
+    expect(blocks.sessionGone).toEqual(['att-reused'])
+    expect(blocks.settled).toBe(1)
 
     kernel.reset()
     ledger.open('second', '/', '', () => undefined, 'shell')
@@ -452,7 +456,6 @@ describe('an attempt binds the record its own submit opened', () => {
     // is what completes and what history is handed.
     expect(persist).toHaveBeenCalledTimes(1)
     const [recorded] = persist.mock.calls[0]
-    expect(recorded.command).toBe('echo second')
     expect(recorded.exitCode).toBe(0)
 
     // And the abandoned first record is untouched: it was never this

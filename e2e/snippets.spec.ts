@@ -130,6 +130,13 @@ async function programWaitingOnStdin(page: Page, command: string): Promise<numbe
   await page.keyboard.type(command)
   await page.keyboard.press('Enter')
   await expect(page.locator(INPUT)).not.toBeVisible({ timeout: 10_000 })
+  // The count is taken once the program's OWN block exists: a block opens on
+  // the backend's authenticated running fact, which lands after the input has
+  // hidden, so counting at the hide can miss it and see the block arrive later
+  // as a phantom "extra" (nocx-2v80t.3.59).
+  await expect(page.locator('.pane.active .cmd-block.cmd-block-running')).toHaveCount(1, {
+    timeout: 10_000,
+  })
   return await page.locator('.cmd-block').count()
 }
 

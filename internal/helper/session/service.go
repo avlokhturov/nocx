@@ -58,6 +58,7 @@ var (
 	ErrNotAttached   = errors.New("session: subscriber is not attached")
 	ErrBadSubscriber = errors.New("session: subscriber id is not 32 hex characters")
 	ErrAckAhead      = errors.New("session: ack is ahead of what was produced")
+	ErrConfirmAhead  = errors.New("session: the confirmed-written mark is ahead of what departed")
 	ErrAckBehind     = errors.New("session: ack is behind the current cursor")
 	ErrNoWriter      = errors.New("session: no attachment holds the write capability")
 	ErrNotTheWriter  = errors.New("session: this subscriber does not hold the write capability")
@@ -146,6 +147,14 @@ type Limits struct {
 	// clock, because D5 forbids the helper deciding anything about a block's
 	// result, not running a timer — see SweepInterval's own doc.
 	UnclaimedSessionTTL time.Duration
+	// DefaultRowBufferBytes, MinRowBufferBytes and MaxRowBufferBytes are
+	// the row buffer's bounds (nocx-2v80t.3.38): what a spawn naming none
+	// gets, the floor a request is raised to, and the ceiling. The buffer
+	// draws on BudgetBytes with the window (AD-10). Zero takes the package
+	// defaults of the same names.
+	DefaultRowBufferBytes int64
+	MinRowBufferBytes     int64
+	MaxRowBufferBytes     int64
 }
 
 // unclaimedSessionTTLDefault is D-amendment 3's number: a session nobody has
@@ -163,6 +172,10 @@ func DefaultLimits() Limits {
 		MaxWindowBytes:      64 << 20,
 		BudgetBytes:         512 << 20,
 		UnclaimedSessionTTL: unclaimedSessionTTLDefault,
+		// The row buffer (nocx-2v80t.3.38): see the constants' own comment.
+		DefaultRowBufferBytes: DefaultRowBufferBytes,
+		MinRowBufferBytes:     MinRowBufferBytes,
+		MaxRowBufferBytes:     MaxRowBufferBytes,
 	}
 }
 
@@ -183,6 +196,19 @@ func (l Limits) withDefaults() Limits {
 	if l.UnclaimedSessionTTL <= 0 {
 		l.UnclaimedSessionTTL = d.UnclaimedSessionTTL
 	}
+	if l.MinRowBufferBytes <= 0 {
+		l.MinRowBufferBytes = d.MinRowBufferBytes
+	}
+	if l.MaxRowBufferBytes <= 0 {
+		l.MaxRowBufferBytes = d.MaxRowBufferBytes
+	}
+	if l.DefaultRowBufferBytes <= 0 {
+		l.DefaultRowBufferBytes = d.DefaultRowBufferBytes
+	}
+	if l.MaxRowBufferBytes < l.MinRowBufferBytes {
+		l.MaxRowBufferBytes = l.MinRowBufferBytes
+	}
+	l.DefaultRowBufferBytes = min(max(l.DefaultRowBufferBytes, l.MinRowBufferBytes), l.MaxRowBufferBytes)
 	// D8's floor is ENFORCED, not merely documented, and the reason is
 	// measurable rather than aesthetic. The per-subscriber pump runs at most
 	// creditLimit ahead of the reader's acks, so with a window no larger than
@@ -245,17 +271,6 @@ type Options struct {
 	// duration — the interval is real wall-clock time, D5's own clock
 	// seam (Now) is what the sweep still measures a session's age against.
 	SweepInterval time.Duration
-	// RendezvousExpiry is the bounded missing-fence wait every spawned
-	// session's runtime runs its rendezvous under (design §6.4): how long
-	// either half arriving alone stays pending before the runtime calls
-	// its own ExpireRendezvous and marks the capture no-fence. Zero means
-	// the shipped default (rendezvousExpiryDefault); the number is free to
-	// change, stating it at the composition root is not.
-	RendezvousExpiry time.Duration
-	// RendezvousExpireAfter schedules that wait. Nil is time.AfterFunc; a
-	// test hands its own and fires the trigger itself, because the wait
-	// must be observable as a STATE, never as a duration (AGENTS.md).
-	RendezvousExpireAfter func(d time.Duration, f func()) (stop func() bool)
 }
 
 // defaultSweepInterval is how often production runs the scheduled sweep. It
@@ -265,11 +280,6 @@ type Options struct {
 // process's own liveness (see Service.Close's doc on why the helper cares)
 // outlive its TTL by up to a whole interval.
 const defaultSweepInterval = 10 * time.Minute
-
-// rendezvousExpiryDefault is the shipped bounded missing-fence wait (design
-// §6.4). The number is free to change; that a session runtime is BUILT with
-// one is not.
-const rendezvousExpiryDefault = 500 * time.Millisecond
 
 // Service is the helper's `session` service.
 type Service struct {
@@ -282,11 +292,6 @@ type Service struct {
 	limits     Limits
 	now        func() time.Time
 	newID      func() ([16]byte, error)
-	// rendezvousExpiry and rendezvousExpireAfter are the bounded
-	// missing-fence policy every spawned session's runtime is built under
-	// (Options.RendezvousExpiry).
-	rendezvousExpiry      time.Duration
-	rendezvousExpireAfter func(d time.Duration, f func()) (stop func() bool)
 	// sweepStop ends the scheduled sweep goroutine (nocx-isjh4); closed
 	// exactly once, by sweepStopOnce, from Close.
 	sweepStop     chan struct{}
@@ -337,28 +342,23 @@ var (
 // no PTY, and the first spawn is what makes this generation resident.
 func New(opts Options) *Service {
 	s := &Service{
-		generation:            opts.Generation,
-		spawner:               opts.Spawner,
-		sshSpawner:            opts.SSHSpawner,
-		inspector:             opts.Inspector,
-		screen:                opts.Screen,
-		log:                   opts.Log,
-		limits:                opts.Limits.withDefaults(),
-		now:                   opts.Now,
-		newID:                 opts.NewID,
-		rendezvousExpiry:      opts.RendezvousExpiry,
-		rendezvousExpireAfter: opts.RendezvousExpireAfter,
-		sessions:              make(map[string]*hostSession),
-		keys:                  make(map[string]*keyClaim),
-		sinks:                 make(map[Sink]struct{}),
-		sweepStop:             make(chan struct{}),
-		sweepDone:             make(chan struct{}),
+		generation: opts.Generation,
+		spawner:    opts.Spawner,
+		sshSpawner: opts.SSHSpawner,
+		inspector:  opts.Inspector,
+		screen:     opts.Screen,
+		log:        opts.Log,
+		limits:     opts.Limits.withDefaults(),
+		now:        opts.Now,
+		newID:      opts.NewID,
+		sessions:   make(map[string]*hostSession),
+		keys:       make(map[string]*keyClaim),
+		sinks:      make(map[Sink]struct{}),
+		sweepStop:  make(chan struct{}),
+		sweepDone:  make(chan struct{}),
 	}
 	if s.screen == nil {
 		s.screen = defaultScreen
-	}
-	if s.rendezvousExpiry == 0 {
-		s.rendezvousExpiry = rendezvousExpiryDefault
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -504,8 +504,9 @@ func (s *Service) Name() string { return proto.ServiceSession }
 func (s *Service) Ops() []string {
 	return []string{
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
+		proto.OpConfirmRows,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpScreen, proto.OpReplay,
+		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
@@ -522,6 +523,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.AttachParams{})
 	case proto.OpAck:
 		return host.SchemaFor(proto.AckParams{})
+	case proto.OpConfirmRows:
+		return host.SchemaFor(proto.ConfirmRowsParams{})
 	case proto.OpDetach:
 		return host.SchemaFor(proto.DetachParams{})
 	case proto.OpResize:
@@ -548,6 +551,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.AccessBumpParams{})
 	case proto.OpLifecycleComplete:
 		return host.SchemaFor(proto.LifecycleCompleteParams{})
+	case proto.OpLifecycleEntered:
+		return host.SchemaFor(proto.LifecycleEnteredParams{})
 	}
 	return nil
 }
@@ -608,7 +613,7 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeSpawnFailed, nil
 	case errors.Is(err, ErrNoSSHSpawner):
 		return proto.ErrCodeNoSSHClient, nil
-	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams), errors.Is(err, errBadFence):
+	case errors.Is(err, ErrCwdUnsupported), errors.Is(err, ErrRemotePgid), errors.Is(err, ErrBadSSHParams), errors.Is(err, errBadFence), errors.Is(err, errBadEntry):
 		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, errBadTargetKind):
 		return proto.ErrCodeBadParams, nil
@@ -660,15 +665,40 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		sink, _ := host.ConnectionFrom(ctx).(Sink)
-		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
-			return nil, err
-		}
+		// ONE READER OWNS EACH CURSOR (nocx-2v80t.3.44). An ack that names a
+		// lifecycle offset is the LIFECYCLE reader's, and it acks that cursor
+		// alone. Its Offset is the PTY position it read beside the lifecycle
+		// one, carried because the wire has always required the field, and
+		// the PTY reader acks that cursor itself, concurrently: when the PTY
+		// reader's newer ack lands first, the piggybacked offset is behind
+		// the cursor, and judging it refused the whole ack and lost the
+		// lifecycle offset it was sent for. So it is not judged and not
+		// applied here. The field stays on the wire for the generations that
+		// still apply it.
 		if p.LifecycleOffset != nil {
 			if err := hs.ackLifecycle(sink, p.Subscriber, *p.LifecycleOffset); err != nil {
 				return nil, err
 			}
+			return proto.AckResult{}, nil
+		}
+		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
+			return nil, err
 		}
 		return proto.AckResult{}, nil
+	case proto.OpConfirmRows:
+		var p proto.ConfirmRowsParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		hs, err := s.find(p.Session)
+		if err != nil {
+			return nil, err
+		}
+		sink, _ := host.ConnectionFrom(ctx).(Sink)
+		if err := hs.confirmRows(sink, p.Subscriber, p.UpToRow); err != nil {
+			return nil, err
+		}
+		return proto.ConfirmRowsResult{}, nil
 	case proto.OpScreen:
 		var p proto.ScreenParams
 		if err := decode(params, &p); err != nil {
@@ -717,6 +747,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.lifecycleComplete(p)
+	case proto.OpLifecycleEntered:
+		var p proto.LifecycleEnteredParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.lifecycleEntered(ctx, p)
 	case proto.OpDetach:
 		var p proto.DetachParams
 		if err := decode(params, &p); err != nil {
@@ -738,7 +774,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		// request's context is not threaded: the commit is two ioctls and a
 		// write on fds this process owns, and there is no partial state for a
 		// cancellation to leave behind.
-		if err := hs.resize(p.Cols, p.Rows); err != nil {
+		if err := hs.resize(p.Cols, p.Rows, p.XPixel, p.YPixel); err != nil {
 			return nil, err
 		}
 		return proto.ResizeResult{}, nil
@@ -844,17 +880,19 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
+	rowBuffer := s.clampRowBuffer(p.RowBufferBytes)
 
 	// Eviction under pressure (nocx-isjh4): closes exited, unattached
 	// sessions oldest-exit-first when reserved would not otherwise fit,
 	// BEFORE the refusal below is decided — so a spawn that fits once they
 	// are gone never sees ErrBudget at all. A live shell, or an exited
 	// session a coordinator still holds, is never touched here.
-	s.evictForBudget(reserved)
+	s.evictForBudget(reserved + rowBuffer)
 
 	s.mu.Lock()
 	committed := s.budget
-	if committed+reserved > s.limits.BudgetBytes {
+	rowBuffer, fits := s.fitRowBufferLocked(reserved, rowBuffer)
+	if !fits {
 		s.mu.Unlock()
 		// The total is read UNDER the lock and carried out of it: reporting it
 		// from the field after unlocking is a read of shared state that another
@@ -862,6 +900,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		// prints.
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
+	reserved += rowBuffer
 	s.budget += reserved
 	s.mu.Unlock()
 
@@ -889,6 +928,8 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 		Env:       p.Env,
 		Cols:      cols,
 		Rows:      rows,
+		XPixel:    p.XPixel,
+		YPixel:    p.YPixel,
 		Lifecycle: p.Lifecycle,
 		// The pane's tool endpoint is THIS request's and never this daemon's:
 		// the endpoint socket is keyed by the generation, so several
@@ -912,17 +953,19 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	return s.finishSpawn(claim, proc, proto.LaunchRecord{
 		Kind: proto.LaunchKindLocal,
 		Local: &proto.LocalLaunchRecord{
-			Shell:       proc.Shell(),
-			Cwd:         resolvedCwd(p.Cwd, proc),
-			Pid:         proc.Pid(),
-			Pgid:        processGroup(proc),
-			Cols:        cols,
-			Rows:        rows,
-			WindowBytes: bound,
+			Shell:          proc.Shell(),
+			Cwd:            resolvedCwd(p.Cwd, proc),
+			Pid:            proc.Pid(),
+			Pgid:           processGroup(proc),
+			Cols:           cols,
+			Rows:           rows,
+			WindowBytes:    bound,
+			RowBufferBytes: rowBuffer,
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
+		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -988,14 +1031,16 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	if p.Lifecycle != nil {
 		reserved += bound
 	}
+	rowBuffer := s.clampRowBuffer(p.RowBufferBytes)
 
 	// See spawn's identical step: eviction under pressure runs before the
 	// refusal below is decided (nocx-isjh4).
-	s.evictForBudget(reserved)
+	s.evictForBudget(reserved + rowBuffer)
 
 	s.mu.Lock()
 	committed := s.budget
-	if committed+reserved > s.limits.BudgetBytes {
+	rowBuffer, fits := s.fitRowBufferLocked(reserved, rowBuffer)
+	if !fits {
 		s.mu.Unlock()
 		// The total is read UNDER the lock and carried out of it: reporting it
 		// from the field after unlocking is a read of shared state that another
@@ -1003,6 +1048,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 		// prints.
 		return proto.SpawnResult{}, fmt.Errorf("%w: %d bytes committed of %d", ErrBudget, committed, s.limits.BudgetBytes)
 	}
+	reserved += rowBuffer
 	s.budget += reserved
 	s.mu.Unlock()
 
@@ -1092,14 +1138,16 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 			Shell:       string(shellKindOrAuto(p.Shell)),
 			// Empty, always: this helper resolved no directory on the far
 			// side. See proto.SSHLaunchRecord.
-			Cwd:         "",
-			Cols:        cols,
-			Rows:        rows,
-			WindowBytes: bound,
+			Cwd:            "",
+			Cols:           cols,
+			Rows:           rows,
+			WindowBytes:    bound,
+			RowBufferBytes: rowBuffer,
 		},
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
-		cols: cols, rows: rows, bound: bound, reserved: reserved, lifecycle: p.Lifecycle,
+		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
+		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1157,6 +1205,59 @@ func shellKindOrAuto(kind proto.SSHShellKind) proto.SSHShellKind {
 	return kind
 }
 
+// The row buffer's bounds (nocx-2v80t.3.36). The value is the person's
+// setting and travels at spawn; these are what the helper does with it.
+// DefaultRowBufferBytes is what a spawn naming none gets, sized from the
+// queue it replaces: 256 batches of one feed's departures, a feed departing
+// about one 80-column screen, is 256 × 24 rows × 80 cells × 40 bytes ≈ 20 MB.
+// MaxRowBufferBytes is the ceiling, because the memory is spent on the
+// machine the helper runs on, whatever the coordinator asks for: 256 MiB,
+// half the default aggregate budget, so one session can never take it all.
+//
+// MinRowBufferBytes is the floor (nocx-2v80t.3.38): 4 MiB holds one closing
+// screen of 400 columns × 250 rows — 100,000 cells at about 41 bytes each
+// (emissionBytes: a 40-byte cell and its grapheme), ≈ 3.9 MiB — with the
+// incomplete marker beside it. A smaller buffer could not carry one end
+// marker whole, and every block would end incomplete at its first boundary.
+// A request below it is raised to it; the aggregate budget never shrinks a
+// buffer below it either, and a spawn that cannot fit it is refused. These
+// are DefaultLimits' values; Limits carries them so the composition root
+// owns them like the window's.
+const (
+	DefaultRowBufferBytes int64 = 20 << 20
+	MinRowBufferBytes     int64 = 4 << 20
+	MaxRowBufferBytes     int64 = 256 << 20
+)
+
+// clampRowBuffer applies the helper's floor and ceiling to a spawn's
+// requested buffer; the aggregate budget is applied where the budget is
+// committed (fitRowBufferLocked).
+func (s *Service) clampRowBuffer(requested int64) int64 {
+	switch {
+	case requested <= 0:
+		return s.limits.DefaultRowBufferBytes
+	case requested < s.limits.MinRowBufferBytes:
+		return s.limits.MinRowBufferBytes
+	case requested > s.limits.MaxRowBufferBytes:
+		return s.limits.MaxRowBufferBytes
+	}
+	return requested
+}
+
+// fitRowBufferLocked applies the helper-wide aggregate to a clamped row
+// buffer, after the window's own reservation (AD-10, nocx-2v80t.3.38): the
+// row buffer is spent on this machine exactly as the window is, so it counts
+// against the same budget. A session asking for more than is left gets what
+// is left, never below the floor; with less than the floor left, it does not
+// fit. Called under s.mu.
+func (s *Service) fitRowBufferLocked(reserved, want int64) (int64, bool) {
+	left := s.limits.BudgetBytes - s.budget - reserved
+	if left < s.limits.MinRowBufferBytes {
+		return 0, false
+	}
+	return min(want, left), true
+}
+
 // spawnShape is everything finishSpawn needs that is not the process itself:
 // the identity the session is registered under, the window accounting already
 // reserved, and the lifecycle request (which decides whether a second window is
@@ -1173,8 +1274,15 @@ type spawnShape struct {
 	key       string
 	cols      uint16
 	rows      uint16
-	bound     int64
-	reserved  int64
+	// xpixel/ypixel are the client's cell metrics in TIOCSWINSZ's whole-area
+	// units, zero meaning unmeasured. They reach the one decode,
+	// cellGeometry, in finishSpawn.
+	xpixel   uint16
+	ypixel   uint16
+	bound    int64
+	reserved int64
+	// rowBuffer is the session's row buffer bound, clamped (nocx-2v80t.3.36).
+	rowBuffer int64
 	lifecycle *proto.LifecycleLaunch
 }
 
@@ -1201,7 +1309,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		s.budget -= shape.reserved
 		s.mu.Unlock()
 	}
-	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, s.rendezvousExpiry, s.rendezvousExpireAfter)
+	rt, screen, err := newSessionRuntime(s.screen, proc, shape.sessionID, shape.cols, shape.rows, shape.xpixel, shape.ypixel)
 	if err != nil {
 		// Nothing has been read from this process and nothing has been
 		// registered, so the spawn has produced nothing: end it rather than
@@ -1281,10 +1389,17 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		launch:          launch,
 		subs:            make(map[proto.SubscriberID]*subscriber),
 		attachments:     make(map[proto.AttachmentID]*attachment),
+		rowWake:         make(chan struct{}, 1),
+		rowsDone:        make(chan struct{}),
+		rowBufferBytes:  shape.rowBuffer,
 	}
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.
 	tokens.bindSession(hs.id)
+	// The row stream bridge (nocx-2v80t.3.6), bound like SetReplies before
+	// anything can read the process: the pump starts before owner.run does,
+	// so the first feed's departures already have somewhere to go.
+	rt.SetRowStream(&rowBridge{hs: hs})
 
 	s.mu.Lock()
 	s.sessions[hs.id.Session] = hs
@@ -1295,6 +1410,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	*spawned = true
 	s.mu.Unlock()
 	go owner.run()
+	go hs.serveRows()
 	if lifecycleCarrier != nil {
 		go hs.lifecyclePump(lifecycleCarrier)
 	}
@@ -1468,7 +1584,7 @@ func (s *Service) removeSession(hs *hostSession, reason string) {
 				delete(s.keys, hs.key)
 			}
 		}
-		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget
+		s.budget -= hs.launch.WindowBytes() + hs.lifecycleBudget + hs.rowBufferBytes
 	}
 	s.mu.Unlock()
 }
@@ -1541,7 +1657,7 @@ func (s *Service) evictForBudget(reserved int64) {
 		if !exited || attached {
 			continue
 		}
-		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget})
+		pool = append(pool, evictable{hs: hs, at: at, size: hs.launch.WindowBytes() + hs.lifecycleBudget + hs.rowBufferBytes})
 	}
 	sort.Slice(pool, func(i, j int) bool { return pool[i].at.Before(pool[j].at) })
 
@@ -1815,6 +1931,42 @@ func (s *Service) lifecycleComplete(p proto.LifecycleCompleteParams) (proto.Life
 	return proto.LifecycleCompleteResult{}, nil
 }
 
+// lifecycleEntered hands one already-authenticated environment entry to the
+// session runtime that owns the pane (nocx-2v80t.3.21). Like
+// lifecycleComplete this adds no gate: the coordinator's kernel has already
+// accepted the confirmed environment change, and the runtime's own
+// incarnation check is the only judging this side of the wire does. There is
+// no fence to decode — the op carries none (OpLifecycleEntered's own doc) —
+// so this is a shorter version of lifecycleComplete with nothing to decode
+// but the session, the incarnation and the entry's identity. The identity is
+// what makes the op idempotent (nocx-2v80t.3.28): the runtime seals one
+// interval per entry, so a delivery the coordinator retried after an attempt
+// that timed out but landed seals nothing a second time. An entry with no
+// identity could not be told from its own retry, and is refused as malformed
+// rather than sealed on trust.
+//
+// ctx is the request's own context, and it is HONOURED (nocx-2v80t.3.31):
+// every request runs on a goroutine of its own, so the handler of an attempt
+// the downlink timed out and cancelled can run after that attempt's retry
+// landed, and after further entries — and must then change nothing. The
+// runtime judges the context under the lock the seal takes.
+func (s *Service) lifecycleEntered(ctx context.Context, p proto.LifecycleEnteredParams) (proto.LifecycleEnteredResult, error) {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return proto.LifecycleEnteredResult{}, err
+	}
+	if p.Entry == "" {
+		return proto.LifecycleEnteredResult{}, errBadEntry
+	}
+	if err := hs.runtime.SealEnvironmentEntry(ctx, sessionruntime.Incarnation{
+		Session:    sessionruntime.SessionID(p.Incarnation.Session),
+		Generation: sessionruntime.Generation(p.Incarnation.Generation),
+	}, sessionruntime.EnvironmentEntryID(p.Entry)); err != nil {
+		return proto.LifecycleEnteredResult{}, err
+	}
+	return proto.LifecycleEnteredResult{}, nil
+}
+
 // fenceNonceFromWire decodes the completion's fence: exactly 64 LOWERCASE
 // hex characters, the same fixed-width spelling the launch's bearer values
 // use. Anything else is errBadFence.
@@ -1890,3 +2042,9 @@ func adoptableLaunch(launch *proto.LifecycleLaunch, win *window) *proto.Lifecycl
 // zero-filling it instead would hand the runtime a rendezvous nothing
 // sighted.
 var errBadFence = errors.New("session: the completion's nonce is not a 64-character hex fence")
+
+// errBadEntry refuses an environment-entry op that names no entry
+// (nocx-2v80t.3.28). The entry's identity is what keeps a retried delivery
+// from sealing a second interval, so an op without one is malformed wire,
+// not a boundary to seal on trust.
+var errBadEntry = errors.New("session: the environment entry names no entry")

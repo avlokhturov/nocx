@@ -100,6 +100,11 @@ const (
 	OpAttach = "attach"
 	// OpAck advances that subscriber's read cursor.
 	OpAck = "ack"
+	// OpConfirmRows advances the session's confirmed-written mark: the
+	// coordinator's acknowledgement that rows up to one absolute index are
+	// written where they must survive (nocx-2v80t.3.6). It is the mark the
+	// helper's eventual resend reads the scrollback against.
+	OpConfirmRows = "confirm-rows"
 	// OpDetach drops one attachment. The process survives it, and the
 	// session stays in the inventory and reattachable (D9) — detach is not
 	// close-session, and neither is closing a tab.
@@ -249,6 +254,24 @@ type WriteGrant struct {
 	Holder *SubscriberID `json:"holder"`
 }
 
+// ConfirmRowsParams advances one session's confirmed-written mark, keyed by
+// subscriber and session like every reader-keyed op. upToRow is the absolute
+// row index through which the coordinator has written every streamed row and
+// end marker it received — one PAST the last confirmed row, the same
+// exclusive spelling the end marker's EndRow uses. A mark ahead of what the
+// session ever departed is refused: confirming rows that were never sent
+// would make the next resend skip output nobody holds.
+type ConfirmRowsParams struct {
+	Subscriber SubscriberID  `json:"subscriber"`
+	Session    HostSessionID `json:"session"`
+	UpToRow    uint64        `json:"upToRow"`
+}
+
+// ConfirmRowsResult is deliberately empty, like AckResult: the answer to
+// "did the mark land" is the absence of an error. It exists so the op has a
+// result type at all, the way every other op does.
+type ConfirmRowsResult struct{}
+
 // AckParams advances one subscriber's read cursor. It is keyed by subscriber
 // and session, NOT by attachment: the cursor is the reader's and outlives the
 // connection that carried it (D2), so a reconnect resumes rather than
@@ -260,6 +283,13 @@ type AckParams struct {
 	// LifecycleOffset, when present, advances the separate lifecycle reader.
 	// A pointer keeps conventional clients' existing acknowledgement shape
 	// unchanged while allowing zero as a legitimate initial offset.
+	//
+	// An ack that carries it is the LIFECYCLE reader's and acks that cursor
+	// alone (nocx-2v80t.3.44): its Offset is not judged or applied, because
+	// the PTY reader acks the PTY cursor itself, concurrently, and a
+	// piggybacked PTY offset behind that reader's newer ack used to get the
+	// whole ack refused. Offset stays required for the generations that still
+	// apply it.
 	LifecycleOffset *StreamOffset `json:"lifecycleOffset,omitempty"`
 }
 

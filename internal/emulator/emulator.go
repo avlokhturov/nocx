@@ -233,6 +233,72 @@ type Cursor struct {
 	Visible bool
 }
 
+// HistoryPage is one [Terminal.HistoryRows] read: what exists of the range
+// that was asked for, and the facts that say where the read stopped.
+//
+// Start is the history index of Rows[0] — the first row of the range that
+// was requested, whether or not any of it exists. Rows holds what exists of
+// the range, oldest first. Total is how many history rows the terminal
+// retained at the instant of the read, so the arithmetic is always
+// available: a page whose rows end before the requested range did, with
+// Total standing beyond them, was truncated by retention — and a page that
+// ends at Total ran into the beginning of the buffer's lifetime. A short
+// list is never an answer on its own.
+type HistoryPage struct {
+	Start int
+	Rows  []Row
+	Total int
+}
+
+// RowTrack is a handle on the physical row [Terminal.TrackRow] named, obtained
+// once and consulted later — the identity a text comparison cannot give,
+// because two rows that read the same are not one row (nocx-2v80t.3.10:
+// the boundary window used to decide a re-departing row by its graphemes, and
+// a command that repeated the closing screen's own text after a `clear` had
+// its first output swallowed as if it were that screen leaving again — the
+// screen it named had already CEASED, and a row that ceased can never leave).
+//
+// It follows the row across every operation that MOVES it without destroying
+// it: a resize's reflow, a scroll, history the library re-pages while
+// compacting. [RowTrack.Alive] answers whether the row can still be named at
+// all, and it is the one question content can never answer honestly, because
+// an erase or a reset can leave behind a row that reads exactly like the one
+// that was there before.
+type RowTrack interface {
+	// Alive reports whether the row this handle names can still be named at
+	// all. It goes false the instant the row is DISCARDED — a reset, or the
+	// library's own retention pruning it beyond recall — and never true again
+	// afterward: a discarded row does not come back, and nor does its
+	// identity. A row that merely reflows, scrolls, or is later reported by
+	// [Terminal.DepartedRows] keeps Alive true throughout, whatever it now
+	// reads: it is the same physical row the whole time. So does a row an
+	// ordinary erase (CSI 2 J) blanked IN PLACE: its slot is not discarded,
+	// only its content rewritten, and [RowTrack.Row] is how a caller sees that
+	// (nocx-2v80t.3.13).
+	//
+	// A closed terminal answers false, exactly as a destroyed row would: a
+	// terminal that is gone can name nothing.
+	Alive() bool
+	// Row reads the row this handle names as it stands NOW, wherever a
+	// reflow or a scroll has since carried it — on the screen or in the
+	// history. It is the content half of the identity: the handle says which
+	// row, and the read says whether that row still carries what it did, the
+	// one thing an in-place rewrite (an erase, a program drawing over it)
+	// changes without disturbing [RowTrack.Alive].
+	//
+	// A handle whose row is no longer alive, or that was released, answers
+	// [ErrOutOfRange]; a closed terminal answers [ErrClosed]; and while the
+	// alternate screen holds the pane the primary's row is not the screen a
+	// read reaches, so the port answers [ErrUnsupported] rather than read
+	// the wrong buffer. A caller treats every error as "cannot confirm".
+	Row() (Row, error)
+	// Release frees the handle. It is idempotent, and safe to call after the
+	// terminal that created it has closed — the terminal's own close frees
+	// whatever a caller left outstanding, so a caller who also released
+	// leaves nothing to double free.
+	Release()
+}
+
 // Terminal is the port: one terminal instance, and everything a session runtime
 // does to it and reads from it.
 //
@@ -279,7 +345,9 @@ type Terminal interface {
 	// has scrolled: scrollback is a different reading with a different
 	// retention question (design §6.3), and this port neither scrolls a
 	// viewport nor reads one. A row outside the active area is
-	// [ErrOutOfRange].
+	// [ErrOutOfRange]. The reading by position over the scrollback itself is
+	// [Terminal.HistoryRows], a method of its own for the retention question
+	// that comes with it.
 	Row(y int) (Row, error)
 
 	// Cell returns one position of the active screen, copied.
@@ -313,6 +381,22 @@ type Terminal interface {
 	// reason: a position nobody can act on is not an answer.
 	Cursor() (Cursor, error)
 
+	// TrackRow returns a handle on the physical row currently at position y of
+	// the ACTIVE area — the same counting [Terminal.Row] uses — that keeps
+	// naming that row as the terminal mutates, so a caller can ask LATER
+	// whether the exact row it saw here is still nameable at all
+	// ([RowTrack.Alive]) without re-reading its text. It is how a caller
+	// distinguishes "the row I saw leaving again" from "a different row that
+	// merely reads the same" (nocx-2v80t.3.10), which content alone cannot: a
+	// destroyed row can leave behind cells that read exactly like it did.
+	//
+	// A row outside the active area is [ErrOutOfRange], exactly as Row's is.
+	// The handle must be released with [RowTrack.Release] once no longer
+	// needed; a caller that tracks many rows for a long time is spending the
+	// library's own per-mutation bookkeeping for each one; use it for the
+	// short, bounded lifetime a boundary's window has and nothing longer.
+	TrackRow(y int) (RowTrack, error)
+
 	// EncodeKey encodes one key event into the bytes to write to the PTY,
 	// DRIVEN FROM THE TERMINAL'S OWN STATE. A program that turned on
 	// application cursor keys gets ESC O D for Left; the same key in a program
@@ -342,15 +426,38 @@ type Terminal interface {
 	// an effect is read exactly once and by one reader.
 	Effects() []Effect
 
+	// ReportedRowsOnScreen answers how many rows at the TOP of the active
+	// area [Terminal.DepartedRows] has already reported: rows a growing pane
+	// pulled back out of the history (nocx-2v80t.3.41). They are on the
+	// screen, and they are not rows still to leave it as far as the report is
+	// concerned — when they scroll off again nothing is reported for them — so
+	// a caller that reads the screen as "what has not been reported yet"
+	// starts below them. It is zero until a pane grows, and it falls as those
+	// rows leave again, as a shrink reflows them back into the history, or as
+	// the alternate screen, which has no history, takes the pane.
+	//
+	// A closed terminal answers [ErrClosed].
+	ReportedRowsOnScreen() (int, error)
+
 	// DepartedRows returns the rows that LEFT the screen since the previous
 	// call, oldest first, and starts a fresh list.
 	//
-	// A row departs when the program's output pushes it off the top of the
-	// active area into scrollback — the one leave the screen has. A row a
-	// scroll region moved within the screen never left it; a row an erase or
-	// a reset destroyed ceased rather than left; and a resize reflows the
-	// screen rather than scrolling it, so reflowed rows are not departures
-	// either — the report re-baselines across [Terminal.Resize].
+	// A row departs when it goes off the top of the active area into
+	// scrollback: the program's output pushes it there, or a pane that
+	// SHRINKS reflows it there (nocx-2v80t.3.41). Either way it is no longer
+	// on the screen and is in the history, and a caller that keeps what left
+	// the screen — a block's rows — loses it for good if it is not reported:
+	// it is not on any later screen either. A row a scroll region moved
+	// within the screen never left it, and a row an erase or a reset
+	// destroyed ceased rather than left.
+	//
+	// A pane that GROWS pulls rows back out of the history onto the top of
+	// the screen. Every one of them was reported when it went there, so none
+	// is reported again when it leaves a second time, and until it does it is
+	// counted by [Terminal.ReportedRowsOnScreen]: a caller reading the screen
+	// as rows still to come skips them. Beyond that, a resize reflows the
+	// screen rather than scrolling it, and the report re-baselines across
+	// [Terminal.Resize].
 	//
 	// The alternate screen has no history, so nothing departs while a
 	// full-screen program owns the pane. A terminal reports scrollback per
@@ -385,11 +492,58 @@ type Terminal interface {
 	// feed so large that pruning inside it still leaves the count grown: the
 	// ABI carries no departure counter and page sizes are not contract, so a
 	// caller capturing unbounded output bounds its feeds or configures the
-	// budget rather than trusting the flag line alone.
+	// budget rather than trusting the flag line alone. This adapter takes the
+	// budget in hand instead and clears it where the terminal is built
+	// (ghostty's install): the report below is a row reported once for as
+	// long as the session lives, and a budget nobody chose deleting the
+	// history that count is taken against is what turned a whole command's
+	// output into nothing at all (nocx-2v80t.3.9). The prune branch stays as
+	// the honest answer for a terminal whose budget was set.
+	//
+	// A measurement that FAILS is not silence either. There is no count to
+	// take, so the rows that left the screen in that feed are unread; the
+	// report names the span from the last good measurement to the next one as
+	// a gap (a non-nil error) rather than re-baselining across it, because a
+	// consumer told nothing about rows it never received cannot tell a lost
+	// feed from an idle one.
 	//
 	// A closed terminal has no report: this returns [ErrClosed] after
 	// [Terminal.Close], and a report that was never read dies with it.
 	DepartedRows() ([]Row, error)
+
+	// HistoryRows reads a RANGE of scrollback rows by position and returns
+	// what exists of it, copied, oldest first. It is the reading scrolling
+	// up needs: [Terminal.DepartedRows] is a producer of the rows that left
+	// — once each, at the moment they leave — and cannot answer "what sits
+	// at history rows 40 to 70" after the fact.
+	//
+	// This is deliberately a method of its own and not an extension of
+	// [Terminal.Row]: a row of the ACTIVE AREA and a row of history are
+	// different readings with different bounds and a different retention
+	// question (design §6.3), and Row's contract — counted from the top of
+	// the active area, [ErrOutOfRange] outside it — stays exactly as it is.
+	//
+	// History row 0 is the OLDEST row the terminal still retains; Total-1 is
+	// the newest, the row directly above the active area. A range that
+	// reaches past Total returns the rows that exist, from Start to Total-1,
+	// with Total in the page: what exists and where it stopped, never a bare
+	// short list a caller cannot tell from a short history. A start at or
+	// past Total, a count of zero and an empty history all return the empty
+	// page with the total alongside — they are answers, not failures. A
+	// negative start or count is malformed and reports [ErrOutOfRange].
+	//
+	// History is per ACTIVE buffer, exactly as the departure report is:
+	// while the alternate screen owns the pane, a read answers its own
+	// (empty) history and never the primary's rows, and the primary's rows
+	// are readable again once it is restored.
+	//
+	// The rows are the CALLER'S once returned, copied at the instant of the
+	// read; a read is one instant, because the port serialises access — an
+	// ingest concurrent with a read lands before or after it whole.
+	//
+	// A closed terminal has no history: this returns [ErrClosed] after
+	// [Terminal.Close], exactly as every other read does.
+	HistoryRows(start, count int) (HistoryPage, error)
 
 	// Paste hands the terminal a paste of text and returns the bytes the
 	// program is to be sent, framed per the TERMINAL'S OWN state: bracketed

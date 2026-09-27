@@ -329,6 +329,21 @@ type localHelperOpener struct {
 	// same machine. What is watched changed owner; who watches did not.
 	procs               procwatch.Watcher
 	reportShellReplaced func(sid, observed string)
+	// publishScreen is the screen plane's transport half, bound late by the
+	// composition root once the transport exists (the opener itself is built
+	// before it). Nil is a legitimate wiring and registers no observer.
+	publishScreen func(sid session.ID, revision uint64, doc []byte) bool
+	// blockRows is the streamed block output's transport half, bound late for
+	// the same reason publishScreen is (helper_block_rows.go). Nil wires
+	// nothing.
+	blockRows blockRowsSink
+	// rowBuffers carries the helper's row buffer setting to each spawn
+	// (nocx-2v80t.3.36). Nil sends zero, the helper's default.
+	rowBuffers *rowBuffers
+	// environmentEntries is the lane -> downlink registry
+	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
+	// reason blockRows is. Nil wires nothing.
+	environmentEntries *environmentEntryRegistry
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -638,6 +653,9 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 	spawn := hostedSpawn{
 		client: c, registry: o.registry,
 		lifecycle: o.kernel, loss: o.lifecycleLoss,
+		publishScreen:      o.publishScreen,
+		blockRows:          o.blockRows,
+		environmentEntries: o.environmentEntries,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is
@@ -660,8 +678,12 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		res, err = spawn.run(ctx, cfg, func(ctx context.Context, life *proto.LifecycleLaunch) (helperclient.SessionEntry, error) {
 			return c.Spawn(ctx, proto.SpawnParams{
 				Cwd: cfg.Cwd, Cols: cfg.Cols, Rows: cfg.Rows,
+				XPixel: cfg.XPixel, YPixel: cfg.YPixel,
 				Lifecycle:      life,
 				IdempotencyKey: claim,
+				// The person's row buffer setting, as it reads now: a
+				// changed value applies to the next pane (nocx-2v80t.3.36).
+				RowBufferBytes: o.rowBuffers.helperBytes(),
 				// THIS backend's own tool endpoint, carried per pane
 				// (nocx-50w7p.18): the pane's tools belong to the coordinator
 				// that opened it, and the daemon cannot know which of its
@@ -891,6 +913,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		}
 	}
 	params := proto.SSHSpawnParams{
+		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
+		RowBufferBytes: o.rowBuffers.helperBytes(),
 		// ConnectionName and ProfileID ride on WireDestination itself now
 		// (internal/ssh's resolveDialEndpoint reads them off the resolved
 		// config), so every destination this coordinator builds — this
@@ -911,6 +935,8 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 		DesiredMode: proto.SSHMode(cfg.Remote.DesiredMode),
 		Cols:        cfg.Cols,
 		Rows:        cfg.Rows,
+		XPixel:      cfg.XPixel,
+		YPixel:      cfg.YPixel,
 		// NO Cwd, and the absence is the wire's rule rather than an omission:
 		// this generation cannot move a far login shell, so `spawn-ssh` refuses a
 		// non-empty cwd by name instead of accepting a value nothing acts on. The
@@ -1452,6 +1478,17 @@ func (o *localHelperOpener) LifecycleComplete(ctx context.Context, params proto.
 		return err
 	}
 	return c.LifecycleComplete(ctx, params)
+}
+
+// LifecycleEntered is LifecycleComplete's sibling for an authenticated
+// environment entry (nocx-2v80t.3.21) — the same connection, for the same
+// reason.
+func (o *localHelperOpener) LifecycleEntered(ctx context.Context, params proto.LifecycleEnteredParams) error {
+	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
+	if err != nil {
+		return err
+	}
+	return c.LifecycleEntered(ctx, params)
 }
 
 // localSessionConn is one re-attached session's connection: the client, and the
