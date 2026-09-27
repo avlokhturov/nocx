@@ -288,6 +288,9 @@ type Session struct {
 	// pin could be located; the repair runs when the primary is back
 	// (settleOwedReflowLocked, nocx-2v80t.5).
 	reflowOwed bool
+	// markerCarry is the tail of the last feed that could still begin a
+	// marker, searched in front of the next feed (Ingest, nocx-2v80t.8).
+	markerCarry []byte
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at
@@ -1143,10 +1146,21 @@ func (s *Session) Ingest(b []byte) error {
 	s.openObservationLocked()
 
 	var replyErr error
+	// The tail of the feed before, if it could still begin a marker, is
+	// searched in front of this one, so a marker split across two reads is
+	// located where it ends (nocx-2v80t.8). It is only a search prefix: its
+	// bytes reached the emulator with the feed that carried them.
+	carry := s.markerCarry
+	s.markerCarry = markerCarryTail(append(append([]byte(nil), carry...), b...))
 	for rest := b; len(rest) > 0; {
 		chunk := rest
-		if end, ok := nextMarkerSplit(rest); ok {
-			chunk = rest[:end]
+		search, off := rest, 0
+		if len(carry) > 0 {
+			search, off = append(append([]byte(nil), carry...), rest...), len(carry)
+			carry = nil
+		}
+		if end, ok := nextMarkerSplit(search); ok && end > off {
+			chunk = rest[:end-off]
 		}
 		rest = rest[len(chunk):]
 

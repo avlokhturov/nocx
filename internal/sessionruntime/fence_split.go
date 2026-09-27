@@ -150,3 +150,42 @@ func isLowerHex(b []byte) bool {
 	}
 	return true
 }
+
+// A MARKER CAN BE SPLIT ACROSS TWO READS (nocx-2v80t.8). The search above
+// runs over one feed, and a pty read ends wherever the kernel's buffer did:
+// a marker whose first bytes ended one feed was completed by the emulator's
+// own stateful scanner only after the whole NEXT feed was applied, so the
+// screen its sighting read already held the output (or the prompt) that
+// followed it. The session therefore carries the tail of each feed that
+// could still begin a marker, and searches the next feed with it in front.
+
+// markerCarryTail is the longest tail of buf that is a PROPER prefix of a
+// marker — the bytes a marker could have begun with and not yet completed.
+// Nothing longer than the fence can be one, so the carry is bounded by it.
+func markerCarryTail(buf []byte) []byte {
+	for k := min(len(buf), fenceMarkerLen-1); k > 0; k-- {
+		tail := buf[len(buf)-k:]
+		if isMarkerProperPrefix(tail) {
+			return append([]byte(nil), tail...)
+		}
+	}
+	return nil
+}
+
+func isMarkerProperPrefix(tail []byte) bool {
+	if len(tail) < len(outputMarkerFixed) && hasPrefixAt([]byte(outputMarkerFixed), 0, string(tail)) {
+		return true
+	}
+	if len(tail) <= len(fenceMarkerPrefix) {
+		return hasPrefixAt([]byte(fenceMarkerPrefix), 0, string(tail))
+	}
+	if len(tail) >= fenceMarkerLen || !hasPrefixAt(tail, 0, fenceMarkerPrefix) {
+		return false
+	}
+	for _, c := range tail[len(fenceMarkerPrefix):] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
