@@ -488,6 +488,13 @@ func (s *hostSession) dequeueRowEmissionLocked() (rowEmission, bool) {
 func (s *hostSession) serveRows() {
 	for {
 		if s.owedMarker != nil {
+			// Whether the drain was already requested when this attempt
+			// STARTED: only such an attempt is the drain's own. One that
+			// began before stop() armed the drain and failed after it gives
+			// the marker no attempt at shutdown at all, so it parks on the
+			// wake requestRowsDrain sends, and the drain's attempt follows
+			// (nocx-2v80t.9).
+			drainAttempt := s.drainRequested()
 			delivered, gaveUp := false, false
 			if !s.drainAbandoned() {
 				delivered, gaveUp = s.deliverForPump(*s.owedMarker)
@@ -498,7 +505,7 @@ func (s *hostSession) serveRows() {
 			switch {
 			case delivered:
 				s.owedMarker = nil
-			case s.drainAbandoned() || s.drainRequested():
+			case s.drainAbandoned() || drainAttempt:
 				if !gaveUp {
 					s.log.Warn("session row pump: the owed incomplete marker could not be delivered at shutdown; the loss was already counted",
 						"session", s.id.Session)

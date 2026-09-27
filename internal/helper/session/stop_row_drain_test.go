@@ -152,37 +152,43 @@ func TestStopWithNoCaptureOwedEndsCleanly(t *testing.T) {
 }
 
 // A failed send of the row buffer's own incomplete marker (nocx-2v80t.3.38)
-// leaves it owed; stopping before any other row arrives must still deliver it
-// — or, failing that, record the loss — rather than let releaseConnection and
-// the pump's own end silently swallow the one statement that output was
-// discarded (finding 6). Three scheduled failures are what genuinely parks
-// the marker on a wake, with none left over for this test to call stop()
-// against: the first (from the marker's own dequeue) and 3.49's own
-// immediate retry account for two, and rowWake's one-slot coalescing banks
-// at most a single stale wake from the enqueues that preceded it — one more
-// attempt, deterministically, however many rows were fed — which the third
-// failure spends. Only requestRowsDrain's OWN wake, called from stop() after
-// this, can trigger a fourth attempt; fewer scheduled failures would let a
-// stale wake resolve the marker before stop() is ever called and prove
-// nothing about this bead.
+// leaves it owed; stopping must still deliver it — or, failing that, record
+// the loss — rather than let releaseConnection and the pump's own end
+// silently swallow the one statement that output was discarded (finding 6).
+//
+// The sink refuses the marker for as long as the test says so, so it is owed
+// and every retry the pump makes on its own fails, however many stale wakes
+// rowWake happens to have banked — an earlier version counted on exactly one
+// and hung 1 run in ~2000 under -race when there was none (nocx-2v80t.9).
+// The sink starts taking it only as stop() is called, and stop() may not
+// end with it undelivered: that is the drain's own attempt, which a failed
+// attempt that merely began before the drain was armed must not stand in
+// for (the pump's side of nocx-2v80t.9).
 func TestStopDeliversAnOwedIncompleteMarkerBeforeEnding(t *testing.T) {
 	sink := newOrderedStallingSink()
-	sink.failIncompleteTimes = 3
-	close(sink.release) // nothing here needs the stall; every send may proceed at once
+	sink.failIncompleteTimes = -1
 	hs, _ := stopTestSession(t, sink)
 	bufferOf(hs, 2)
 	bridge := &rowBridge{hs: hs}
 	row := []emulator.Row{textRow("x")}
 
+	// The sink holds its first send until released, so the five rows are
+	// all queued against a two-row buffer and it overflows every time: a
+	// pump that happened to keep up with the feed made no marker at all, 2
+	// runs in 1500 under -race (nocx-2v80t.9).
 	for i := uint64(1); i <= 5; i++ {
 		bridge.OutputRows(i, row, 0)
 	}
+	close(sink.release)
 	select {
-	case <-sink.exhausted: // all three scheduled failures have happened; the marker is genuinely parked
+	case <-sink.failed: // the marker's first send failed: it is owed
 	case <-time.After(hangLimit):
-		t.Fatal("the marker's three scheduled sends never all happened")
+		t.Fatal("the marker's send never happened")
 	}
 
+	sink.mu.Lock()
+	sink.failIncompleteTimes = 0
+	sink.mu.Unlock()
 	stopBounded(t, hs)
 
 	log := sink.snapshot()
