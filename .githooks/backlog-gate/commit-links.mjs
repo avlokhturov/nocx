@@ -35,7 +35,11 @@
  *
  * Usage:
  *   commit-links.mjs --message <file>           the pending message (commit-msg)
- *   commit-links.mjs --range <base>..<head>     every commit it introduces (CI)
+ *   commit-links.mjs --range <base>..<head>     every commit it introduces (CI, a PR)
+ *   commit-links.mjs --introduced <tip> --by <ref> [--before <sha>]
+ *                                               every commit a push of <ref> brings
+ *                                               that no other remote ref reaches (CI, a
+ *                                               push); none is a pass, said out loud
  *     [--export-at <rev>]                       tasks from the export at <rev>
  *     [--json]
  * Exit 0 linked, 1 missing or invalid links, 2 misuse or an unreadable source.
@@ -89,6 +93,26 @@ function incoming(base, tip, from, self) {
   return underRule || !brought ? ids : null
 }
 
+// What a push of `ref` at `tip` introduces: the commits of `tip` that no ref
+// the remote already held reaches — its branches and tags, the pushed ref
+// itself excepted, and that ref's old tip when the push has one. Never a merge
+// base with main: a branch cut from another branch, or a tag on a commit some
+// branch holds, would re-check commits checked when they arrived, and a new
+// ref on a commit the remote holds would look like new work.
+function introducedBy(tip, ref, before) {
+  const branch = ref.match(/^refs\/heads\/(.+)$/)
+  const pushed = new Set([ref, ...(branch ? [`refs/remotes/origin/${branch[1]}`] : [])])
+  const held = git('for-each-ref', '--format=%(refname)', 'refs/remotes', 'refs/tags')
+    .split('\n')
+    .filter((r) => r && !pushed.has(r))
+  const input = [tip, ...(before ? [before] : []).concat(held).map((r) => `^${r}`)].join('\n')
+  return execFileSync('git', ['rev-list', '--reverse', '--format=%H %P%x00%ct', '--stdin'], {
+    input: `${input}\n`,
+    encoding: 'utf8',
+    maxBuffer: 1 << 28,
+  })
+}
+
 function tasks(exportAt) {
   let rows
   if (exportAt) rows = readExport(exportAt)
@@ -120,16 +144,25 @@ function main() {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     if (a === '--json') opt.json = true
-    else if (['--message', '--range', '--export-at'].includes(a) && argv[i + 1])
+    else if (
+      ['--message', '--range', '--introduced', '--by', '--before', '--export-at'].includes(a) &&
+      argv[i + 1]
+    )
       opt[a.slice(2)] = argv[++i]
     else {
       console.error(`commit-links.mjs: unknown or incomplete argument ${a}`)
       return 2
     }
   }
-  if (!!opt.message === !!opt.range) {
+  if ([opt.message, opt.range, opt.introduced].filter(Boolean).length !== 1) {
     console.error(
-      'commit-links.mjs: give exactly one of --message <file> or --range <base>..<head>',
+      'commit-links.mjs: give exactly one of --message <file>, --range <base>..<head> or --introduced <tip> --by <ref>',
+    )
+    return 2
+  }
+  if (!!opt.introduced !== !!opt.by || (opt.before && !opt.introduced)) {
+    console.error(
+      'commit-links.mjs: --introduced <tip> takes --by <ref> and at most --before <sha>',
     )
     return 2
   }
@@ -166,13 +199,28 @@ function main() {
     if (old) before.push('pending merge')
     else commits.push({ id: 'pending message', taskIds })
   } else {
-    if (!/^[^.\s]+\.\.[^.\s]+$/.test(opt.range)) {
-      console.error(`commit-links.mjs: --range wants <base>..<head>, got ${opt.range}`)
-      return 2
+    let listed
+    if (opt.range) {
+      if (!/^[^.\s]+\.\.[^.\s]+$/.test(opt.range)) {
+        console.error(`commit-links.mjs: --range wants <base>..<head>, got ${opt.range}`)
+        return 2
+      }
+      listed = git('rev-list', '--reverse', '--format=%H %P%x00%ct', opt.range)
+    } else {
+      // A tip or a --before git cannot read is a broken input, not an empty push.
+      for (const rev of [opt.introduced, opt.before].filter(Boolean)) {
+        if (spawnSync('git', ['rev-parse', '-q', '--verify', `${rev}^{commit}`]).status !== 0) {
+          console.error(`commit-links.mjs: ${rev} is not a commit git can read`)
+          return 2
+        }
+      }
+      listed = introducedBy(opt.introduced, opt.by, opt.before)
     }
-    const list = git('rev-list', '--reverse', '--format=%H %P%x00%ct', opt.range)
-      .split('\n')
-      .filter((l) => l && !l.startsWith('commit '))
+    const list = listed.split('\n').filter((l) => l && !l.startsWith('commit '))
+    if (!list.length && opt.introduced) {
+      console.log(`${opt.by} introduces no commits: nothing to check`)
+      return 0
+    }
     if (!list.length) {
       console.error(
         `commit-links.mjs: the range ${opt.range} introduces no commit, so there is nothing it could have checked`,
@@ -197,7 +245,7 @@ function main() {
       }
       commits.push({ id: sha, taskIds })
     }
-    if (!opt['export-at']) opt['export-at'] = opt.range.split('..')[1]
+    if (!opt['export-at']) opt['export-at'] = opt.introduced || opt.range.split('..')[1]
   }
 
   if (before.length) {

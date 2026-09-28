@@ -746,28 +746,25 @@ jobs:
           gate=.githooks/backlog-gate
           # Every commit this change introduces, each checked on its own. On a
           # pull request that is the merge base to the PR's head — not HEAD,
-          # which is GitHub's synthetic merge. On a push it is what the push
-          # added; a new branch has no "before", and then it is what the branch
-          # holds that main does not. An empty range is an error in the script,
-          # never a pass — with one expected exception below.
+          # which is GitHub's synthetic merge — and an empty range is an error,
+          # never a pass. On a push (a release branch, release.yml's tag, a
+          # manual run) it is the commits of the pushed tip that no other ref
+          # the remote holds reaches, past the ref's own "before" when it had
+          # one. Never a merge base with main: a tag or a new branch on a commit
+          # the remote already holds introduces nothing, and the script says so
+          # and passes, because those commits were checked when they arrived.
           if [ -n "${BASE_REF:-}" ]; then
             range="$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")..$HEAD_SHA"
-          elif [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
-            range="$BEFORE..$(git rev-parse HEAD)"
+            echo "range: $range"
+            node "$gate/commit-links.mjs" --range "$range"
           else
-            range="$(git merge-base origin/main HEAD)..$(git rev-parse HEAD)"
-            # A release tag (release.yml calls this workflow on a `v*` push,
-            # whose "before" is all zeros) or a manual run on a commit main
-            # already holds introduces nothing: every commit on main arrived
-            # through a pull request this step checked. Say so and stop, or
-            # every release from main would fail here.
-            if [ "$(git rev-list --count "$range")" = 0 ]; then
-              echo "HEAD $(git rev-parse --short HEAD) is on main and introduces no commit; its commits were checked when they were introduced"
-              exit 0
+            set -- --introduced "$(git rev-parse HEAD)" --by "$GITHUB_REF"
+            if [ -n "${BEFORE:-}" ] && git rev-parse -q --verify "$BEFORE^{commit}" >/dev/null; then
+              set -- "$@" --before "$BEFORE"
             fi
+            echo "introduced by $GITHUB_REF at $(git rev-parse --short HEAD)"
+            node "$gate/commit-links.mjs" "$@"
           fi
-          echo "range: $range"
-          node "$gate/commit-links.mjs" --range "$range"
 
       - name: The documents that describe the present name paths that exist
         if: ${{ github.event_name == 'pull_request' }}

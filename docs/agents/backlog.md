@@ -1,8 +1,9 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.35.0 on 2026-09-28 by its setup task, "The backlog tooling here matches shady2k-skills
-0.35.0, with the present-documents check, and is proved from main" (nocx-q8yjf.15). The protocol itself ships with the skills
+0.37.0 on 2026-09-28 by its setup task, "The backlog tooling here matches shady2k-skills
+0.37.0, with Jev and push-range enumeration, and is proved from main" (nocx-q8yjf.18). The
+protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
@@ -20,6 +21,11 @@ bug.
   connects the hooks in every clone, CI's `ci-backlog` enforces them on every pull request,
   and `.claude/settings.json` offers the plugin to anyone who trusts the folder in Claude
   Code. AGENTS.md carries the install line for people who do not have it yet.
+- **Jev: consented** (owner, 2026-09-28), route `openrouter`, with nocx's bead-id shape in
+  the config's `jev.idPattern` so ids are masked. The owner was told that masking goes by
+  shape, and that a customer name or log line pasted into a conversation has none and can
+  leave unmasked. The key's place is each person's own (`~/.config/shady2k-skills/jev.json`);
+  a person without one works without Jev.
 - **Vision and roadmap:** [`docs/vision.md`](../vision.md); its §6 "Strategic roadmap" is the
   roadmap. Status comes from the tracker (`scripts/feature-status.sh <feature>`), never from
   either document.
@@ -132,8 +138,8 @@ keeps every later change.
   [`check-present.mjs`](../../.githooks/backlog-gate/check-present.mjs) with
   [`document-format.mjs`](../../.githooks/backlog-gate/document-format.mjs) beside it are
   byte-for-byte copies of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/`
-  at 0.35.0, never edited here. Proving it: `cmp` each against the plugin copy, `--version`
-  prints `0.35.0`, and the selftests run from the plugin directory because the fixtures live
+  at 0.37.0, never edited here. Proving it: `cmp` each against the plugin copy, `--version`
+  prints `0.37.0`, and the selftests run from the plugin directory because the fixtures live
   there: `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
   `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`,
   `node check-present.mjs --selftest`.
@@ -233,7 +239,12 @@ keeps every later change.
   message; tasks come from the export `br where` names, which is the database's own view,
   so a bead created a minute ago resolves. `--range <base>..<head>` checks every commit the
   range introduces, with tasks from the export at `<head>`. An empty range is exit 2, never
-  a pass.
+  a pass. `--introduced <tip> --by <ref> [--before <sha>]` checks what a push of `<ref>`
+  introduces: the commits of `<tip>` that no other ref the remote holds reaches (its
+  remote-tracking branches and tags, the pushed ref itself excepted, and its old tip when
+  there is one). None is a pass that says `<ref> introduces no commits: nothing to check`;
+  a tip or `--before` git cannot read is exit 2. Its test, on a scratch remote:
+  `node --test .githooks/backlog-gate/commit-links.test.mjs`.
 - **Local entry points:** `.githooks/pre-commit` (backlog), `.githooks/commit-msg` (links),
   and `.githooks/pre-merge-commit`, which delegates to pre-commit. A hook that cannot find
   what it reads refuses and names `make connect`: `commit-msg` without `node`,
@@ -249,10 +260,14 @@ keeps every later change.
   `br sync --import-only`. Safe to rerun.
 - **CI:** `ci-backlog` in `.github/workflows/ci.yml`. The backlog baseline is the PR's merge
   base, or the push's `before`, or else `HEAD^`. The commit range is merge base..PR head
-  (not GitHub's synthetic merge), or `before..HEAD` on a push, or `merge-base(origin/main)..HEAD`
-  for a new branch. That last range is empty for a release tag or a manual run on a commit
-  main already holds; the step says so and passes, because those commits were checked in
-  their pull requests. An empty PR range is still an error.
+  (not GitHub's synthetic merge), and an empty PR range is an error. On a push — a
+  `release/**` branch, release.yml's tag, a manual run — it is `commit-links.mjs
+--introduced HEAD --by $GITHUB_REF`, with `--before` when the push has one: never a merge
+  base with `main`, so a tag or a new branch on a commit the remote already holds says
+  "introduces no commits: nothing to check" and passes.
+  **The pre-push hook reads no range**, deliberately (AGENTS.md: it warns about the backlog
+  and never blocks). Locally every commit is checked as it is made, by `commit-msg`; what a
+  push introduces is read in CI.
   **CI does not run on a push to `main`** (the triggers are PRs, `release/**`, dispatch and
   release.yml's call). A direct push to `main` — the owner's, deliberately ungated — is
   checked by the local hooks only.
