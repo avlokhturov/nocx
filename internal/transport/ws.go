@@ -309,6 +309,9 @@ type WSServer struct {
 	// session nobody watches runs exactly as it did before, and the byte path
 	// never depends on it.
 	paneScreens paneScreens
+	// screenResender asks for the frame a subscriber is owed the moment it is
+	// installed (screen.go). Nil sends nothing until the next revision.
+	screenResender ScreenResender
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver

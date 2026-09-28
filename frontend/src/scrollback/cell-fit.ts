@@ -81,7 +81,7 @@ export interface CellFit {
   /** The row context begin() took: the cell width and the published
    *  correction (--term-cell-delta) — the default spacing for runs whose
    *  ink nobody measured. null — there is nowhere to measure. */
-  geometry(): { cellWidth: number; rowDelta: number } | null
+  geometry(): { cellWidth: number; rowDelta: number; signature: string } | null
   /** Убрать зонд из DOM. */
   dispose(): void
   /** Размер кэша. Для тестов границы. */
@@ -319,7 +319,7 @@ export function createCellFit(
 
     geometry() {
       if (signature === '' || cellWidth === 0) return null
-      return { cellWidth, rowDelta }
+      return { cellWidth, rowDelta, signature }
     },
 
     dispose() {

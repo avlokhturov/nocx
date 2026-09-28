@@ -105,6 +105,22 @@ func (p *paneScreen) Screen(paneID string) (paneview.Frame, error) {
 	return c.Screen(ctx, id)
 }
 
+// ResendScreen implements transport.ScreenResender: the helper that holds the
+// pane is asked to re-offer the frame its runtime last published, and that
+// frame reaches the transport through the pane's own screen drain — the same
+// publish every frame takes (nocx-zg3k3.2.15). Which helper holds it is
+// owner's answer, the one every screen read already asks. Bounded like one
+// frame read, for the same reason paneScreenTimeout states.
+func (p *paneScreen) ResendScreen(ctx context.Context, sessionID string) error {
+	ctx, cancel := context.WithTimeout(ctx, paneScreenTimeout)
+	defer cancel()
+	c, id, err := p.owner(ctx, sessionID)
+	if err != nil {
+		return err
+	}
+	return c.ResendScreen(ctx, id)
+}
+
 // owner finds the helper that holds a pane's terminal, and the handle that
 // helper knows it by.
 //

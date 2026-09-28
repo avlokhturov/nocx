@@ -36,6 +36,24 @@ func (s *Service) readScreen(p proto.ScreenParams) (proto.ScreenResult, error) {
 	}, nil
 }
 
+// resendScreen has a session's runtime hand every consumer its latest frame —
+// the runtime's own Resend, cells and never an effect. The frame travels the
+// screen drain like any other, so it reaches the coordinator in order with
+// the frames around it (proto.OpScreenResend says why it is not the result).
+func (s *Service) resendScreen(p proto.ScreenResendParams) (proto.ScreenResendResult, error) {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return proto.ScreenResendResult{}, err
+	}
+	if hs.runtime == nil {
+		return proto.ScreenResendResult{}, fmt.Errorf("session %s has no runtime to resend a screen from", p.Session.Session)
+	}
+	if err := hs.runtime.Consumers().Resend(); err != nil {
+		return proto.ScreenResendResult{}, err
+	}
+	return proto.ScreenResendResult{}, nil
+}
+
 // readFrame reads the session's screen, the runtime's revision and what the
 // runtime can claim about the stream — ALL THREE AT ONE INSTANT.
 //

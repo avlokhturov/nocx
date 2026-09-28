@@ -25,6 +25,21 @@ package proto
 // OpScreen reports the screen a session's runtime holds right now.
 const OpScreen = "screen"
 
+// OpScreenResend asks a session's runtime to hand its consumers the frame it
+// last published — a full snapshot, the runtime's own Resend — over the same
+// carrier every published frame rides (nocx-zg3k3.2.15).
+//
+// It exists because the coordinator's ONE runtime consumer outlives the
+// renderers it serves: frames the runtime published while no renderer was
+// attached reached the coordinator and found nobody to show them to, and the
+// runtime's per-consumer baseline was spent when the coordinator attached,
+// not when a window did. A window attaching to a pane at rest would otherwise
+// wait for a program to print something. The op answers nothing but "asked":
+// the frame arrives on the screen carrier, in order with every other frame,
+// and never in this op's result — a second route for one frame would be a
+// second ordering to reconcile.
+const OpScreenResend = "screen-resend"
+
 // OpReplay feeds a capture's bytes to a PTY-less emulator and answers the
 // screen after each mark.
 //
@@ -68,6 +83,15 @@ type ScreenFrame struct {
 type ScreenParams struct {
 	Session HostSessionID `json:"session"`
 }
+
+// ScreenResendParams names the session whose runtime re-offers its frame.
+type ScreenResendParams struct {
+	Session HostSessionID `json:"session"`
+}
+
+// ScreenResendResult is deliberately empty: the frame rides the screen
+// carrier, and the answer to "was it asked" is the absence of an error.
+type ScreenResendResult struct{}
 
 // ScreenResult is the frame, plus the two facts that belong to the runtime
 // rather than to the screen.

@@ -1072,6 +1072,9 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// emulator. Both take scalars and a session handle, so neither
 		// carries a free-form []string past the registration rule below.
 		proto.OpScreen: true, proto.OpReplay: true,
+		// The screen's re-offer (nocx-zg3k3.2.15): a session handle and
+		// nothing else, so it carries no free-form []string either.
+		proto.OpScreenResend: true,
 		// The session surface's one-shot write path (nocx-6q1uh.6, spec §6):
 		// a consistent read, a signed target minted from it, the write
 		// itself, a non-mutating status poll for the same token, and the

@@ -21,11 +21,11 @@
 // xterm — this module deliberately knows nothing about how it is mounted.
 
 import type { ScreenSnapshot } from '../cell-model'
-import type { CellFit } from '../scrollback/cell-fit'
+import type { CellFit, FitCandidate } from '../scrollback/cell-fit'
 import type { RunMetric } from '../scrollback/run-geometry'
 import { DEFAULT_SNAPSHOT, type TerminalSnapshot } from '../scrollback/serializer'
 import { createMapping, type PixelMapping } from './mapping'
-import { paintRow } from './paint-row'
+import { fitCandidatesOf, paintRow } from './paint-row'
 import { styleEquals } from './style'
 import { devicePxToCssPx, displayDpr } from './committed-metric'
 
@@ -45,12 +45,25 @@ export function metricOf(fit: Measurer): RunMetric | null {
   return {
     cellWidth: g.cellWidth,
     defaultSpacing: g.rowDelta,
-    // The lint rule reads a bare method reference as an unbound `this`;
-    // the fit functions close over their cache and never touch `this`, and
-    // bind keeps the signatures RunMetric's own.
-    advanceOf: fit.advanceOf.bind(fit),
-    boxOf: fit.boxOf.bind(fit),
+    signature: g.signature,
+    ...measurersOf(fit),
   }
+}
+
+/** The fit's two measurers, bound ONCE per fit. The painter decides
+ *  "same metric, keep the rows" by comparing them by reference, and a
+ *  fresh `.bind` per apply made every revision a full repaint
+ *  (nocx-zg3k3.2.14). The lint rule reads a bare method reference as an
+ *  unbound `this`; the fit functions close over their cache and never
+ *  touch `this`, and bind keeps the signatures RunMetric's own. */
+const boundMeasurers = new WeakMap<Measurer, Pick<RunMetric, 'advanceOf' | 'boxOf'>>()
+function measurersOf(fit: Measurer): Pick<RunMetric, 'advanceOf' | 'boxOf'> {
+  let bound = boundMeasurers.get(fit)
+  if (bound === undefined) {
+    bound = { advanceOf: fit.advanceOf.bind(fit), boxOf: fit.boxOf.bind(fit) }
+    boundMeasurers.set(fit, bound)
+  }
+  return bound
 }
 
 export interface CellPainterOptions {
@@ -62,6 +75,14 @@ export interface CellPainterOptions {
    *  that carried it. Absent or null, the painter degrades to
    *  attribute-only runs — the pre-geometry behaviour, no worse. */
   readonly metric?: () => RunMetric | null
+  /** The measuring authority's batch write: every cell about to paint is
+   *  measured here, BEFORE any row paints, so the metric's boxOf/advanceOf
+   *  are pure cache reads during the paint (cell-fit.ts's contract, which
+   *  the stored rows already keep — block-rows.ts). Without it a cluster new
+   *  to the session painted at the default spacing and moved every column
+   *  after it (nocx-zg3k3.2.13). Absent, nothing is measured: the degrade
+   *  of an absent metric. */
+  readonly warm?: (candidates: Iterable<FitCandidate>) => void
   /** The theme the wire's palette colours resolve against. Defaults to the
    *  same snapshot the frozen path falls back to. */
   readonly palette?: TerminalSnapshot
@@ -95,35 +116,48 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   let lastMetric: RunMetric | null = null
 
   /** A changed metric re-verdicts every run's spacing — rule 1's output is
-   *  painted output — so it repaints like a content change. Compared by
-   *  value, not reference: metricOf builds a fresh wrapper per apply from
-   *  the same fit, and identical numbers with identical measurers must
-   *  keep the rows' DOM. */
+   *  painted output — so it repaints like a content change. The numbers
+   *  are compared by value, the measurers by identity (metricOf binds them
+   *  once per fit), and the fit's signature by value: a late font load or a
+   *  shaping change leaves the numbers equal and the verdicts different.
+   *  Identical numbers, measurers and signature keep the rows' DOM. */
   function metricChanged(current: RunMetric | null): boolean {
     if (current === null || lastMetric === null) return current !== lastMetric
     return (
       current.cellWidth !== lastMetric.cellWidth ||
       current.defaultSpacing !== lastMetric.defaultSpacing ||
       current.padY !== lastMetric.padY ||
+      current.signature !== lastMetric.signature ||
       current.advanceOf !== lastMetric.advanceOf ||
       current.boxOf !== lastMetric.boxOf
     )
   }
 
   function apply(snapshot: ScreenSnapshot): void {
+    // The metric first: reading it is what begins the fit's row context,
+    // which its warm() measures against.
     const metric = opts.metric?.() ?? null
-    if (rows.length !== snapshot.rows.length || metricChanged(metric)) {
+    const repaintAll = rows.length !== snapshot.rows.length || metricChanged(metric)
+    const toPaint = repaintAll
+      ? snapshot.rows.map((_, r) => r)
+      : snapshot.rows.flatMap((row, r) => {
+          const prev = installed?.rows[r]
+          return prev === undefined || !rowEquals(prev, row) ? [r] : []
+        })
+    // All writes, then all reads: one batch for exactly the rows about to
+    // paint, before the first of them does.
+    if (metric !== null && toPaint.length > 0) {
+      opts.warm?.(fitCandidatesOf(toPaint.map((r) => snapshot.rows[r])))
+    }
+    if (repaintAll) {
       for (const row of rows) row.remove()
       rows = snapshot.rows.map((modelRow) => paintRow(modelRow, { metric, palette }))
       for (const row of rows) surface.insertBefore(row, cursor)
     } else {
-      for (let r = 0; r < snapshot.rows.length; r++) {
-        const prev = installed?.rows[r]
-        if (prev === undefined || !rowEquals(prev, snapshot.rows[r])) {
-          const next = paintRow(snapshot.rows[r], { metric, palette })
-          rows[r].replaceWith(next)
-          rows[r] = next
-        }
+      for (const r of toPaint) {
+        const next = paintRow(snapshot.rows[r], { metric, palette })
+        rows[r].replaceWith(next)
+        rows[r] = next
       }
     }
     lastMetric = metric

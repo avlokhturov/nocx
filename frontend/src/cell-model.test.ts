@@ -229,6 +229,39 @@ describe('cell facts', () => {
     expect(styles[4]).toEqual(green)
   })
 
+  it('reads a colour on either side of the palette/RGB boundary as the schema says', () => {
+    // session.frame.schema.json $defs/color: 1-256 is a palette index plus
+    // one, 257+ an RGB triple offset by 257. The last palette entry and RGB
+    // black sit on either side of that line (a hand-planted `value <= 257`
+    // at stage acceptance read black as palette 256, and nothing noticed).
+    const lastPalette = styleOf({
+      foreground: { kind: 1, palette: 255, rgb: { r: 0, g: 0, b: 0 } },
+    })
+    const rgbBlack = styleOf({ foreground: { kind: 2, palette: 0, rgb: { r: 0, g: 0, b: 0 } } })
+    const rgbWhite = styleOf({
+      foreground: { kind: 2, palette: 0, rgb: { r: 255, g: 255, b: 255 } },
+    })
+    const snapshot = applied(
+      createCellModel(),
+      frame(
+        1,
+        [
+          [
+            ['a', 1, true, lastPalette],
+            ['b', 1, true, rgbBlack],
+            ['c', 1, true, rgbWhite],
+          ],
+        ],
+        3,
+      ),
+    )
+
+    const fg = snapshot.rows[0].cells.map((c) => c.style.foreground)
+    expect(fg[0]).toEqual({ kind: 1, palette: 255, rgb: { r: 0, g: 0, b: 0 } })
+    expect(fg[1]).toEqual({ kind: 2, palette: 0, rgb: { r: 0, g: 0, b: 0 } })
+    expect(fg[2]).toEqual({ kind: 2, palette: 0, rgb: { r: 255, g: 255, b: 255 } })
+  })
+
   it('carries hasText separately from an empty grapheme', () => {
     const inverse = style(4)
     const f = frame(
@@ -595,5 +628,111 @@ describe('atomic per-revision replacement', () => {
     // Paired ordinary frame succeeds.
     const snapshot = applied(model, blankFrame(3, 1))
     expect(snapshot.revision).toBe(3)
+  })
+
+  it('refuses a mark whose position is past the row, and keeps the previous revision', () => {
+    const model = createCellModel()
+    applied(model, blankFrame(1, 2))
+
+    // Hand-written: wireRowOf only ever emits a mark for a real column, so
+    // the fixture encoder cannot produce a mark past the row's own
+    // position sequence. text 'a' is one position (position 0); the mark
+    // names position 10, which positionsOf's own count (1) never reaches —
+    // buildRow's position loop runs 0..0 and simply never looks the mark
+    // up, so today it is silently dropped and 'a' decodes as a narrow cell
+    // plus padding instead of the wide cluster the mark declared.
+    const markPastRow: SessionFrame = {
+      revision: 2,
+      geometry: { cols: 2, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 2 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'a', marks: [[10, 1, 2]] }],
+    }
+    const refusal = refused(model, markPastRow)
+    expect(refusal.reason).toBe('malformed-row')
+    expect(model.current()?.revision).toBe(1)
+
+    // Paired ordinary frame still succeeds.
+    const snapshot = applied(model, blankFrame(3, 2))
+    expect(snapshot.revision).toBe(3)
+  })
+
+  it('refuses a mark whose position is not a whole number, and keeps the previous revision', () => {
+    const model = createCellModel()
+    applied(model, blankFrame(1, 2))
+    // Hand-written, as above: the wire is runtime JSON, and a position of
+    // 0.5 is inside [0, count) yet names no position, so no lookup ever
+    // consumes it (codex re-review, 2026-09-28).
+    const fractional: SessionFrame = {
+      revision: 2,
+      geometry: { cols: 4, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 2 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'ab', marks: [[0.5, 1, 2]] }],
+    }
+    expect(refused(model, fractional).reason).toBe('malformed-row')
+    expect(model.current()?.revision).toBe(1)
+  })
+
+  it('refuses a row whose marks and text disagree, and keeps the previous revision', () => {
+    const model = createCellModel()
+    applied(model, blankFrame(1, 2))
+
+    // Hand-written: text 'ab' is two codepoints, but the mark at position 0
+    // claims 3 — more than the row's own text has, at any position. The
+    // row's derived position count (codepoints.length - explicitCodepoints
+    // + marks.size = 2 - 3 + 1 = 0) lands at zero rather than negative, so
+    // today's `count < 0` guard does not catch it: positionsOf accepts a
+    // row with no positions at all, buildRow's loop never runs, and 'ab' is
+    // silently dropped, padded away instead of refused.
+    const markOverclaims: SessionFrame = {
+      revision: 2,
+      geometry: { cols: 2, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 2 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'ab', marks: [[0, 3, 1]] }],
+    }
+    const refusal = refused(model, markOverclaims)
+    expect(refusal.reason).toBe('malformed-row')
+    expect(model.current()?.revision).toBe(1)
+
+    // Paired ordinary frame still succeeds.
+    const snapshot = applied(model, blankFrame(3, 2))
+    expect(snapshot.revision).toBe(3)
+  })
+
+  it('accepts an ordinary row with valid marks: wide, combining, zero-codepoint', () => {
+    // The paired positive case, so the two refusals above cannot be
+    // satisfied by a check that rejects every marked row. Built through the
+    // fixture encoder (wireRowOf), which only ever emits marks a real
+    // position can carry: a wide cluster + its spacer, a combining cluster
+    // (two codepoints, one position), a zero-codepoint blank (Cell.HasText
+    // false, still a real position), and a plain narrow cell.
+    const f = frame(
+      1,
+      [
+        [
+          ['汉', 2, true],
+          ['', 3, false],
+          ['é', 1, true],
+          ['', 1, false],
+          ['b', 1, true],
+        ],
+      ],
+      5,
+    )
+    const model = createCellModel()
+    const snapshot = applied(model, f)
+
+    expect(snapshot.cellAt(0, 0)?.grapheme).toBe('汉')
+    expect(snapshot.cellAt(0, 0)?.width).toBe(2)
+    expect(snapshot.cellAt(0, 0)?.span).toBe(2)
+    expect(snapshot.cellAt(0, 1)?.width).toBe(3)
+    expect(snapshot.cellAt(0, 1)?.hasText).toBe(false)
+    expect(snapshot.cellAt(0, 2)?.grapheme).toBe('é')
+    expect(snapshot.cellAt(0, 2)?.hasText).toBe(true)
+    expect(snapshot.cellAt(0, 2)?.width).toBe(1)
+    expect(snapshot.cellAt(0, 3)?.grapheme).toBe('')
+    expect(snapshot.cellAt(0, 3)?.hasText).toBe(false)
+    expect(snapshot.cellAt(0, 3)?.width).toBe(1)
+    expect(snapshot.cellAt(0, 4)?.grapheme).toBe('b')
+    expect(snapshot.cellAt(0, 4)?.column).toBe(4)
   })
 })

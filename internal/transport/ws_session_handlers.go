@@ -89,6 +89,10 @@ type sessionMachine interface {
 	// that reconnects to a settled agent would otherwise never be told what
 	// the pane is.
 	replayPaneObservation(sid session.ID)
+	// resendScreen asks for the screen the subscriber just installed is owed
+	// (nocx-zg3k3.2.15, screen.go): frames published while nobody was
+	// attached were dropped, and a pane at rest publishes no next one.
+	resendScreen(ctx context.Context, sid session.ID)
 }
 
 // openMachine is the transport-owned machinery handleOpen needs after the
@@ -117,6 +121,8 @@ type openMachine interface {
 	sessionAwaitsIntegration(sid session.ID) bool
 	emitIntegration(sid session.ID)
 	replayToolSurface(sid session.ID)
+	// resendScreen is sessionMachine's, for the same install on this path.
+	resendScreen(ctx context.Context, sid session.ID)
 }
 
 // openHandlers answers "open". It holds the two-phase OpenOperation — the
@@ -544,6 +550,16 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
 	go h.sess.ringToConn(ctx, wconn, sidBytes, rx, 0)
+
+	// The screen, for the window the lifecycle replay above covers
+	// (nocx-zg3k3.2.15): whatever the shell drew between the spawn and the
+	// subscriber install was published to nobody and dropped, and a shell
+	// that has finished drawing its prompt publishes nothing more until
+	// somebody types. Screen frames have no retained projection here to
+	// replay — the runtime holds the latest one — so the frame this
+	// subscriber is owed is asked for. Last, so its round trip delays no
+	// PTY byte.
+	h.sess.resendScreen(ctx, sess.ID())
 }
 
 // sessionOpsHandlers answers resize, close and attach: the per-session
@@ -801,6 +817,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
 		return
 	}
+	attached := false
 	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
@@ -923,13 +940,25 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayIntegration(sid)
 		h.machine.replayToolSurface(sid)
 		h.machine.replayPaneObservation(sid)
-
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
+		attached = true
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(wconn, req, err)
+		return
+	}
+	// The screen (nocx-zg3k3.2.15): the frames published while nobody was
+	// attached were dropped, and an idle pane publishes no next one, so the
+	// attacher asks for the frame the runtime holds. Not left to takeSize
+	// above: its repaint is the resize's side effect, and an attach that
+	// reports no size has none. Asked AFTER the operation has released the
+	// session gate and its lane, so a slow helper's round trip holds up no
+	// other session's resize, close or attach; and after the byte replay has
+	// started, so it delays no PTY byte.
+	if attached {
+		h.machine.resendScreen(ctx, sid)
 	}
 }
 

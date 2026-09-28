@@ -111,6 +111,23 @@ describe('rows and runs', () => {
     expect(wide.style.letterSpacing).toBe('1px')
   })
 
+  it('paints a wide cluster across its two columns and no more: its spacer spells nothing', () => {
+    // The wide cell already stands in both columns (span 2), so a spacer
+    // painted as a space pushed every later cell one column right of the
+    // model and of the mapping. The frozen path, walking xterm's line, never
+    // yielded the spacer at all; the live row spells what it spells.
+    const { painter, surface } = mount(() => M2)
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    const frozen = document.createElement('div')
+    frozen.innerHTML = serializeLine(
+      DEFAULT_SNAPSHOT,
+      lineWith({ chars: 'a' }, { chars: '漢', width: 2 }, { chars: '', width: 0 }, { chars: 'b' }),
+      M2,
+    )
+    expect(liveRow(surface).textContent).toBe('a漢b')
+    expect(liveRow(surface).textContent).toBe(frozen.textContent)
+  })
+
   it('leaves an ordinary row of one colour as a single text node', () => {
     const { painter, surface } = mount(() => M1)
     painter.apply(
@@ -268,7 +285,7 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
    *  numbers, advanceOf/boxOf a table — createCellFit's shape, without a
    *  DOM to measure in. */
   const fit = {
-    geometry: () => ({ cellWidth: 8, rowDelta: -0.5 }),
+    geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature: 'regular' }),
     advanceOf: (chars: string) => (chars === '漢' ? 15 : null),
     boxOf: () => null,
   }
@@ -298,5 +315,83 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
     const wide = [...row.children].find((el) => el.textContent === '漢')
     if (!(wide instanceof HTMLElement)) throw new Error('wide run was not a span')
     expect(wide.style.letterSpacing).toBe('1px')
+  })
+
+  /** createCellFit's contract without a DOM: boxOf/advanceOf read a cache
+   *  that only warm() writes. 漢 inks 20px in a 16px pair of cells, so once
+   *  measured it is a box squeezed to 0.8. */
+  function coldFit() {
+    const measured = new Set<string>()
+    const warmed: string[] = []
+    return {
+      warmed,
+      fit: {
+        geometry: () => ({ cellWidth: 8, rowDelta: 0, signature: 'regular' }),
+        warm(candidates: Iterable<{ chars: string; width: number }>) {
+          for (const c of candidates) {
+            warmed.push(`${c.chars}/${c.width}`)
+            measured.add(c.chars)
+          }
+        },
+        advanceOf: (chars: string) => (measured.has(chars) && chars === '漢' ? 20 : null),
+        boxOf: (chars: string) =>
+          measured.has(chars) && chars === '漢' ? { cols: 2, fit: 0.8 } : null,
+      },
+    }
+  }
+
+  it('measures a cluster new to the session before it paints it, so it lands in its box (nocx-zg3k3.2.13)', () => {
+    const { fit, warmed } = coldFit()
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const painter = createCellPainter({
+      surface,
+      metric: () => metricOf(fit),
+      warm: (candidates) => fit.warm(candidates),
+      palette: DEFAULT_SNAPSHOT,
+    })
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    expect(warmed).toContain('漢/2')
+    expect(liveRow(surface).querySelector('.term-cell[data-cols="2"]')?.textContent).toBe('漢')
+  })
+
+  it('keeps an unchanged row’s DOM when the next revision changes another row (nocx-zg3k3.2.14)', () => {
+    // metricOf is re-run per apply, as the live wiring does; the same fit
+    // with the same numbers is the same metric, not a reason to repaint.
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const painter = createCellPainter({
+      surface,
+      metric: () => metricOf(fit),
+      palette: DEFAULT_SNAPSHOT,
+    })
+    const first: CellSpec[] = [['x', 1, true]]
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW, first])))
+    const [keptBefore, changedBefore] = surface.querySelectorAll('.term-grid-row')
+    painter.apply(snapshotOf(frameOf(2, [MERGE_ROW, [['y', 1, true]]])))
+    const [keptAfter, changedAfter] = surface.querySelectorAll('.term-grid-row')
+    expect(keptAfter).toBe(keptBefore)
+    expect(changedAfter).not.toBe(changedBefore)
+    expect(changedAfter.textContent?.trimEnd()).toBe('y')
+  })
+
+  it('repaints every row when the fit’s signature changes and its numbers do not', () => {
+    // A late font load or a shaping change: same cell width, same row delta,
+    // different verdicts. Keeping the rows here painted the old fit's boxes
+    // until the rows happened to change (codex re-review, 2026-09-28).
+    let signature = 'before-font-load'
+    const shifting = { ...fit, geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature }) }
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const painter = createCellPainter({
+      surface,
+      metric: () => metricOf(shifting),
+      palette: DEFAULT_SNAPSHOT,
+    })
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    const before = liveRow(surface)
+    signature = 'after-font-load'
+    painter.apply(snapshotOf(frameOf(2, [MERGE_ROW])))
+    expect(liveRow(surface)).not.toBe(before)
   })
 })

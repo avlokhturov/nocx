@@ -59,6 +59,28 @@ func (c *Client) Screen(ctx context.Context, id HostSessionID) (paneview.Frame, 
 	return frame, nil
 }
 
+// ResendScreen asks a session's runtime to re-offer its latest frame. The
+// frame is not this call's answer: it arrives on the screen carrier, at the
+// observer OnScreenFrame registered, in order with every other frame
+// (proto.OpScreenResend). A generation that predates the op answers
+// ErrScreenUnsupported, for the reason Screen's own refusal is typed.
+func (c *Client) ResendScreen(ctx context.Context, id HostSessionID) error {
+	err := c.Call(ctx, proto.ServiceSession, proto.OpScreenResend, proto.ScreenResendParams{
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(id.Generation),
+			Session:    id.Session,
+		},
+	}, nil)
+	if err != nil {
+		var refusal *RefusalError
+		if errors.As(err, &refusal) && refusal.Code == proto.ErrCodeUnknownOp {
+			return ErrScreenUnsupported
+		}
+		return err
+	}
+	return nil
+}
+
 // Replay feeds a capture's bytes to the helper's PTY-less emulator and answers
 // the screen after each mark.
 //

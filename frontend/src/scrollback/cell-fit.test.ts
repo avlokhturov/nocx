@@ -381,7 +381,7 @@ describe('CellFit measurement handoff', () => {
     // Calibrated ASCII is never measured: its spacing IS the row default.
     expect(fit.advanceOf('a', 1, REGULAR)).toBeNull()
     // No delta published: the row default is 0.
-    expect(fit.geometry()).toEqual({ cellWidth: 8, rowDelta: 0 })
+    expect(fit.geometry()).toMatchObject({ cellWidth: 8, rowDelta: 0 })
   })
 
   it('hands out the row context begin() took, and nothing after dispose', () => {
@@ -392,7 +392,8 @@ describe('CellFit measurement handoff', () => {
       batch(() => 13.572),
     )
     fit.begin()
-    expect(fit.geometry()).toEqual({ cellWidth: 8, rowDelta: -0.5 })
+    expect(fit.geometry()).toMatchObject({ cellWidth: 8, rowDelta: -0.5 })
+    expect(fit.geometry()?.signature).not.toBe('')
     fit.dispose()
     expect(fit.geometry()).toBeNull()
     expect(fit.advanceOf('🗑', 1, REGULAR)).toBeNull()
