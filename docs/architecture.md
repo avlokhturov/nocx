@@ -61,7 +61,10 @@ graph LR
     ptyw --> outbytes["output bytes"]
     sshw --> outbytes
     outbytes --> tpb["transport: WS binary frame"]
-    tpb --> render["xterm.js: parse VT + render grid"]
+    tpb --> render["xterm.js: parse VT for input and OSC,<br/>paints nothing (invisible input layer)"]
+    outbytes --> rt["sessionruntime: emulator → cells"]
+    rt --> frame["transport: screen frame<br/>(data plane, ADR-0073)"]
+    frame --> paint["cell model + painter:<br/>paint the live grid (ADR-0072)"]
 
     render --> osc["frontend surfaces<br/>OSC 7 / OSC 133 (verified)"]
     osc --> ev["terminal→ui event (frontend-side ONLY):<br/>cwd {host, path} · marker {A|B|C|D, exitCode?}"]
@@ -86,13 +89,13 @@ cwd/prompt markers never cross the WS as their own control messages — they are
 | `config`           | Load/persist settings, themes, keybindings, tab-restore; house the Phase-2 vault seam.                                                                                                                          |
 | `shellintegration` | Provide the OSC 7/133 substrate contract (Tier A shell hooks; Tier B helper-hosted in-memory delivery).                                                                                                         |
 
-**Frontend (xterm.js)**:
+**Frontend**:
 
-| Module     | SRP responsibility                                                                                                                                                                                                               |
-| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `terminal` | Own terminal render state (grid, scrollback, selection); parse VT and surface OSC events via `parser.registerOscHandler` (verified — [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)).                                     |
-| `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it. |
-| `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                            |
+| Module     | SRP responsibility                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `terminal` | Paint the screen the session runtime sends: a passive cell model of its frames and the painter that draws the live grid from it ([ADR-0072](decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md), `nocx-zg3k3.2`). xterm.js stays only as the invisible input layer — it parses the bytes for input encoding and surfaces OSC events via `parser.registerOscHandler`, and paints nothing — until `nocx-zg3k3.8` removes it ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)). |
+| `ui`       | Render tabs, menus, config, and map OSC/cwd events to user actions. Built on **SolidJS** ([ADR-0012](decisions/0012-solidjs-as-the-application-ui-layer.md)); it creates an empty host for `terminal` and never renders into it.                                                                                                                                                                                                                                                                                        |
+| `ipc`      | Speak the WebSocket protocol: binary data plane (PTY I/O) + JSON-RPC control plane; ack received byte-offsets (AD-9).                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 ## Architectural Decisions
 

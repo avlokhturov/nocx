@@ -104,5 +104,7 @@ is the same class of bug as `nocx-25k9.14` and would have thrown on the renderer
 
 ## Deliberately out of scope
 
-- **The binary data plane** (AD-1). It has no JSON shape to pin.
+- **The binary data plane's bytes** (AD-1). They have no JSON shape to pin. The screen
+  frame the data plane carries as JSON on its metadata frame is not bytes, and it is
+  pinned here as `session.frame.schema.json` ([ADR-0073](../docs/decisions/0073-the-screen-frame-is-keyed-by-its-session-and-its-reader-and-continues-on-its-own-carrier.md)).
 - **Runtime validation in production.** Both ends of this socket are ours.
