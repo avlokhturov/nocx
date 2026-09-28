@@ -55,15 +55,21 @@ export function paintRow(
   const el = document.createElement('div')
   el.className = 'term-grid-row'
   // The walk's cells, in the owner's shape: a cell without text is a blank
-  // spelled as a space (the spacer after a wide cluster included) — the
-  // measurer is never asked about one. `cols` is the model's declared span,
-  // which is the wire's own arithmetic; nothing here recomputes it.
-  const cells: GridCell<Style>[] = row.cells.map((cell) => ({
-    chars: cell.hasText ? cell.grapheme : ' ',
-    cols: cell.span,
-    attrs: cell.style,
-    blank: !cell.hasText,
-  }))
+  // spelled as a space — the measurer is never asked about one. `cols` is
+  // the model's declared span, which is the wire's own arithmetic; nothing
+  // here recomputes it. A spacerTail (width 3) is skipped: the wide cell
+  // before it already stands in its column (span 2), and spelling it too
+  // pushed every later cell one column right of the model and the mapping.
+  // The frozen path's walk steps over xterm's spacer the same way. A
+  // spacerHead (width 4) is its own column, and paints as a blank.
+  const cells: GridCell<Style>[] = row.cells
+    .filter((cell) => cell.width !== 3)
+    .map((cell) => ({
+      chars: cell.hasText ? cell.grapheme : ' ',
+      cols: cell.span,
+      attrs: cell.style,
+      blank: !cell.hasText,
+    }))
   const runs = runsOf(cells, styleEquals, faceOf, opts.metric ?? undefined)
   const defaultSpacing = opts.metric?.defaultSpacing ?? 0
   for (const run of runs) {

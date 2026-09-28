@@ -243,9 +243,10 @@ describe('stored block rows', () => {
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
-    // The spacer paints as a space, same as every blank cell (paint-row.ts's
-    // `chars: cell.hasText ? cell.grapheme : ' '`): the wide cluster's own
-    // column carries the glyph, the second carries the space its spacer is.
-    expect(block.querySelector('.term-grid-row')?.textContent).toBe('汉 ')
+    // The wide cluster stands in both its columns (span 2), so its spacer
+    // paints nothing: this test once expected '汉 ', which painted the row
+    // three columns wide and put every later cell one column right of the
+    // model (review of nocx-zg3k3.2, 2026-09-28; paint-row.ts skips it).
+    expect(block.querySelector('.term-grid-row')?.textContent).toBe('汉')
   })
 })

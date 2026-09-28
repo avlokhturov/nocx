@@ -111,6 +111,23 @@ describe('rows and runs', () => {
     expect(wide.style.letterSpacing).toBe('1px')
   })
 
+  it('paints a wide cluster across its two columns and no more: its spacer spells nothing', () => {
+    // The wide cell already stands in both columns (span 2), so a spacer
+    // painted as a space pushed every later cell one column right of the
+    // model and of the mapping. The frozen path, walking xterm's line, never
+    // yielded the spacer at all; the live row spells what it spells.
+    const { painter, surface } = mount(() => M2)
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    const frozen = document.createElement('div')
+    frozen.innerHTML = serializeLine(
+      DEFAULT_SNAPSHOT,
+      lineWith({ chars: 'a' }, { chars: '漢', width: 2 }, { chars: '', width: 0 }, { chars: 'b' }),
+      M2,
+    )
+    expect(liveRow(surface).textContent).toBe('a漢b')
+    expect(liveRow(surface).textContent).toBe(frozen.textContent)
+  })
+
   it('leaves an ordinary row of one colour as a single text node', () => {
     const { painter, surface } = mount(() => M1)
     painter.apply(
