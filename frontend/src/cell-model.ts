@@ -232,6 +232,19 @@ function positionsOf(wireRow: SessionFrame['rows'][number]): RowPositions | { ma
   }
   const count = codepoints.length - explicitCodepoints + marks.size
   if (count < 0) return { malformed: true }
+  // Every mark names a position in the surviving-position sequence itself
+  // (0-based, schema's own words) — not a position in `text` or in
+  // `codepoints`. A position outside [0, count) names no such member: the
+  // row-building loop below (and buildRow's) walks exactly [0, count), so
+  // a mark past that range is never consulted and is silently dropped
+  // rather than applied. Because `count` is solved from the marks' own
+  // codepoint claims, an out-of-range mark is also how a mark can claim
+  // more codepoints than the row's text has left, or leave text
+  // unconsumed, without `count` itself going negative: it still lands
+  // outside the range the mark could occupy.
+  for (const position of marks.keys()) {
+    if (position < 0 || position >= count) return { malformed: true }
+  }
   return { codepoints, marks, count }
 }
 
