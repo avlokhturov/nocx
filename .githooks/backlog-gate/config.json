@@ -1,7 +1,7 @@
 {
   "strength": "block-new",
-  "currentMilestone": "v0-5",
-  "milestoneLabels": ["v0-5", "v0-6"],
+  "currentMilestone": "v0-6",
+  "milestoneLabels": ["v0-5", "v0-6", "v0-7"],
   "areaLabels": [
     "transport",
     "session",
