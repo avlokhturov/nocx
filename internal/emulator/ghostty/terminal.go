@@ -182,6 +182,11 @@ type terminal struct {
 	// them — it is tracked in the same pass over the bytes purely because
 	// scanMarkers is the one place bytes are scanned at all.
 	eraseIdx int
+	// eraseDisplayIdx scans for ED2 alone (erase.go, nocx-2v80t.7).
+	eraseDisplayIdx int
+	// altExit scans for the switch back from the alternate screen, a split
+	// point for the departure measurement (altscreen.go, nocx-2v80t.6).
+	altExit altExitScan
 	// departed holds the rows that left the screen, captured at the instant
 	// of their departure during Ingest and drained whole by DepartedRows. It
 	// follows the replies/effects rule: the goroutine holding mu is the only
@@ -247,6 +252,14 @@ type sbBaseline struct {
 	// ReportedRowsOnScreen answers, because a consumer reading the screen as
 	// rows still to come must skip exactly these.
 	owed int
+	// screenRows is the screen height this baseline was measured at, and
+	// hidden says a resize while the OTHER buffer was active left it
+	// unmeasured (rebaselineLocked). Together they are what a shrink pushed
+	// off this buffer's screen while nobody could measure it: a shrink by N
+	// rows moves up to N of its top rows into its history, rows that left
+	// the screen and are reported at its next measurement (nocx-2v80t.6).
+	screenRows int
+	hidden     bool
 }
 
 var (
@@ -467,7 +480,7 @@ func (t *terminal) Resize(g emulator.Geometry) ([]byte, error) {
 	// A resize reflows, and reflow rewrites history's line breaks: the rows
 	// it reshapes did not leave the screen, so the departure baseline is
 	// taken again rather than let a reflowed count read as departures.
-	t.rebaselineLocked()
+	t.rebaselineLocked(beforeRows)
 	if after, aerr := t.scrollbackLocked(); aerr == nil {
 		if screen, serr := t.screenLocked(); serr == nil {
 			base := &t.sb[sbIndex(screen)]
@@ -583,6 +596,8 @@ func (t *terminal) ingestLocked(b []byte) {
 			t.sightOutputMark()
 		case markKindClearBoundary:
 			t.sightEraseSavedLines()
+		case markKindEraseDisplay:
+			t.sightEraseDisplay()
 		}
 		start += n
 	}
@@ -596,6 +611,10 @@ const (
 	markKindFence
 	markKindOutputMark
 	markKindClearBoundary
+	// markKindAltExit needs nothing sighted: the split itself is the point,
+	// since the chunk it ends is measured on its own (altscreen.go).
+	markKindAltExit
+	markKindEraseDisplay
 )
 
 // scanMarkers advances the fence scanner (fence.go), the output-mark scanner
@@ -654,6 +673,23 @@ func (t *terminal) scanMarkers(b []byte) (n int, kind markKind) {
 			t.eraseIdx = 1
 		} else {
 			t.eraseIdx = 0
+		}
+
+		if eraseDisplayMatches(t.eraseDisplayIdx, c) {
+			if t.eraseDisplayIdx == len(eraseDisplayFixed)-1 {
+				t.eraseDisplayIdx = 0
+				return i + 1, markKindEraseDisplay
+			}
+			t.eraseDisplayIdx++
+		} else if c == eraseDisplayFixed[0] {
+			t.eraseDisplayIdx = 1
+		} else {
+			t.eraseDisplayIdx = 0
+		}
+
+		// Last, so every other scanner has already taken this byte.
+		if t.altExit.step(c) {
+			return i + 1, markKindAltExit
 		}
 	}
 	return len(b), markKindNone
@@ -766,7 +802,28 @@ func (t *terminal) noteDepartedLocked() {
 		// signal fired for zero of the runs that mattered. The scanner
 		// below fires on the SEQUENCE, not on its effect on this counter.
 	}
+	if !base.valid && base.hidden {
+		// Resized while the other buffer was active: its depth moved by the
+		// reflow as well as by what the shrinks pushed off, and only the
+		// push is a departure. Bounded by the rows the screen lost, as the
+		// active buffer's own shrink is in Resize, so a rewrap of history's
+		// line breaks is never read as rows leaving.
+		pushed := min(max(base.screenRows-t.geom.Rows, 0), max(h-base.rows, 0))
+		again := min(pushed, base.owed)
+		base.owed -= again
+		if fresh := pushed - again; fresh > 0 {
+			t.captureDepartedLocked(h-fresh, h)
+		}
+		// And the inverse, as Resize books it for the active buffer: a
+		// growth refilled the screen from the history, rows that were
+		// reported when they first left, so each owes the departure it will
+		// not report again. Bounded by the rows the screen gained.
+		if refill := min(max(t.geom.Rows-base.screenRows, 0), max(base.rows-h, 0)); refill > 0 {
+			base.owed = min(base.owed+refill, t.geom.Rows)
+		}
+	}
 	base.rows, base.valid, base.torn = h, true, false
+	base.screenRows, base.hidden = t.geom.Rows, false
 }
 
 // captureDepartedLocked copies history rows [from, to) — the rows that just
@@ -817,7 +874,7 @@ func (t *terminal) rowAt(tag C.GhosttyPointTag, y int) (emulator.Row, error) {
 // rather than scrolls. The active buffer is measured; the hidden one cannot
 // be, so its next measurement starts a fresh baseline instead of a delta —
 // which is also why the check rides the feed and nothing else.
-func (t *terminal) rebaselineLocked() {
+func (t *terminal) rebaselineLocked(beforeRows int) {
 	// Read through the same two injectable seams noteDepartedLocked does
 	// (readScreen/readDepth): the library never fails either on request, so
 	// a test that wants THIS function's own read-failure path — as opposed
@@ -854,9 +911,18 @@ func (t *terminal) rebaselineLocked() {
 	t.sb[active].rows = h
 	t.sb[active].valid = true
 	t.sb[active].torn = false
+	t.sb[active].screenRows = t.geom.Rows
+	t.sb[active].hidden = false
 	// The hidden buffer cannot be measured from here — this read is per
 	// ACTIVE buffer, exactly as scrollbackLocked's own doc says — so its
-	// depth is unmeasured rather than assumed; only that changes.
+	// depth is unmeasured rather than assumed; only that changes. Its last
+	// measurement and the height it was taken at stay, from the FIRST resize
+	// that hid it, so its next measurement can report what shrinks pushed
+	// off its screen in between.
+	if hb := &t.sb[1-active]; hb.valid {
+		hb.hidden = true
+		hb.screenRows = beforeRows
+	}
 	t.sb[1-active].valid = false
 }
 
@@ -1132,6 +1198,38 @@ func (rt *rowTrack) Row() (emulator.Row, error) {
 		return emulator.Row{}, resultError("tracked_grid_ref_point", r)
 	}
 	return t.rowAt(pointScreen, int(pt.y))
+}
+
+// ActiveRow resolves the reference in the ACTIVE area, where the library
+// answers no value for a row the active area does not hold — one in the
+// history as much as one that ceased — so both are ErrOutOfRange here and
+// Alive is how a caller tells them apart.
+func (rt *rowTrack) ActiveRow() (int, error) {
+	rt.term.mu.Lock()
+	defer rt.term.mu.Unlock()
+	t := rt.term
+	if t.t == nil {
+		return 0, emulator.ErrClosed
+	}
+	if rt.released {
+		return 0, fmt.Errorf("ghostty: tracked row released: %w", emulator.ErrOutOfRange)
+	}
+	screen, err := t.screenLocked()
+	if err != nil {
+		return 0, err
+	}
+	if screen != emulator.ScreenPrimary {
+		return 0, fmt.Errorf("ghostty: tracked row located while the alternate screen is active: %w", emulator.ErrUnsupported)
+	}
+	var pt C.GhosttyPointCoordinate
+	switch r := C.ghostty_tracked_grid_ref_point(rt.ref, pointActive, &pt); r {
+	case C.GHOSTTY_SUCCESS:
+		return int(pt.y), nil
+	case C.GHOSTTY_NO_VALUE:
+		return 0, fmt.Errorf("ghostty: tracked row is not on the active area: %w", emulator.ErrOutOfRange)
+	default:
+		return 0, resultError("tracked_grid_ref_point", r)
+	}
 }
 
 // Release frees the handle and forgets it, so the terminal's own close does

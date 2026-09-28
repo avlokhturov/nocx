@@ -283,6 +283,14 @@ type Session struct {
 	// (outputMarkSkipLocked, nocx-2v80t.3.24). departedRows stays the
 	// stream's index space; this is never an index.
 	screenDepartedRows uint64
+	// reflowOwed says a geometry commit landed while the alternate screen
+	// held the pane, so the primary screen's rows were re-laid out where no
+	// pin could be located; the repair runs when the primary is back
+	// (settleOwedReflowLocked, nocx-2v80t.5).
+	reflowOwed bool
+	// markerCarry is the tail of the last feed that could still begin a
+	// marker, searched in front of the next feed (Ingest, nocx-2v80t.8).
+	markerCarry []byte
 	// obsCarried is how much of ingestLost some observation record already
 	// carries: a hole reported before the first ingest, or in the gap
 	// between one sealed interval and the next output, reaches no record at
@@ -1051,6 +1059,9 @@ func (s *Session) CommitGeometry(g Geometry) (GeometryCommit, error) {
 	// feed — not at whichever ingest comes next, which may carry the fence
 	// that closes this interval, or open another one.
 	s.drainObservationLocked(0)
+	// The rows the boundary bookkeeping names were just re-laid out; bring it
+	// up to the new grid before anything else reads it (nocx-2v80t.5).
+	s.reflowBoundaryLocked()
 	if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
 		// Both sides took it, but the program's own report of the new size
 		// never reached it: the attempt did not complete, so it does not
@@ -1085,8 +1096,12 @@ func (s *Session) repairLocked() error {
 	}
 	if replies, err := s.emulator.Resize(s.geom.Geometry); err != nil {
 		failed = append(failed, err)
-	} else if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
-		failed = append(failed, writeErr)
+	} else {
+		// The rows re-laid out a second time, back to the commit in force.
+		s.reflowBoundaryLocked()
+		if writeErr := s.deliverReplyLocked(replies); writeErr != nil {
+			failed = append(failed, writeErr)
+		}
 	}
 	return errors.Join(failed...)
 }
@@ -1131,10 +1146,21 @@ func (s *Session) Ingest(b []byte) error {
 	s.openObservationLocked()
 
 	var replyErr error
+	// The tail of the feed before, if it could still begin a marker, is
+	// searched in front of this one, so a marker split across two reads is
+	// located where it ends (nocx-2v80t.8). It is only a search prefix: its
+	// bytes reached the emulator with the feed that carried them.
+	carry := s.markerCarry
+	s.markerCarry = markerCarryTail(append(append([]byte(nil), carry...), b...))
 	for rest := b; len(rest) > 0; {
 		chunk := rest
-		if end, ok := nextMarkerSplit(rest); ok {
-			chunk = rest[:end]
+		search, off := rest, 0
+		if len(carry) > 0 {
+			search, off = append(append([]byte(nil), carry...), rest...), len(carry)
+			carry = nil
+		}
+		if end, ok := nextMarkerSplit(search); ok && end > off {
+			chunk = rest[:end-off]
 		}
 		rest = rest[len(chunk):]
 
@@ -1187,6 +1213,13 @@ func (s *Session) Ingest(b []byte) error {
 				// fed yet (the split above) is what lets the screen read
 				// inside it be the screen exactly as THIS mark left it.
 				s.sightOutputMarkLocked()
+				continue
+			}
+			if e.Kind == emulator.EffectEraseDisplay {
+				// An in-place erase of the whole display: what stood above
+				// the output is gone, so nothing may be cut as though it
+				// were still there (nocx-2v80t.7). Not a consumer payload.
+				s.sightEraseDisplayLocked()
 				continue
 			}
 			if e.Kind == emulator.EffectClearBoundary {

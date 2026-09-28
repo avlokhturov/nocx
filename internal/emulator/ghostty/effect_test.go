@@ -119,6 +119,8 @@ func describeEffects(effects []emulator.Effect) string {
 
 func effectKindName(k emulator.EffectKind) string {
 	switch k {
+	case emulator.EffectEraseDisplay:
+		return "erase-display"
 	case emulator.EffectBell:
 		return "bell"
 	case emulator.EffectNotification:

@@ -292,6 +292,20 @@ type RowTrack interface {
 	// read reaches, so the port answers [ErrUnsupported] rather than read
 	// the wrong buffer. A caller treats every error as "cannot confirm".
 	Row() (Row, error)
+	// ActiveRow reports which row of the ACTIVE area — the counting
+	// [Terminal.Row] and [Terminal.TrackRow] use — this handle's row occupies
+	// NOW, wherever a reflow or a scroll has carried it (nocx-2v80t.5). A
+	// caller that pinned a row before a resize needs its position after it:
+	// a narrower grid re-lays a soft-wrapped line into more rows and moves
+	// every row below it, so an index taken before the reflow names a
+	// different row afterwards.
+	//
+	// A row that is alive but no longer on the active area — it scrolled or
+	// was pushed into the history — answers [ErrOutOfRange], as does a dead
+	// or released handle; [RowTrack.Alive] tells the two apart. A closed
+	// terminal answers [ErrClosed], and while the alternate screen holds the
+	// pane the answer is [ErrUnsupported], exactly as Row's is.
+	ActiveRow() (int, error)
 	// Release frees the handle. It is idempotent, and safe to call after the
 	// terminal that created it has closed — the terminal's own close frees
 	// whatever a caller left outstanding, so a caller who also released

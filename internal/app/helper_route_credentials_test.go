@@ -315,10 +315,10 @@ func TestTheSettingsProbeReachesAHostBehindAJumpHost(t *testing.T) {
 	// the destination's unknown host key, which is checked before any credential
 	// is offered, so the bastion was dialed twice and the destination
 	// authenticated once.
-	if got := bastion.connCount(); got != 2 {
+	if got := bastion.awaitConns(2); got != 2 {
 		t.Fatalf("the bastion authenticated %d connection(s), want exactly 2 (one per probe)", got)
 	}
-	if got := target.connCount(); got != 1 {
+	if got := target.awaitConns(1); got != 1 {
 		t.Fatalf("the destination authenticated %d connection(s), want exactly 1 (the probe whose key was accepted)", got)
 	}
 	if seen := bastion.directTargetsSeen(); len(seen) != 2 || seen[0] != target.addr || seen[1] != target.addr {

@@ -51,3 +51,20 @@ func eraseSavedLinesMatches(idx int, b byte) bool {
 func (t *terminal) sightEraseSavedLines() {
 	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectClearBoundary})
 }
+
+// eraseDisplayFixed is ED2 alone (nocx-2v80t.7): the display erased in place.
+const eraseDisplayFixed = "\x1b[2J"
+
+func eraseDisplayMatches(idx int, b byte) bool {
+	return idx < len(eraseDisplayFixed) && b == eraseDisplayFixed[idx]
+}
+
+// sightEraseDisplay runs with the feed split at the erase's own end, so the
+// screen read here is the one the erase ran on: only the primary's counts,
+// and a feed that goes on to switch screens cannot change the answer.
+func (t *terminal) sightEraseDisplay() {
+	if scr, err := t.screenLocked(); err != nil || scr != emulator.ScreenPrimary {
+		return
+	}
+	t.effects = append(t.effects, emulator.Effect{Kind: emulator.EffectEraseDisplay})
+}
