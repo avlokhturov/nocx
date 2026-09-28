@@ -58,6 +58,12 @@ export interface RunMetric {
    *  background covers the content box, exactly as the frozen blocks ship
    *  today. */
   readonly padY?: number
+  /** What the measurements behind advanceOf/boxOf were taken against — the
+   *  fit's signature: font epoch, family, size, stretch, letter spacing and
+   *  shaping features. Two metrics with equal numbers and different
+   *  signatures give different verdicts, so a painter that keeps rows across
+   *  applies compares it (nocx-zg3k3.2.14). Absent: no measurer to name. */
+  readonly signature?: string
   advanceOf(chars: string, cols: number, face: FitFace): number | null
   boxOf?(chars: string, cols: number, face: FitFace): CellBox | null
 }

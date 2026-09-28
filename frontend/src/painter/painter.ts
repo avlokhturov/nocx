@@ -42,7 +42,12 @@ type Measurer = Pick<CellFit, 'advanceOf' | 'boxOf' | 'geometry'>
 export function metricOf(fit: Measurer): RunMetric | null {
   const g = fit.geometry()
   if (g === null) return null
-  return { cellWidth: g.cellWidth, defaultSpacing: g.rowDelta, ...measurersOf(fit) }
+  return {
+    cellWidth: g.cellWidth,
+    defaultSpacing: g.rowDelta,
+    signature: g.signature,
+    ...measurersOf(fit),
+  }
 }
 
 /** The fit's two measurers, bound ONCE per fit. The painter decides
@@ -111,16 +116,18 @@ export function createCellPainter(opts: CellPainterOptions): CellPainter {
   let lastMetric: RunMetric | null = null
 
   /** A changed metric re-verdicts every run's spacing — rule 1's output is
-   *  painted output — so it repaints like a content change. Compared by
-   *  value, not reference: metricOf builds a fresh wrapper per apply from
-   *  the same fit, and identical numbers with identical measurers must
-   *  keep the rows' DOM. */
+   *  painted output — so it repaints like a content change. The numbers
+   *  are compared by value, the measurers by identity (metricOf binds them
+   *  once per fit), and the fit's signature by value: a late font load or a
+   *  shaping change leaves the numbers equal and the verdicts different.
+   *  Identical numbers, measurers and signature keep the rows' DOM. */
   function metricChanged(current: RunMetric | null): boolean {
     if (current === null || lastMetric === null) return current !== lastMetric
     return (
       current.cellWidth !== lastMetric.cellWidth ||
       current.defaultSpacing !== lastMetric.defaultSpacing ||
       current.padY !== lastMetric.padY ||
+      current.signature !== lastMetric.signature ||
       current.advanceOf !== lastMetric.advanceOf ||
       current.boxOf !== lastMetric.boxOf
     )

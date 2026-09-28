@@ -285,7 +285,7 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
    *  numbers, advanceOf/boxOf a table — createCellFit's shape, without a
    *  DOM to measure in. */
   const fit = {
-    geometry: () => ({ cellWidth: 8, rowDelta: -0.5 }),
+    geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature: 'regular' }),
     advanceOf: (chars: string) => (chars === '漢' ? 15 : null),
     boxOf: () => null,
   }
@@ -326,7 +326,7 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
     return {
       warmed,
       fit: {
-        geometry: () => ({ cellWidth: 8, rowDelta: 0 }),
+        geometry: () => ({ cellWidth: 8, rowDelta: 0, signature: 'regular' }),
         warm(candidates: Iterable<{ chars: string; width: number }>) {
           for (const c of candidates) {
             warmed.push(`${c.chars}/${c.width}`)
@@ -373,5 +373,25 @@ describe('metricOf — the CellFit → RunMetric seam the cutover calls', () => 
     expect(keptAfter).toBe(keptBefore)
     expect(changedAfter).not.toBe(changedBefore)
     expect(changedAfter.textContent?.trimEnd()).toBe('y')
+  })
+
+  it('repaints every row when the fit’s signature changes and its numbers do not', () => {
+    // A late font load or a shaping change: same cell width, same row delta,
+    // different verdicts. Keeping the rows here painted the old fit's boxes
+    // until the rows happened to change (codex re-review, 2026-09-28).
+    let signature = 'before-font-load'
+    const shifting = { ...fit, geometry: () => ({ cellWidth: 8, rowDelta: -0.5, signature }) }
+    const surface = document.createElement('div')
+    document.body.appendChild(surface)
+    const painter = createCellPainter({
+      surface,
+      metric: () => metricOf(shifting),
+      palette: DEFAULT_SNAPSHOT,
+    })
+    painter.apply(snapshotOf(frameOf(1, [MERGE_ROW])))
+    const before = liveRow(surface)
+    signature = 'after-font-load'
+    painter.apply(snapshotOf(frameOf(2, [MERGE_ROW])))
+    expect(liveRow(surface)).not.toBe(before)
   })
 })
