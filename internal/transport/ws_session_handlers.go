@@ -817,6 +817,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
 		return
 	}
+	attached := false
 	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
@@ -939,19 +940,25 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayIntegration(sid)
 		h.machine.replayToolSurface(sid)
 		h.machine.replayPaneObservation(sid)
-		// The screen (nocx-zg3k3.2.15): the frames published while nobody
-		// was attached were dropped, and an idle pane publishes no next one,
-		// so the attacher asks for the frame the runtime holds. Not left to
-		// takeSize above: its repaint is the resize's side effect, and an
-		// attach that reports no size has none. Asked after the byte replay
-		// has started, so the round trip it costs delays no PTY byte.
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
-		h.machine.resendScreen(ctx, sid)
+		attached = true
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(wconn, req, err)
+		return
+	}
+	// The screen (nocx-zg3k3.2.15): the frames published while nobody was
+	// attached were dropped, and an idle pane publishes no next one, so the
+	// attacher asks for the frame the runtime holds. Not left to takeSize
+	// above: its repaint is the resize's side effect, and an attach that
+	// reports no size has none. Asked AFTER the operation has released the
+	// session gate and its lane, so a slow helper's round trip holds up no
+	// other session's resize, close or attach; and after the byte replay has
+	// started, so it delays no PTY byte.
+	if attached {
+		h.machine.resendScreen(ctx, sid)
 	}
 }
 
