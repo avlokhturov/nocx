@@ -243,7 +243,7 @@ function positionsOf(wireRow: SessionFrame['rows'][number]): RowPositions | { ma
   // unconsumed, without `count` itself going negative: it still lands
   // outside the range the mark could occupy.
   for (const position of marks.keys()) {
-    if (position < 0 || position >= count) return { malformed: true }
+    if (!Number.isInteger(position) || position < 0 || position >= count) return { malformed: true }
   }
   return { codepoints, marks, count }
 }

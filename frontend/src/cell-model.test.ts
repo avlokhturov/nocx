@@ -656,6 +656,22 @@ describe('atomic per-revision replacement', () => {
     expect(snapshot.revision).toBe(3)
   })
 
+  it('refuses a mark whose position is not a whole number, and keeps the previous revision', () => {
+    const model = createCellModel()
+    applied(model, blankFrame(1, 2))
+    // Hand-written, as above: the wire is runtime JSON, and a position of
+    // 0.5 is inside [0, count) yet names no position, so no lookup ever
+    // consumes it (codex re-review, 2026-09-28).
+    const fractional: SessionFrame = {
+      revision: 2,
+      geometry: { cols: 4, rows: 1, cellWidthPx: 8, cellHeightPx: 20, revision: 2 },
+      cursor: { x: 0, y: 0, visible: false },
+      rows: [{ text: 'ab', marks: [[0.5, 1, 2]] }],
+    }
+    expect(refused(model, fractional).reason).toBe('malformed-row')
+    expect(model.current()?.revision).toBe(1)
+  })
+
   it('refuses a row whose marks and text disagree, and keeps the previous revision', () => {
     const model = createCellModel()
     applied(model, blankFrame(1, 2))
