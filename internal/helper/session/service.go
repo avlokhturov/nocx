@@ -506,7 +506,7 @@ func (s *Service) Ops() []string {
 		proto.OpSpawn, proto.OpSpawnSSH, proto.OpSessions, proto.OpAttach, proto.OpAck,
 		proto.OpConfirmRows,
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
-		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpReplay,
+		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpScreenResend, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
 	}
 }
@@ -537,6 +537,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.AdoptLifecycleParams{})
 	case proto.OpScreen:
 		return host.SchemaFor(proto.ScreenParams{})
+	case proto.OpScreenResend:
+		return host.SchemaFor(proto.ScreenResendParams{})
 	case proto.OpReplay:
 		return host.SchemaFor(proto.ReplayParams{})
 	case proto.OpSnapshot:
@@ -705,6 +707,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.readScreen(p)
+	case proto.OpScreenResend:
+		var p proto.ScreenResendParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.resendScreen(p)
 	case proto.OpReplay:
 		var p proto.ReplayParams
 		if err := decode(params, &p); err != nil {
