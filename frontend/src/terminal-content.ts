@@ -2533,6 +2533,10 @@ export class TerminalContent extends BasePaneContent {
           if (fit === null || !fit.begin()) return null
           return metricOf(fit)
         },
+        // The batch write before every paint (nocx-zg3k3.2.13), the same
+        // fit the stored rows warm — so a cluster new to the session is
+        // measured before it paints, not left at the default spacing.
+        warm: (candidates) => this._cellFit?.warm(candidates),
       })
 
       // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
