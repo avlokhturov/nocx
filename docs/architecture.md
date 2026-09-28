@@ -9,7 +9,7 @@ updated: 2026-07-20
 
 ## Overview
 
-nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from an **xterm.js** (WebGL) frontend ([ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md)), hosted by a **Wails v3** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
+nocx is a local-first terminal that pairs a Ghostty-grade rendering engine with Tabby-style SSH ergonomics, delivered as a macOS desktop app for MVP. It is built as **one Go core** (PTY, SSH, session, config) decoupled over a WebSocket transport from a TypeScript frontend that paints the session runtime's screen frames with its own cell model and painter ([ADR-0072](decisions/0072-xterm-is-removed-first-and-the-interval-record-follows-the-cell-model.md); xterm.js, [ADR-0001](decisions/0001-xterm-js-as-vt-frontend.md), remains only as the invisible input layer until `nocx-zg3k3.8`), hosted by a **Wails v3** desktop shell that embeds the backend locally. The paradigm is **modular, layered, interface-first with dependency injection**: every module lives behind an interface, depends on abstractions, obeys SRP, and is wired at a single composition root — so any module is trivially replaceable and the same core can later serve a web target and a remote…
 
 ## Component Diagram
 
@@ -20,8 +20,8 @@ graph TB
         webhost["Web host<br/>(same core serves FE + WS) — Phase 2/3"]
     end
 
-    subgraph fe["Frontend (xterm.js)"]
-        terminal["terminal<br/>(xterm.js WebGL)"]
+    subgraph fe["Frontend"]
+        terminal["terminal<br/>(cell model + painter;<br/>xterm.js as input layer)"]
         ui["ui<br/>(tabs, config, menus)"]
         ipc["ipc<br/>(WS client)"]
     end
