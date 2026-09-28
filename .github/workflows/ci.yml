@@ -669,6 +669,12 @@ jobs:
   # plugin fed by commit-links.mjs: every commit the change introduces names a
   # leaf task that exists. It has no strength setting and is never relaxed.
   #
+  # Its third step, on a pull request only, is the present-documents check,
+  # check-present.mjs from the same plugin: the documents the config lists as
+  # describing the present (`presentDocuments`) may not be left naming a path
+  # the change removed, nor carry a link that no longer resolves. Drift older
+  # than the change is printed and fails nothing.
+  #
   # It is here and not only in the local hooks because a hook is one
   # `--no-verify` away and several agent worktrees commit into this repository
   # every day. Node and a full history are the whole toolchain: no npm install,
@@ -762,6 +768,20 @@ jobs:
           fi
           echo "range: $range"
           node "$gate/commit-links.mjs" --range "$range"
+
+      - name: The documents that describe the present name paths that exist
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          gate=.githooks/backlog-gate
+          # From the merge base to the PR's head, not GitHub's synthetic merge,
+          # as the commit check above.
+          base=$(git merge-base "origin/$BASE_REF" "$HEAD_SHA")
+          echo "base: $base"
+          node "$gate/check-present.mjs" --config "$gate/config.json" --base "$base" --head "$HEAD_SHA"
 
   # e2e — the suite, in the same container a developer runs it in.
   #

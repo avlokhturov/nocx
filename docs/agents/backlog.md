@@ -1,12 +1,12 @@
 # Backlog integration
 
 Maintained by `/shady2k-skills:setup-shady2k-skills`; last reconciled to the skill set
-0.33.0 on 2026-09-27 by its setup task, "The backlog tooling here matches shady2k-skills
-0.33.0 and is proved from main" (nocx-q8yjf.14). The protocol itself ships with the skills
+0.35.0 on 2026-09-28 by its setup task, "The backlog tooling here matches shady2k-skills
+0.35.0, with the present-documents check, and is proved from main" (nocx-q8yjf.15). The protocol itself ships with the skills
 and is not restated here. This file holds the project's facts and the commands that were
 run and seen to work. Changing choices — strength, milestone, budgets, scope and execution
 settings — live only in the config. No installation state is recorded anywhere: the
-`--version` of the three installed checks on `main` is the repository's installation, and
+`--version` of the four installed checks on `main` is the repository's installation, and
 each person's plugin and hooks are their own.
 
 AGENTS.md wins over this file wherever they disagree; the disagreement is then this file's
@@ -127,13 +127,27 @@ keeps every later change.
   `node --test .githooks/backlog-gate/adapter.test.mjs`.
 - **Rules:** [`check.mjs`](../../.githooks/backlog-gate/check.mjs) with
   [`time-format.mjs`](../../.githooks/backlog-gate/time-format.mjs) beside it, which it reads
-  work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs) and
-  [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) are byte-for-byte copies
-  of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/` at 0.33.0, never
-  edited here. Proving it: `cmp` each against the plugin copy, `--version` prints `0.33.0`,
-  and the selftests run from the plugin directory because the fixtures live there:
-  `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
-  `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`.
+  work records by, [`check-commits.mjs`](../../.githooks/backlog-gate/check-commits.mjs),
+  [`check-docs.mjs`](../../.githooks/backlog-gate/check-docs.mjs) and
+  [`check-present.mjs`](../../.githooks/backlog-gate/check-present.mjs) with
+  [`document-format.mjs`](../../.githooks/backlog-gate/document-format.mjs) beside it are
+  byte-for-byte copies of the shady2k-skills plugin's `skills/backlog/setup-shady2k-skills/`
+  at 0.35.0, never edited here. Proving it: `cmp` each against the plugin copy, `--version`
+  prints `0.35.0`, and the selftests run from the plugin directory because the fixtures live
+  there: `node check.mjs --selftest --config <repo>/.githooks/backlog-gate/config.json`,
+  `node check-commits.mjs --selftest`, `node check-docs.mjs --selftest`,
+  `node check-present.mjs --selftest`.
+- **Present documents:** the config's `presentDocuments` lists what describes the present
+  here — AGENTS.md, README.md, `docs/architecture.md`, `docs/agents/`, the frontend state
+  ownership and lifecycle protocol documents, `contracts/README.md` and the UI kit's README.
+  `presentIgnores` holds what those documents name that is not a path of this tree (Go's
+  `log/slog`, deja's `internal/policy`, the plugin's own paths, the `docs/adr` this repository
+  forbids). The check runs in CI's `ci-backlog` on every pull request that is not a draft,
+  from the merge base to the PR's head, and by hand before a pull request is opened:
+  `node .githooks/backlog-gate/check-present.mjs --config .githooks/backlog-gate/config.json --base "$(git merge-base origin/main HEAD)"`.
+  A dead reference the change made refuses it; older drift is printed and fails nothing. The
+  first run, on 2026-09-28 at `0ad291c6d`, found three, filed as one debt item (nocx-q8yjf.16).
+  No local hook runs it.
 - **Work records:** a claim, a receipt of the time a session spent, and the other
   `[shady2k-time v1] …` records are comments on the item, printed by the set's run script
   (`runs.mjs` in the plugin's `take-task`, `close-out` and `ask-shady2k`). The adapter exports
@@ -174,7 +188,8 @@ keeps every later change.
   intent, feature readiness and acceptance evidence on every change here" (nocx-q8yjf.2).
   Until it lands, document readiness is checked by reading, and every report says the
   automatic check did not run. No document policy, baseline, receipts or synchronization
-  are wired, and nothing about documents is enforced by CI. Since 0.33.0 a required check
+  are wired, and nothing about documents is enforced by CI except the present-documents
+  check above, which judges names and not readiness. Since 0.33.0 a required check
   may name the paths it does not read (`ignores`), and its receipt is then pinned to a
   revision of its own inputs (`checkRevisions`, from `checkRevision` in the plugin's
   `document-format.mjs`); wiring the gate finds those paths from each check's command and
