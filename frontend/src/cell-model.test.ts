@@ -229,6 +229,39 @@ describe('cell facts', () => {
     expect(styles[4]).toEqual(green)
   })
 
+  it('reads a colour on either side of the palette/RGB boundary as the schema says', () => {
+    // session.frame.schema.json $defs/color: 1-256 is a palette index plus
+    // one, 257+ an RGB triple offset by 257. The last palette entry and RGB
+    // black sit on either side of that line (a hand-planted `value <= 257`
+    // at stage acceptance read black as palette 256, and nothing noticed).
+    const lastPalette = styleOf({
+      foreground: { kind: 1, palette: 255, rgb: { r: 0, g: 0, b: 0 } },
+    })
+    const rgbBlack = styleOf({ foreground: { kind: 2, palette: 0, rgb: { r: 0, g: 0, b: 0 } } })
+    const rgbWhite = styleOf({
+      foreground: { kind: 2, palette: 0, rgb: { r: 255, g: 255, b: 255 } },
+    })
+    const snapshot = applied(
+      createCellModel(),
+      frame(
+        1,
+        [
+          [
+            ['a', 1, true, lastPalette],
+            ['b', 1, true, rgbBlack],
+            ['c', 1, true, rgbWhite],
+          ],
+        ],
+        3,
+      ),
+    )
+
+    const fg = snapshot.rows[0].cells.map((c) => c.style.foreground)
+    expect(fg[0]).toEqual({ kind: 1, palette: 255, rgb: { r: 0, g: 0, b: 0 } })
+    expect(fg[1]).toEqual({ kind: 2, palette: 0, rgb: { r: 0, g: 0, b: 0 } })
+    expect(fg[2]).toEqual({ kind: 2, palette: 0, rgb: { r: 255, g: 255, b: 255 } })
+  })
+
   it('carries hasText separately from an empty grapheme', () => {
     const inverse = style(4)
     const f = frame(

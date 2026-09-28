@@ -10,6 +10,10 @@
  * scrollback container moves from top to bottom. It also records the native
  * selection and browser find observations separately. A missing search
  * capability therefore cannot be hidden by making the frame benchmark pass.
+ *
+ * Selection and find are asserted; the frame times are printed
+ * (TRANSCRIPT_METRICS) and annotated on the report, never asserted — a
+ * duration depends on the machine (see the end of the test).
  */
 import { expect } from '@playwright/test'
 import type { Page } from '@playwright/test'
@@ -36,7 +40,7 @@ const ROWS_PER_BLOCK = 100
 const LAST_MARKER = `transcript-${String(BLOCKS).padStart(4, '0')}-${String(ROWS_PER_BLOCK).padStart(3, '0')}`
 const FRAME_SAMPLES = 180
 // Idle frames sampled just before the scroll, in the same page, with nothing
-// moving: the display interval the scroll is judged against. Why it cannot come
+// moving: the display interval the scroll is reported against. Why it cannot come
 // from the scroll itself, and the criterion, are in e2e/frame-budget.mts.
 const IDLE_SAMPLES = 120
 const INPUT = '.pane.active .nocx-editor-input'
@@ -474,6 +478,21 @@ test.describe('long transcript scroll budget', () => {
     expect(find.offscreenBeforeSearch).toBe(true)
     expect(find.offscreenFound).toBe(true)
 
-    expect(frames.failures, 'the transcript scroll missed frames').toEqual([])
+    // THE FRAME TIMES ARE REPORTED, NOT ASSERTED (the owner's decision of
+    // 2026-09-28, nocx-zg3k3.2.10). Over 8 CI runs this transcript scrolled at
+    // a 16.7 ms median every time and a p95 of 33.4 ms in 7 and 50 ms in 1: it
+    // drops a frame in its worst twentieth on CI's runner, and the one red run
+    // was that runner being slower that day. A gate on a duration is a gate on
+    // the machine (AGENTS.md: a test may not depend on timing). What makes the
+    // scroll budgeted is bounding the page to what is visible, which is
+    // nocx-zg3k3.11's, and it asserts a node count. Here the measurement must
+    // only have run, over the whole transcript, so the numbers above are real.
+    expect(idleFrames).toHaveLength(IDLE_SAMPLES)
+    expect(scrollFrames).toHaveLength(FRAME_SAMPLES - 1)
+    expect(metrics.maxScrollTop).toBeGreaterThan(metrics.clientHeight)
+    test.info().annotations.push({
+      type: 'frame budget (reported, not asserted)',
+      description: `median ${frames.medianMs} ms, p95 ${frames.p95Ms} ms against an idle ${frames.baselineMs} ms; ${frames.failures.join('; ') || 'within budget'}`,
+    })
   })
 })
