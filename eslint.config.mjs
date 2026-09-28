@@ -35,6 +35,16 @@ export default tseslint.config(
       '.e2e/**',
       'test-results/**',
       'playwright-report/**',
+      // Vendored verbatim from the shady2k-skills plugin, for the reason
+      // .prettierignore records beside the same files: the proof that matters
+      // is `cmp` against the plugin's copy, so nothing here may rewrite them,
+      // and a lint finding in one is the plugin's to fix, not ours.
+      '.githooks/backlog-gate/check.mjs',
+      '.githooks/backlog-gate/check-commits.mjs',
+      '.githooks/backlog-gate/check-docs.mjs',
+      '.githooks/backlog-gate/check-present.mjs',
+      '.githooks/backlog-gate/document-format.mjs',
+      '.githooks/backlog-gate/time-format.mjs',
     ],
   },
   js.configs.recommended,

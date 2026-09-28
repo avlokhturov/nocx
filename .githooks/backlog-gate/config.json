@@ -104,6 +104,19 @@
     "nocx-zg3k3.5.2",
     "nocx-zg3k3.10.2"
   ],
+  "presentDocuments": [
+    "/AGENTS.md",
+    "/README.md",
+    "docs/architecture.md",
+    "docs/agents/*.md",
+    "docs/frontend-state-ownership.md",
+    "docs/lifecycle-protocol.md",
+    "contracts/README.md",
+    "frontend/src/ui/README.md"
+  ],
+  "presentAreas": [""],
+  "presentIgnores": ["log/slog", "internal/policy", "skills/backlog/**", "docs/adr"],
+  "presentChurnCommits": 20,
   "scope": "team",
   "artifactLanguage": "en",
   "projectWords": ["nocx", "herdr"],
