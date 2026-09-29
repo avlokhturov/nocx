@@ -454,10 +454,20 @@ type hostSession struct {
 	rowSendSeq        int
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
-	writer            *proto.SubscriberID
-	writerAtt         proto.AttachmentID
-	epoch             proto.LeaseEpoch
-	exit              *proto.SessionExitStatus
+	// resendDue is the row pump's own flag (rows.go): an emission reached
+	// zero subscribers and was dropped, so the coordinator's return owes a
+	// read-back from the scrollback (nocx-zg3k3.5.3). The pump alone writes
+	// and reads it — no lock, one goroutine.
+	resendDue bool
+	// resendEnds is the row pump's list of the interval ends its drops
+	// took (rows.go, nocx-zg3k3.5.3): the boundaries the coordinator's
+	// return is handed again. Guarded by rowMu — the pump writes it, and
+	// a test waits on it as the observable that the drop was recorded.
+	resendEnds []droppedEnd
+	writer     *proto.SubscriberID
+	writerAtt  proto.AttachmentID
+	epoch      proto.LeaseEpoch
+	exit       *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while

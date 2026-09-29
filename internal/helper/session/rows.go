@@ -493,7 +493,7 @@ func (s *hostSession) serveRows() {
 			// began before stop() armed the drain and failed after it gives
 			// the marker no attempt at shutdown at all, so it parks on the
 			// wake requestRowsDrain sends, and the drain's attempt follows
-			// (nocx-2v80t.9).
+			// (nocx-2v80t.3.49).
 			drainAttempt := s.drainRequested()
 			delivered, gaveUp := false, false
 			if !s.drainAbandoned() {
@@ -518,6 +518,16 @@ func (s *hostSession) serveRows() {
 				case <-s.rowsDone:
 					return
 				}
+			}
+		}
+		// The coordinator's return owes a read-back from the scrollback
+		// (nocx-zg3k3.5.3) before anything still queued delivers: the
+		// resent rows are older than everything the bridge holds. During a
+		// shutdown drain the resend is pointless — the reader is going
+		// away, and the next one attaches a pump of its own.
+		if s.resendDue && !s.drainRequested() {
+			if s.resendFromScrollback() {
+				s.resendDue = false
 			}
 		}
 		em, ok := s.dequeueRowEmission()
@@ -549,10 +559,187 @@ func (s *hostSession) serveRows() {
 			// unless the sweep already stated this very send's loss by
 			// name. A send that fails promptly outside a drain stays
 			// unstated, as before: the pump keeps retrying it the
-			// ordinary way, on the next wake.
+			// ordinary way, on the next wake. An end is kept by name
+			// either way: the boundary is the boundary, and the
+			// coordinator's return owes its marker however the drop
+			// happened.
 			s.countRowLossOnce(em)
+			s.resendDue = true
+			s.keepDroppedEnd(em)
+		} else if !delivered {
+			// Nobody took it: the scrollback is the buffer, and the
+			// coordinator's return owes a read-back (nocx-zg3k3.5.3). An
+			// end is kept by name — the boundary's own identity — so the
+			// return can be handed the marker again.
+			s.resendDue = true
+			s.keepDroppedEnd(em)
 		}
 	}
+}
+
+// droppedEnd is one interval end the pump dropped for want of a subscriber:
+// the boundary's own identity, kept so the coordinator's return can be
+// handed the marker again (nocx-zg3k3.5.3). The pump alone holds these.
+type droppedEnd struct {
+	nonce   sessionruntime.FenceNonce
+	endRow  uint64
+	noFence bool
+}
+
+// maxResendEnds bounds the dropped ends one resend carries. One per command
+// that ended while nobody watched; more means commands ran for a coordinator
+// that was away for the whole span the scrollback could answer for anyway.
+const maxResendEnds = 64
+
+// resendFromScrollback delivers, to every subscriber bound now, what the
+// stream dropped for want of a subscriber: the rows of [mark, D) read back
+// out of ghostty's scrollback at the absolute indices they departed under,
+// and every interval end the drop took, in stream order — an end after the
+// rows below its boundary, before the rows above it. It answers whether the
+// resend ran (or had nothing to do), so the pump clears its due flag only
+// then — a send that failed leaves the work queued for the next wake, the
+// same retry shape the pump's ordinary deliveries take.
+//
+// The read is one instant: the runtime lock spans it, so the page the walk
+// reads and the departure count it is measured against cannot disagree. A
+// span the history cannot fill was pruned before the coordinator could come
+// back for it — the shortfall is stated as a loss at the position it
+// happened, and the rows that survive follow it.
+func (s *hostSession) resendFromScrollback() bool {
+	s.mu.Lock()
+	mark := s.rowsConfirmed
+	subs := s.subscribersLocked()
+	s.mu.Unlock()
+	if len(subs) == 0 {
+		return false
+	}
+	s.rowMu.Lock()
+	ends := append([]droppedEnd(nil), s.resendEnds...)
+	s.rowMu.Unlock()
+	d := s.runtime.DepartedRowCount()
+	if mark >= d && len(ends) == 0 {
+		return true
+	}
+	// The walked span's rows, oldest first, as the scrollback holds them.
+	var rows []emulator.Row
+	_, _, err := s.runtime.ReadScreen(func(t emulator.Terminal) error {
+		page, err := t.HistoryRows(0, 0)
+		if err != nil {
+			return err
+		}
+		count := d - mark
+		start := 0
+		if uint64(page.Total) > count { //nolint:gosec // a row count, not a byte count
+			start = page.Total - int(count) //nolint:gosec // page.Total >= count here
+		}
+		page, err = t.HistoryRows(start, int(count)) //nolint:gosec // a row count, not a byte count
+		if err != nil {
+			return err
+		}
+		rows = page.Rows
+		return nil
+	})
+	if err != nil {
+		s.log.Warn("session row resend: the scrollback could not be read", "session", s.id.Session, "err", err)
+		return false
+	}
+	// Whatever the history cannot fill was pruned while the coordinator was
+	// away. The rows below the walk's reach are stated as the loss they
+	// are, and the survivors follow.
+	var short uint64
+	if uint64(len(rows)) < d-mark { //nolint:gosec // len is never negative
+		short = d - mark - uint64(len(rows)) //nolint:gosec // a row count, not a byte count
+	}
+	from := mark
+	if short > 0 {
+		if !s.sendResentRows(subs, from, short, nil) {
+			return false
+		}
+		from += short
+	}
+	// Stream order: the rows below each dropped boundary, then that
+	// boundary's marker again, then the rows above it.
+	cursor := from // the absolute index the next pool row carries
+	pool := rows   // pool[cursor-from] is the next row to send
+	for _, e := range ends {
+		if e.endRow > cursor {
+			n := e.endRow - cursor
+			if !s.sendResentRows(subs, cursor, 0, pool[cursor-from:cursor-from+n]) { //nolint:gosec // slice arithmetic, never negative
+				return false
+			}
+			cursor = e.endRow
+		}
+		if !s.deliverRowEmission(rowEmission{end: true, nonce: e.nonce, from: e.endRow, noFence: e.noFence}) {
+			return false
+		}
+	}
+	if cursor < d {
+		if !s.sendResentRows(subs, cursor, 0, pool[cursor-from:]) { //nolint:gosec // slice arithmetic, never negative
+			return false
+		}
+	}
+	s.rowMu.Lock()
+	s.resendEnds = nil
+	s.rowMu.Unlock()
+	return true
+}
+
+// keepDroppedEnd records one undelivered interval end by name, the record
+// the coordinator's return is handed again (nocx-zg3k3.5.3). Every drop
+// path goes through this: the boundary is the boundary whatever took the
+// frame.
+func (s *hostSession) keepDroppedEnd(em rowEmission) {
+	if !em.end {
+		return
+	}
+	s.rowMu.Lock()
+	defer s.rowMu.Unlock()
+	s.resendEnds = append(s.resendEnds, droppedEnd{
+		nonce: em.nonce, endRow: em.from, noFence: em.noFence,
+	})
+	if len(s.resendEnds) > maxResendEnds {
+		s.resendEnds = s.resendEnds[len(s.resendEnds)-maxResendEnds:]
+	}
+}
+
+// sendResentRows writes one resend as the ordinary rows frames, split at the
+// same bound a live batch is, to every subscriber bound at this moment.
+func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, rows []emulator.Row) bool {
+	delivered := true
+	for start := 0; start <= len(rows); start += rowsPerFrame {
+		stop := start + rowsPerFrame
+		if stop > len(rows) {
+			stop = len(rows)
+		}
+		encoded, err := sessionruntime.EncodeRows(rows[start:stop])
+		if err != nil {
+			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
+			return false
+		}
+		payload, err := json.Marshal(proto.OutputRowsDoc{FromRow: from, LostRows: lost, Rows: encoded})
+		if err != nil {
+			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
+			return false
+		}
+		taken := 0
+		for _, sub := range subs {
+			if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{
+				Session: s.raw, Subscriber: sub.raw, FromRow: from, Payload: payload,
+			}); err != nil {
+				s.log.Warn("session row resend: not delivered", "session", s.id.Session,
+					"subscriber", sub.id, "fromRow", from, "err", err)
+				continue
+			}
+			taken++
+		}
+		delivered = delivered && taken > 0
+		from += uint64(stop - start) //nolint:gosec // slice arithmetic, never negative
+		if stop == len(rows) {
+			return delivered
+		}
+		lost = 0
+	}
+	return delivered
 }
 
 // deliverRowEmission marshals once and sends per subscriber, and answers
@@ -649,7 +836,7 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 		if stop == len(em.rows) {
 			return delivered
 		}
-		doc.FromRow += uint64(stop - start) // #nosec G115 -- slice arithmetic, never negative
+		doc.FromRow += uint64(stop - start) //nolint:gosec // slice arithmetic, never negative
 		// The gap LostRows states sits immediately before em.from — the
 		// batch's own first row — and belongs to the FIRST split frame
 		// alone; a later frame of the SAME batch starts exactly where the
