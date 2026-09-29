@@ -2865,6 +2865,10 @@ func (s *WSServer) prependBlockHead(sid session.ID, entry, artifact string, from
 	if store == nil {
 		return false
 	}
+	// Owner: this stream, inside the helper's row delivery — the
+	// below-floor head's own store write. Closing event: the write — one
+	// prepend, nothing held past it (the mark stays behind until the
+	// prepend answers, so nothing outlives the context).
 	ctx := log.WithLogger(context.Background(), s.log)
 	if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 		EntryID: entry, ArtifactID: artifact, FromRow: from, Rows: rows,
