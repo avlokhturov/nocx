@@ -669,6 +669,24 @@ func (s *Session) ReadScreen(read func(emulator.Terminal) error) (Revision, Comp
 	return s.rev, s.completeness, nil
 }
 
+// ReadDepartedScreen is ReadScreen for a reader that also needs the
+// session's departed-row count as of the read: the count and the terminal
+// are lent under ONE acquisition of this lock, so the page a walk reads
+// and the departure count it is measured against cannot disagree. It
+// exists because the resend's walk took them separately and rows
+// departing between the two acquisitions were labelled with the wrong
+// absolute index — lost from their true position, duplicated at their
+// next delivery (nocx-zg3k3.5.10). A read that fails answers no revision
+// and no completeness, exactly as ReadScreen does.
+func (s *Session) ReadDepartedScreen(read func(departed uint64, t emulator.Terminal) error) (Revision, Completeness, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := read(s.departedRows, s.emulator); err != nil {
+		return 0, CompletenessUnknown, err
+	}
+	return s.rev, s.completeness, nil
+}
+
 // screenTextLocked reads the ACTIVE screen out of the emulator, as text.
 //
 // The format is this runtime's stand-in until the client's frame protocol
