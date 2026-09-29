@@ -190,7 +190,7 @@ func (c *Client) outputRows(payload []byte) {
 			"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber))
 		return
 	}
-	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows, Incomplete: doc.Incomplete})
+	a.deliverOutputRows(OutputRows{FromRow: doc.FromRow, Rows: rows, LostRows: doc.LostRows, LostCause: doc.LostCause, Incomplete: doc.Incomplete})
 }
 
 // intervalEnd is one TypeIntervalEnd frame arriving, on the same terms the
