@@ -169,13 +169,20 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
         : `Output incomplete: ${n} rows are missing — the output passed the history output limit. Raise the history.outputCapKB setting to keep more.`,
   },
   {
-    // Rows the terminal's scrollback pruned before the coordinator could
-    // read them. Not the cap's doing (deriveBlockRowsDropped subtracts loss
-    // before its verdict): raising a limit recovers none of these.
+    // The store's one lostRows count sums whatever rode the wire's single
+    // loss field: the runtime's struck feeds count ONE per feed (a prune
+    // inside a feed may have taken hundreds of rows, and the emulator's
+    // ABI cannot count them — internal/sessionruntime/rowstream.go), and
+    // the wire contract also lets a helper's own dropped rows ride the
+    // same field as exact rows (internal/helper/proto/rows_frame.go). No
+    // reader can tell which produced the number, so the sentence claims
+    // LOSSES, never a row count (nocx-zg3k3.5.9). Not the cap's doing
+    // (deriveBlockRowsDropped subtracts loss before its verdict): raising
+    // a limit recovers none of these.
     present: (s) => s.lostRows > 0,
     count: (s) => s.lostRows,
     sentence: (n) =>
-      `Output incomplete: ${n} rows left the terminal's scrollback before they could be captured; that output is lost.`,
+      `Output incomplete: output was lost ${n === 1 ? 'once' : `${n} times`} before it could be captured; the terminal does not report how many rows each loss took.`,
   },
   {
     // The stream never arrived whole — its completion fence was never seen,
