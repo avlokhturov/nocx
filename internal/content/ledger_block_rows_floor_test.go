@@ -10,6 +10,7 @@ package content_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -89,5 +90,73 @@ func TestABlockRefusesADiscontinuousDeliveryBelowItsFloor(t *testing.T) {
 	}
 	if lines := storedBlockRows(t, led, artifact); len(lines) != 2 {
 		t.Fatalf("the refused delivery changed the artifact: %d rows, want the original 2", len(lines))
+	}
+}
+
+func TestAMultiChunkPrependSurvivesTheCapAndEviction(t *testing.T) {
+	ctx := context.Background()
+	// A tiny cap so the eviction walk actually runs.
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(64 * 1024)
+	_, led := newLedgerWithPolicy(t, policy)
+	entryID := recordOne(t, led, "head loses the race, loudly")
+	artifact := "00000000-0000-7000-8000-0000000000f2"
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{
+		EntryID: entryID, ArtifactID: artifact,
+	}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: artifact, FromRow: 2000,
+		Rows: []emulator.Row{aTextRow("R2000"), aTextRow("R2001")},
+	}); err != nil {
+		t.Fatalf("the first delivery: %v", err)
+	}
+	// A head bigger than one chunk (> 16 KiB): 1900 rows, ENDING at the
+	// floor (2000). The prepend cuts into several chunks with seqs below
+	// the stored ones.
+	var head []emulator.Row
+	for i := 100; i < 2000; i++ {
+		head = append(head, aTextRow(strings.Repeat("x", 12)+fmt.Sprintf("R%d", i)))
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: artifact, FromRow: 100, Rows: head,
+	}); err != nil {
+		t.Fatalf("the multi-chunk prepend: %v", err)
+	}
+	// Drive the cap: more tail rows until eviction fires.
+	for i := 2002; i < 2302; i++ {
+		if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+			EntryID: entryID, ArtifactID: artifact, FromRow: uint64(i), //nolint:gosec // a row count, not a byte count
+			Rows: []emulator.Row{aTextRow(strings.Repeat("y", 60) + fmt.Sprintf("R%d", i))},
+		}); err != nil {
+			t.Fatalf("the tail delivery at %d: %v", i, err)
+		}
+	}
+	// The cap takes the middle it must (the reservation keeps the FIRST
+	// half-cap bytes — the prepend's own start among them) and the close
+	// derives and names the drop. The invariants: the read stays ASCENDING
+	// through any hole, the head's own start survives, and the summary
+	// counts what the cap took instead of losing it silently.
+	lines := storedBlockRows(t, led, artifact)
+	if len(lines) == 0 {
+		t.Fatalf("the artifact is empty after eviction")
+	}
+	prev := lines[0].From
+	for _, l := range lines[1:] {
+		if l.From <= prev {
+			t.Fatalf("the artifact is not ascending after eviction: %d after %d", l.From, prev)
+		}
+		prev = l.From
+	}
+	if lines[0].From != 100 {
+		t.Fatalf("the first surviving row is from=%d, want the prepend's own start 100 — the head reservation keeps it", lines[0].From)
+	}
+	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: artifact})
+	if err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	if summary.DroppedRows == 0 {
+		t.Fatalf("the cap took the middle and the close counted nothing: %+v", summary)
 	}
 }
