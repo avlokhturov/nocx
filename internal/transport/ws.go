@@ -1520,6 +1520,12 @@ type HostedSessionOpen struct {
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss anywhere
+	// (ADR-0076). AbortLifecycle is the failure rollback; this is the
+	// departure.
+	DetachLifecycle func()
 	// IntegrationShell, IntegrationStatus and IntegrationReason are what the
 	// opener already knows about this session's shell integration, for the
 	// axis session.integrationChanged renders (nocx-k6p18.31).

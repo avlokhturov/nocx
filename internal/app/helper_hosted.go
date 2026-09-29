@@ -102,6 +102,14 @@ type hostedSpawnResult struct {
 	LifecycleTransport lifecycle.TransportID
 	StartLifecycle     func()
 	AbortLifecycle     func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss
+	// anywhere: the kernel is not told, the open attempts stay, and the
+	// store's open entry and open block survive for whichever coordinator
+	// re-adopts (ADR-0076). AbortLifecycle above is the failure rollback;
+	// this is the departure.
+	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
@@ -223,6 +231,18 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			stopDownlink()
 		}
 	}
+	// The detach mirrors the rollback but ends the adapter with Detach, not
+	// Close: the leg's adapter learns the handover from this side instead of
+	// reading its own carrier's EOF as the loss it is not.
+	detachLifecycleNow := func() {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Detach()
+			_ = lifecyclePeer.Close()
+		}
+		if stopDownlink != nil {
+			stopDownlink()
+		}
+	}
 
 	entry, err := spawn(ctx, life)
 	if err != nil {
@@ -296,7 +316,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
-	bindDownlinkToSession(sess, stopBlockRows)
+	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
 	if stopDownlink != nil {
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
 		// the delivery context ends when it does.
@@ -324,6 +344,8 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		}
 		var abortOnce sync.Once
 		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
+		var detachOnce sync.Once
+		out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
 	}
 	return out, nil
 }
@@ -334,9 +356,40 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 // hangs off the existing edge rather than owning a lifetime of its own — two
 // owners of one lifetime being the defect whichever wins. One goroutine per
 // hosted pane, exactly like that monitor; it exits at the session's end.
+// bindDownlinkToSession ends a completion downlink's delivery context when
+// the hosted session's own lifetime ends. sess.Done() is the signal the
+// transport's teardown owner already waits on (monitorExit), so the downlink
+// hangs off the existing edge rather than owning a lifetime of its own — two
+// owners of one lifetime being the defect whichever wins. One goroutine per
+// hosted pane, exactly like that monitor; it exits at the session's end.
 func bindDownlinkToSession(sess session.Session, stop context.CancelFunc) {
 	go func() {
 		<-sess.Done()
+		stop()
+	}()
+}
+
+// bindBlockEndToSession ends a hosted session's block-rows streaming when
+// the session's own lifetime ends. sess.Done() is the helper-reported end
+// of the shell (the same edge monitorExit waits on), so the block the
+// helper still holds open settles HERE — the one detach that seals
+// (ADR-0076) — and the coordinator-side teardown afterwards changes no
+// block. One goroutine per hosted pane, exactly like monitorExit; it exits
+// at the session's end.
+func bindBlockEndToSession(sess session.Session, attached *helperclient.AttachedSession, sink blockRowsSink, sid session.ID, stop context.CancelFunc) {
+	go func() {
+		<-sess.Done()
+		// sess.Done fires on coordinator wire loss too; only the HELPER'S
+		// OWN exit report (recordExit, the status monitorExit reads) is
+		// the session's end as the helper states it (ADR-0076). A wire
+		// loss seals nothing: the open block and its cursor survive for
+		// whichever coordinator re-adopts the session. No attached session
+		// object means no helper-reported exit either.
+		if attached != nil && sink != nil {
+			if _, reported := attached.WaitErr(); reported {
+				sink.HelperSessionEnded(sid)
+			}
+		}
 		stop()
 	}()
 }

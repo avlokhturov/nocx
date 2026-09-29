@@ -24,6 +24,7 @@ type fakeSink struct {
 	incomplete []uint64
 	lost       []lostBoundary
 	lostCh     chan struct{} // signalled on every BlockBoundaryLost, when set
+	ended      []session.ID  // sessions the helper reported ended
 	answer     func(fromRow uint64, n int) (uint64, bool)
 }
 
@@ -39,7 +40,13 @@ func (f *fakeSink) DetachBlockRows(sid session.ID) {
 	f.detached = append(f.detached, sid)
 }
 
-func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row) (uint64, bool) {
+func (f *fakeSink) HelperSessionEnded(sid session.ID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ended = append(f.ended, sid)
+}
+
+func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row, _ string) (uint64, bool) {
 	f.mu.Lock()
 	f.rows = append(f.rows, client.OutputRows{FromRow: fromRow, LostRows: lost, Rows: rows})
 	answer := f.answer

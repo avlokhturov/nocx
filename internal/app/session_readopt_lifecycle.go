@@ -197,6 +197,7 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 	adapter, peer := a.adapter, a.peer
 	var startOnce sync.Once
 	var abortOnce sync.Once
+	var detachOnce sync.Once
 	open.LifecycleLane = a.lane
 	open.StartLifecycle = func() {
 		startOnce.Do(func() {
@@ -210,6 +211,17 @@ func (a lifecycleAdoption) attachTo(open *transport.HostedSessionOpen, attached 
 			// An adoption the transport refuses never became a pane; its
 			// downlink's lifetime ends with the rollback, not at some
 			// session end that will never arrive.
+			a.stopDownlink()
+		})
+	}
+	// The adopted leg hands over exactly as a freshly opened one does: the
+	// NEXT coordinator departure must detach it, not lose it, or the
+	// premature close this wiring exists to prevent returns with a
+	// different process doing the closing (ADR-0076).
+	open.DetachLifecycle = func() {
+		detachOnce.Do(func() {
+			_ = adapter.Detach()
+			_ = peer.Close()
 			a.stopDownlink()
 		})
 	}

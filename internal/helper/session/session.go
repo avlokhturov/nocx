@@ -454,10 +454,20 @@ type hostSession struct {
 	rowSendSeq        int
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
-	writer            *proto.SubscriberID
-	writerAtt         proto.AttachmentID
-	epoch             proto.LeaseEpoch
-	exit              *proto.SessionExitStatus
+	// resendDue is the row pump's own flag (rows.go): an emission reached
+	// zero subscribers and was dropped, so the coordinator's return owes a
+	// read-back from the scrollback (nocx-zg3k3.5.3). The pump alone writes
+	// and reads it — no lock, one goroutine.
+	resendDue bool
+	// resendEnds is the row pump's list of the interval ends its drops
+	// took (rows.go, nocx-zg3k3.5.3): the boundaries the coordinator's
+	// return is handed again. Guarded by rowMu — the pump writes it, and
+	// a test waits on it as the observable that the drop was recorded.
+	resendEnds []droppedEnd
+	writer     *proto.SubscriberID
+	writerAtt  proto.AttachmentID
+	epoch      proto.LeaseEpoch
+	exit       *proto.SessionExitStatus
 	// exitedAt is when watchExit recorded exit, on the Service's clock seam
 	// (s.now, never wall time directly) — what the unclaimed-session TTL and
 	// eviction-under-pressure measure age against (nocx-isjh4). Zero while
@@ -1031,6 +1041,17 @@ func (s *hostSession) detach(sink Sink, att proto.AttachmentID) (bool, bool) {
 	}
 	sub := s.subs[entry.subscriber]
 	delete(s.subs, entry.subscriber)
+	// The departing reader may have taken rows above the confirmed mark —
+	// it went away without confirming, exactly what a coordinator's death
+	// does to its last in-flight window. The mark is the only dedup line
+	// there is, so the next attach owes a read-back from it: arm the
+	// resend unconditionally (an empty span reads back nothing). Set
+	// under rowMu because the pump owns the flag everywhere else, and
+	// wake the pump so a quiet queue still reaches the check.
+	s.rowMu.Lock()
+	s.resendDue = true
+	s.rowMu.Unlock()
+	s.wakeRows()
 	s.mu.Unlock()
 
 	s.stopSubscriber(sub)

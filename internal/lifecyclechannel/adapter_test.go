@@ -581,3 +581,46 @@ func (k *orderingKernel) TransportLost(t lifecycle.TransportID) error {
 	k.order <- "transport-lost"
 	return k.Kernel.TransportLost(t)
 }
+
+// The orderly handover (ADR-0076): a coordinator giving a session back to
+// its helper — process shutdown, a re-adopt that lost the lease — detaches
+// the lifecycle leg with NO loss anywhere. The kernel is not told (a
+// coordinator going away is not data from the helper), the domain and its
+// open attempts stay as they are, and the re-adopting coordinator adopts
+// the domain fresh. The pump's EOF echo afterwards answers for nothing.
+func TestDetachHandsTheDomainOverWithoutALoss(t *testing.T) {
+	k := newTestKernel()
+	rec := newCauseRecorder()
+	a, child, err := newSocketPairAdapter(log.NewSlogAdapter(nil), k, WithLossReporter(rec.report))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	mustEstablish(t, a, child)
+
+	if err := a.Detach(); err != nil {
+		t.Fatalf("Detach: %v", err)
+	}
+	// The carrier ends after the detach, so the pump's own end-of-stream
+	// runs against a detached adapter — the echo of the handover, not a
+	// loss of its own.
+	_ = child.Close()
+	waittest.WaitFor(t, "the detached adapter's pump ended", func() bool {
+		select {
+		case <-a.pumpDone:
+			return true
+		default:
+			return false
+		}
+	})
+
+	if d, ok := k.Domain(a.domain); !ok || d.State != lifecycle.DomainEstablished {
+		state := "gone"
+		if ok {
+			state = string(d.State)
+		}
+		t.Fatalf("domain state after the handover = %s, want established: the detach settles nothing", state)
+	}
+	if causes := rec.all(); len(causes) != 0 {
+		t.Fatalf("loss causes = %v, want none: the handover is not a loss", causes)
+	}
+}

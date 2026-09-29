@@ -216,7 +216,7 @@ func (r *boundsRecorder) onRows(o client.OutputRows) {
 	r.mu.Unlock()
 	// Forward to the real sink: one store write per frame, exactly the
 	// app's binding.
-	r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows)
+	r.ws.BlockRowsArrived(r.sid, o.FromRow, o.LostRows, o.Rows, "")
 }
 
 func (r *boundsRecorder) onEnd(e client.IntervalEnd) {

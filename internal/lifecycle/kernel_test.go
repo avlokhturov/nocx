@@ -1341,8 +1341,10 @@ func TestCompleteWithoutAttemptIDResolvesByContext(t *testing.T) {
 	}
 }
 
-// A named id that is not the domain's open attempt is still refused, so making
-// the field optional did not loosen the cross-attempt rule.
+// A named id that is not the domain's open attempt is still refused on a
+// kernel-native domain, so making the field optional did not loosen the
+// cross-attempt rule. The adopted-domain exception is completion-only
+// replay's own (adopt_test.go).
 func TestCompleteWithForeignAttemptIDRejected(t *testing.T) {
 	k, _, _ := newTestKernel()
 	p := &fakePort{}

@@ -33,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -598,63 +599,86 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 	sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
 	s.lifecycleMu.Unlock()
 	if row == nil {
-		if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
-			s.lifecycleMu.Lock()
-			scope, scoped := s.historySources[f.Attempt.ID]
-			sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-			s.lifecycleMu.Unlock()
-			if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
-				return nil
+		// A completion the kernel reconstructed for a command that ran for
+		// the coordinator BEFORE this one (the completion-only replay,
+		// ADR-0076) names no ledger row: its real id lives in the previous
+		// process, and the shell's own complete frame names no id at all.
+		// The session's one open entry IS that command's row — the same
+		// session-id join the re-adopting block stream re-binds from — and
+		// the authenticated completion is the fact that closes it with its
+		// real status. Resolved here, the row skips the record-a-new-entry
+		// path below: that path is for a shell attempt the ledger never
+		// saw, and this one the ledger saw under its real id.
+		if f.Attempt.State == lifecyclepub.AttemptCompleted && f.Attempt.Origin == lifecyclepub.OriginShell {
+			if open, openErr := s.blockStore().OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
+				if reopened, rerr := ledger.Entry(ctx, open.EntryID); rerr == nil && reopened != nil && reopened.Phase != content.PhaseClosed {
+					row = reopened
+					// Probe (nocx-zg3k3.5.3 round 7): the synthetic completion
+					// resolved to the session's open entry.
+					log.From(ctx).Debug("lifecycle completion replay resolved the session's open entry",
+						"attempt", f.Attempt.ID, "entry", open.EntryID, "artifact", open.ArtifactID)
+				}
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
-				return nil
-			}
-			s.lifecycleMu.Lock()
-			delete(s.historySources, f.Attempt.ID)
-			s.lifecycleMu.Unlock()
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
-				Generation: scope.Generation, Source: scope.Source,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
-			}
-		}
-		s.lifecycleMu.Lock()
-		laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-		sid = laneSID
-		s.lifecycleMu.Unlock()
-		if !ok {
-			return nil
-		}
-		sess, sessErr := s.registry.Get(sid)
-		if sessErr != nil {
-			return nil
-		}
-		s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
-			lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
-		row, err = ledger.Entry(ctx, f.Attempt.ID)
-		if err != nil {
-			s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
-			return nil
 		}
 		if row == nil {
-			if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+			if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
+				s.lifecycleMu.Lock()
+				scope, scoped := s.historySources[f.Attempt.ID]
+				sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+				s.lifecycleMu.Unlock()
+				if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				s.lifecycleMu.Lock()
+				delete(s.historySources, f.Attempt.ID)
+				s.lifecycleMu.Unlock()
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
+					Generation: scope.Generation, Source: scope.Source,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
+			}
+			s.lifecycleMu.Lock()
+			laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+			sid = laneSID
+			s.lifecycleMu.Unlock()
+			if !ok {
 				return nil
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+			sess, sessErr := s.registry.Get(sid)
+			if sessErr != nil {
 				return nil
 			}
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
-				Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
+			s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
+				lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
+			row, err = ledger.Entry(ctx, f.Attempt.ID)
+			if err != nil {
+				s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
+				return nil
+			}
+			if row == nil {
+				if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
+					Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
 			}
 		}
 	}
@@ -679,6 +703,11 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
 		if row.Phase == content.PhaseOpen {
+			// Probe (nocx-zg3k3.5.3 round 7): this line firing twice for one
+			// entry means two execution rows — the seam a second, artifact-less
+			// execution opens through.
+			log.From(ctx).Debug("lifecycle ledger start on an open fact for an open entry",
+				"attempt", row.ID)
 			if _, startErr := start(); startErr != nil {
 				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", startErr)
 			}
@@ -796,6 +825,40 @@ func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 	s.lifecycleMu.Unlock()
 	for _, lane := range lanes {
 		s.lifecyclePub.ReplayLane(lane)
+	}
+}
+
+// settleAdoptedTerminalDomains settles the session's streaming when a lane
+// bound to it carries a domain the helper already closed or lost. The
+// helper's own end fact can arrive while the lane is still unregistered —
+// the shell exits while the coordinator is away, the re-adopting process
+// adopts the channel, and the domain_closed is ingested before anything
+// routes it (the loaded 3/20 shell-exit shape, nocx-zg3k3.5.3 Round 9) —
+// and the projection replay derives nothing for an already-closed domain,
+// so the one-shot settle was lost. The kernel still holds the domain's
+// recorded terminal state — the helper's own word, replayed, never a guess
+// (ADR-0076) — and the session's open entry settles from it now.
+// Idempotent: a session whose entry the completion already closed has
+// nothing open to settle, and HelperSessionEnded seals only open blocks.
+func (s *WSServer) settleAdoptedTerminalDomains(sid session.ID) {
+	if s.lifecyclePub == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	var lanes []lifecycle.LaneID
+	for lane, cur := range s.lifecycleLanes {
+		if cur == sid {
+			lanes = append(lanes, lane)
+		}
+	}
+	s.lifecycleMu.Unlock()
+	for _, lane := range lanes {
+		// The derive clears a closed lane's domain from the snapshot (its
+		// Domain reads empty) — the kernel's own record is the source.
+		if _, ok := s.lifecyclePub.TerminalDomainOfLane(lane); ok {
+			s.HelperSessionEnded(sid)
+			return
+		}
 	}
 }
 

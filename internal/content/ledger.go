@@ -1251,6 +1251,13 @@ type AppendBlockRows struct {
 	ArtifactID string
 	FromRow    uint64
 	LostRows   uint64
+	// LostCause names which bucket LostRows belongs to when it is not the
+	// emulator's own: LostCauseCoordinatorUnavailable says the gap is rows
+	// the helper could not resend because the coordinator was away while
+	// the scrollback pruned them (nocx-zg3k3.5.3). The store counts them
+	// separately so the block says how many went missing and why. Empty
+	// leaves LostRows meaning what it always meant.
+	LostCause string
 	// Rows are the departed rows in order, in the emulator's own shape. The
 	// store encodes them; a caller that serialized them first would be a
 	// second owner of the stored vocabulary.
@@ -1282,7 +1289,35 @@ type CloseBlockRows struct {
 type BlockRowsSummary struct {
 	DroppedRows uint64
 	LostRows    uint64
+	// UnavailableRows is the part of LostRows the coordinator's own absence
+	// caused: rows pruned from the helper's scrollback before the resend
+	// could read them back (nocx-zg3k3.5.3). A count and a cause, distinct
+	// from the cap's DroppedRows and the emulator's share of LostRows.
+	UnavailableRows uint64
 }
+
+// OpenBlockRowsEntry is the one streamed block a session still holds open,
+// read back by its session: the entry that opened it, the open rows
+// artifact under that entry, and the artifact's own row cursor. The entry
+// id doubles as the block stream's attempt id — OpenBlockOutput is called
+// with EntryID: attempt, so the two are one id by construction and this
+// read needs no second registry to name the attempt.
+type OpenBlockRowsEntry struct {
+	EntryID    string
+	ArtifactID string
+	// NextRow is the absolute departed-row index the NEXT delivery must
+	// start at — the cursor a re-adopting stream continues the block from.
+	NextRow uint64
+	// FirstRow is the absolute index the stored span begins at: the block's
+	// own head may be missing below it (its first delivery started above
+	// the session's origin), and the re-adopting stream must not trim or
+	// confirm rows the artifact does not hold (nocx-zg3k3.5.3 Round 8).
+	FirstRow uint64
+}
+
+// LostCauseCoordinatorUnavailable is the lost-rows cause the resend names:
+// the coordinator was away while ghostty pruned what it had not confirmed.
+const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
 
 // RecordClearBoundary is the coordinator sighting the program erase its own
 // saved lines inside an authenticated interval (nocx-2v80t.3.17): ED3, or a
@@ -1976,6 +2011,14 @@ type LedgerRepository interface {
 	// the cap dropped (derived from the chunks that are actually there) and
 	// how many the emulator lost before they could be read.
 	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
+	// OpenBlockRowsForSession returns the streamed block the session still
+	// holds open — its newest open rows artifact, with the artifact's own
+	// row cursor — or the zero value when none stands open. The read a
+	// re-adopting coordinator re-binds its block stream from (ADR-0076
+	// decision 3): the open block and its cursor survive the coordinator's
+	// restart in this store, and the session's rows continue them without
+	// waiting for a lifecycle fact.
+	OpenBlockRowsForSession(ctx context.Context, sessionID string) (OpenBlockRowsEntry, error)
 	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
 	// an ordinary read applies rather than a mark on every entry it hides
 	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:

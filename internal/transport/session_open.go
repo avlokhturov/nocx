@@ -751,6 +751,19 @@ func (s *WSServer) OpenSession(ctx context.Context, spec OpenSpec) (OpenedSessio
 		lg.Info("backend open: the pane's lifecycle leg is pumping",
 			"pane_id", spec.PaneID, "lane", string(opened.Hosted.LifecycleLane))
 	}
+	// The leg's orderly handover is armed on the session itself, whatever
+	// the start switch above did: a session whose leg failed to start still
+	// detaches cleanly on the coordinator's way out. The registry's Close —
+	// the coordinator-detach verb — runs it before the channel closes; see
+	// realSession's own field comment for why the order is load-bearing
+	// (ADR-0076).
+	if opened.Hosted != nil && opened.Hosted.DetachLifecycle != nil {
+		if detacher, ok := opened.Session.(interface {
+			SetLifecycleDetach(func())
+		}); ok {
+			detacher.SetLifecycleDetach(opened.Hosted.DetachLifecycle)
+		}
+	}
 	// THE DATA LEG IS STARTED HERE TOO, and until nocx-ui8q6.5 it was not
 	// (found writing that bead's own check, which is what this comment
 	// documents rather than a report written after the fact). session.Session

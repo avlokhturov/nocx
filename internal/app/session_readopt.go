@@ -188,6 +188,24 @@ type readoptPass struct {
 
 var _ sessionReadopter = (*readoptPass)(nil)
 
+// pipeOpenedAt answers when the session's pipe was really opened, from the
+// helper's own session record -- the daemon's spawn moment, carried on the
+// inventory's startedAt (RFC3339Nano). A re-adopted session is THE SAME
+// session, so this -- not the adoption, and not the recording's persist
+// time -- is the opened-at its pane-scoped floors must use
+// (nocx-zg3k3.5.3, REVIEW-1). A record without a readable moment falls
+// back to the carried-over mark.
+func pipeOpenedAt(mine *client.SessionEntry, fallback time.Time) time.Time {
+	if mine == nil || mine.StartedAt == "" {
+		return fallback
+	}
+	opened, err := time.Parse(time.RFC3339Nano, mine.StartedAt)
+	if err != nil {
+		return fallback
+	}
+	return opened
+}
+
 // readoptAttemptTimeout bounds ONE session's attempt.
 //
 // THE PASS IS SYNCHRONOUS AND THE BOUND IS WHY IT CAN BE. It runs before the
@@ -382,6 +400,12 @@ func (rp *readoptPass) Readopt(ctx context.Context, p content.PendingSession) (s
 		Cwd:       launchCwd(mine),
 		PaneID:    p.PaneID,
 		ProfileID: p.ProfileID,
+		// THE SAME SESSION (nocx-zg3k3.5.3, REVIEW-1): the re-adopted
+		// session opens when its pipe really opened -- the helper's own
+		// spawn moment -- so the pane-scoped floors read the blocks
+		// recorded before the restart instead of hiding them below the
+		// adoption.
+		OpenedAt: pipeOpenedAt(mine, p.Since),
 		// No size: nothing here measured a viewport. The registry's own
 		// default stands until the client that claims this session
 		// resizes it, which it does on attach.
@@ -504,6 +528,9 @@ func (rp *readoptPass) readoptLocal(ctx context.Context, p content.PendingSessio
 		// machine's daemon opened has no directory on THIS machine to report.
 		Cwd:    launchCwd(mine),
 		PaneID: p.PaneID,
+		// THE SAME SESSION, the local half of the carried opened-at above:
+		// the helper's own spawn moment.
+		OpenedAt: pipeOpenedAt(mine, p.Since),
 	}
 	if p.Host != "" {
 		// A remote destination, carried locally. Its remote half resolves the
@@ -736,7 +763,7 @@ func (rp *readoptPass) readopt(
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
 		// again, and the downlink the adoption built ends when it does.
 		adoption.endWithSession(sess)
-		bindDownlinkToSession(sess, stopBlockRows)
+		bindBlockEndToSession(sess, attached, rp.blockRows, sid, stopBlockRows)
 		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
 		// records it (helper_git.go's openFarHelper, helper_local.go's
 		// OpenHosted) — and it must be, because a re-adopted session's own

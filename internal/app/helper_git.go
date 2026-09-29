@@ -1172,6 +1172,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	var lifecycleLane lifecycle.LaneID
 	var startLifecycle func()
 	var abortLifecycle func()
+	var detachLifecycle func()
 	if lifecycleAdapter != nil {
 		lifecycleLane = lifecycleAdapter.Lane()
 		var startOnce sync.Once
@@ -1185,6 +1186,22 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		abortLifecycle = func() {
 			abortOnce.Do(endLifecycleLeg)
 		}
+		// The detach mirrors the rollback but ends the adapter with Detach,
+		// not Close: the leg's adapter learns an orderly handover from this
+		// side instead of reading its own carrier's EOF as the loss it is
+		// not (ADR-0076).
+		var detachOnce sync.Once
+		detachLifecycle = func() {
+			detachOnce.Do(func() {
+				if lifecycleAdapter != nil {
+					_ = lifecycleAdapter.Detach()
+					_ = lifecyclePeer.Close()
+				}
+				if stopDownlink != nil {
+					stopDownlink()
+				}
+			})
+		}
 	}
 	// THE DOWNLINK'S OTHER END: the pane's own. sess.Done() is the edge the
 	// transport's teardown owner already waits on, so the delivery context
@@ -1196,7 +1213,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		Session: sess, Host: cfg.Host, Account: f.account, Generation: installed.generation,
 		HelperCommand: installed.command, Fingerprint: fingerprint,
 		LifecycleLane: lifecycleLane, StartLifecycle: startLifecycle,
-		AbortLifecycle: abortLifecycle,
+		AbortLifecycle: abortLifecycle, DetachLifecycle: detachLifecycle,
 		// The two ends of one fact meet here and nowhere else: the
 		// attachment knows a stretch of output never crossed the wire, and
 		// the transport's ring is the only thing that can place it at an

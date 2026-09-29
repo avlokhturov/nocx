@@ -222,6 +222,45 @@ describe('stored block rows', () => {
     expect(text).not.toContain('1 row')
   })
 
+  it('names rows lost while the server was unavailable as its own cause (nocx-zg3k3.5.3)', () => {
+    // The store adds a coordinator-unavailable loss to lostRows AND to its
+    // own unavailableRows share, so a real payload carries it in both.
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, lostRows: 4, unavailableRows: 4, sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      "Output incomplete: 4 rows were lost while nocx's server was unavailable.",
+    )
+  })
+
+  it("states one loss once when the server's absence accounts for part of lostRows", () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, lostRows: 6, unavailableRows: 4, sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
+    expect(text).toContain('output was lost 2 times before it could be captured')
+    expect(text).toContain("4 rows were lost while nocx's server was unavailable")
+    expect(text).not.toContain('lost 6 times')
+  })
+
+  it('says nothing about server unavailability when the store carries none', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(block, { ...stored, sealed: true }, { metric: null, palette: DEFAULT_SNAPSHOT })
+
+    expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+  })
+
   it('names the overflowed stream as its own cause', () => {
     const block = document.createElement('article')
 
