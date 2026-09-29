@@ -79,7 +79,7 @@ func commandBeforeItsRow(t *testing.T) (*lifecycleTestEnv, session.ID, string, *
 // and answers the block.closed it was said with.
 func finishes(t *testing.T, e *lifecycleTestEnv, sid session.ID, attempt string, ingest func(uint64, lifecycle.Event)) blockClosedParams {
 	t.Helper()
-	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")})
+	e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}, "")
 	fence := lifecycleFence(0x42)
 	ingest(3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence))
 	e.ws.BlockIntervalEnded(sid, fence, 1, []emulator.Row{aStreamRow("$ ")}, false)

@@ -95,7 +95,7 @@ func completedWithRows(t *testing.T, fence lifecycle.FenceNonce) (*lifecycleTest
 	e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 	attempt := startsACommand(t, e, pub, lane, h, 2, "make")
-	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("building")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("building")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
@@ -152,7 +152,7 @@ func TestAnEntryWhoseDeliveryWasLostSealsTheCurrentBlockAsAGap(t *testing.T) {
 	sid := session.ID(sidStr)
 	e.ws.AttachBlockRows(sid)
 	attempt := startsACommand(t, e, pub, lane, h, 2, "ssh host")
-	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("Welcome")}); !confirm {
+	if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("Welcome")}, ""); !confirm {
 		t.Fatal("the streamed row was not confirmed")
 	}
 

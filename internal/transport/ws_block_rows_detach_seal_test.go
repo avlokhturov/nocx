@@ -94,7 +94,7 @@ func TestADetachAndAnInFlightCloseSealOnce(t *testing.T) {
 			e.ws.blockRowsStore = store
 			e.ws.AttachBlockRows(sid)
 			attempt := startsACommand(t, e, pub, lane, h, 2, "make")
-			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}); !confirm {
+			if _, confirm := e.ws.BlockRowsArrived(sid, 0, 0, []emulator.Row{aStreamRow("building")}, ""); !confirm {
 				t.Fatal("the streamed row was not confirmed")
 			}
 			fence := lifecycleFence(0x3a)

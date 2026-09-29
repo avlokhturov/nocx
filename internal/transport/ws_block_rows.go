@@ -477,9 +477,10 @@ type openBlock struct {
 }
 
 type pendingRows struct {
-	from uint64
-	lost uint64
-	rows []emulator.Row
+	from  uint64
+	lost  uint64
+	cause string
+	rows  []emulator.Row
 }
 
 type pendingEnd struct {
@@ -803,8 +804,10 @@ func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b
 // BlockRowsArrived delivers one OutputRows delivery from the session's
 // helper callback: the rows that left the screen, in order, at the absolute
 // index they departed from, with the count the emulator pruned just before
-// them. It answers whether the coordinator wants them confirmed written —
-// the helper's "written up to here" mark. Rows that belong to no block (a
+// them and the cause that names which bucket the count belongs to when it
+// is not the emulator's own (LostCauseCoordinatorUnavailable, the resend's
+// counted absence, nocx-zg3k3.5.3). It answers whether the coordinator
+// wants them confirmed written — the helper's "written up to here" mark. Rows that belong to no block (a
 // prompt scrolling between commands) and rows of a refused command are
 // confirmed and dropped; rows of a kept block are appended first; a store
 // failure is the one answer that withholds the confirmation, so the helper's
@@ -816,7 +819,7 @@ func sealAtDetach(ctx context.Context, store blockOutputStore, sid session.ID, b
 // an end marker. It takes the same path as any other delivery, so the loss
 // reaches the block's summary and the block's cursor moves to the end of the
 // gap, where the closing screen then lands.
-func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool) {
+func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool) {
 	if len(rows) == 0 && lost == 0 {
 		return 0, false
 	}
@@ -825,9 +828,11 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	_, sourced := bs.sources[sid]
 	if _, unrecorded := bs.unrecorded[sid]; sourced && unrecorded {
 		// Not recorded until the next command (BlockOutputIncomplete): what
-		// arrives now is confirmed, so nothing waits on it, and not kept.
+		// arrives now is not kept, and the helper's mark must not claim it
+		// -- the acknowledgement means STORED, so a refused span stays
+		// behind the mark and the resend offers it again (nocx-zg3k3.5.3).
 		bs.mu.Unlock()
-		return fromRow + uint64(len(rows)), true //nolint:gosec // a row count, not a byte count
+		return 0, false
 	}
 	block := bs.current[sid]
 	if sourced {
@@ -839,6 +844,25 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			}
 			rows = rows[skip:]
 			fromRow = closed
+			lost = 0
+		}
+		// Dedup by absolute row index (nocx-zg3k3.5.3): a resent delivery
+		// may start behind what this block already committed. block.rows is
+		// the artifact's cursor, moved by each append that landed -- the
+		// direct one below and the deferred flush's own. The overlap is
+		// trimmed here and the new tail appended, so the store never sees a
+		// discontinuity and the confirmation names only rows the artifact
+		// holds. Rows still queued for the store are NOT part of the bound:
+		// they are not durable, and an overlap with them is refused by the
+		// store and offered again, by which time the cursor has moved.
+		if block != nil && block.kept && fromRow < block.rows {
+			skip := block.rows - fromRow
+			if skip >= uint64(len(rows)) {
+				bs.mu.Unlock()
+				return block.rows, true
+			}
+			rows = rows[skip:]
+			fromRow = block.rows
 			lost = 0
 		}
 		// The interval's end marker may have arrived without the completion
@@ -859,10 +883,10 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 					lost = 0
 				}
 				if fromRow+uint64(len(rows)) > bound { //nolint:gosec // a row count, not a byte count
-					before, after := splitPendingRowsAt([]pendingRows{{from: fromRow, lost: lost, rows: rows}}, bound)
+					before, after := splitPendingRowsAt([]pendingRows{{from: fromRow, lost: lost, cause: lostCause, rows: rows}}, bound)
 					if len(after) == 1 && !s.holdLocked(sid, after[0].from, after[0].rows) {
 						bs.mu.Unlock()
-						return fromRow + uint64(len(rows)), true //nolint:gosec // a row count, not a byte count
+						return 0, false
 					}
 					if len(after) == 1 {
 						bs.beyond[sid] = append(bs.beyond[sid], after...)
@@ -893,20 +917,20 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		if len(bs.pendingCloses[sid]) > 0 {
 			if !s.holdLocked(sid, fromRow, rows) {
 				bs.mu.Unlock()
-				return fromRow + uint64(len(rows)), true //nolint:gosec // a row count, not a byte count
+				return 0, false
 			}
 			bs.pending[sid] = append(bs.pending[sid], pendingRows{
-				from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+				from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
 			})
 			bs.mu.Unlock()
 			return 0, false
 		}
 		bs.mu.Unlock()
-		return s.BlockRowsArrived(sid, fromRow, lost, rows)
+		return s.BlockRowsArrived(sid, fromRow, lost, rows, lostCause)
 	}
 	if sourced && pending && !flushing && !closing && block != nil && bs.queued[sid] == "" {
 		bs.pending[sid] = append(bs.pending[sid], pendingRows{
-			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+			from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
 		})
 		toFlush := bs.takeForFlushLocked(sid, takeAllPendingRows)
 		bs.flushing[sid] = true
@@ -918,13 +942,13 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	if sourced && (flushing || closing || (waiting != "" && block == nil)) {
 		if !s.holdLocked(sid, fromRow, rows) {
 			bs.mu.Unlock()
-			return fromRow + uint64(len(rows)), true //nolint:gosec // a row count, not a byte count
+			return 0, false
 		}
 		if bs.pending == nil {
 			bs.pending = make(map[session.ID][]pendingRows)
 		}
 		bs.pending[sid] = append(bs.pending[sid], pendingRows{
-			from: fromRow, lost: lost, rows: append([]emulator.Row(nil), rows...),
+			from: fromRow, lost: lost, cause: lostCause, rows: append([]emulator.Row(nil), rows...),
 		})
 		bs.mu.Unlock()
 		return 0, false
@@ -935,7 +959,10 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	}
 	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
 	if block == nil || !block.kept {
-		return writtenUpTo, true
+		// Rows of no block, or of a keep the policy refused: dropped, and
+		// NOT confirmed -- the mark means stored (nocx-zg3k3.5.3), and the
+		// resend must be able to offer them again for a fresh decision.
+		return 0, false
 	}
 	store := s.blockStore()
 	if store == nil {
@@ -945,7 +972,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	// the append — one store write per delivery, nothing held past it.
 	err := store.AppendBlockRows(context.Background(), content.AppendBlockRows{
 		EntryID: block.entry, ArtifactID: block.artifactID,
-		FromRow: fromRow, LostRows: lost, Rows: rows,
+		FromRow: fromRow, LostRows: lost, LostCause: lostCause, Rows: rows,
 	})
 	if err != nil {
 		// A store failure is not a refusal: the rows are still wanted, and
@@ -2250,9 +2277,9 @@ func (bs *blockStream) openFinished(s *WSServer, sid session.ID) {
 
 func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *openBlock, pending []pendingRows, confirm func(uint64)) {
 	if !block.kept {
-		for _, delivery := range pending {
-			confirmPendingRows(confirm, delivery)
-		}
+		// A refused keep stores nothing, so it confirms nothing (the mark
+		// means stored, nocx-zg3k3.5.3): the queued rows were dropped with
+		// the block, and the resend offers them again.
 		bs.finishPendingRows(sid)
 		bs.drainPendingCloses(s, sid)
 		return
@@ -2278,7 +2305,7 @@ func (bs *blockStream) flushPendingRows(s *WSServer, sid session.ID, block *open
 	for i, delivery := range pending {
 		if err := store.AppendBlockRows(context.Background(), content.AppendBlockRows{
 			EntryID: block.entry, ArtifactID: block.artifactID,
-			FromRow: delivery.from, LostRows: delivery.lost, Rows: delivery.rows,
+			FromRow: delivery.from, LostRows: delivery.lost, LostCause: delivery.cause, Rows: delivery.rows,
 		}); err != nil {
 			s.log.Warn("deferred block rows append failed", "session", sid, "entry", block.entry, "error", err)
 			bs.requeuePendingRows(sid, pending[i:])

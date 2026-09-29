@@ -213,3 +213,93 @@ func TestThePumpResendsAnEndItDroppedForNoSubscriber(t *testing.T) {
 		t.Fatalf("the re-emitted end carries a closing screen %s: the helper keeps no copy to re-send", doc.Closing)
 	}
 }
+
+// The walked span stops at the newest dropped boundary. The boundary's own
+// closing screen departs after it — suppressed, unindexed — so rows below
+// the boundary cannot be proven against the history top: they are counted,
+// with the absence as the cause, at the position the survivors start at,
+// and the survivors are walked exactly.
+func TestThePumpCountsWhatItCannotProveBelowADroppedBoundary(t *testing.T) {
+	hs, rt, sink := rowsBridgeSession(t, 80, 24)
+
+	// Watched: the head stored through a deliberately short mark.
+	rowsFeed(t, rt, 0, 40)
+	sink.waitFor(1, 0, 0)
+	if err := hs.confirmRows(sink, "coord-1", 4); err != nil {
+		t.Fatalf("confirm the stored rows: %v", err)
+	}
+
+	// Away. The command ends — its boundary's marker drops for nobody —
+	// and the next command's output pushes the closed screen off: those
+	// departures are suppressed, and its own rows stream from the
+	// boundary's end row up.
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+	nonce := sessionruntime.FenceNonce{}
+	for i := range nonce {
+		nonce[i] = 0xAB
+	}
+	fenceHex := fmt.Sprintf("%x", nonce)
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "prompt\x1b]1337;NOCX_FENCE;%s\x07\r\n", fenceHex)
+	if err := rt.Ingest([]byte(sb.String())); err != nil {
+		t.Fatalf("ingest the fence: %v", err)
+	}
+	rt.Completed(rt.Incarnation(), nonce, 0)
+	rowsFeed(t, rt, 100, 60)
+
+	// The pump has recorded the drop; the return reads the record.
+	<-hs.requestRowsDrain()
+	hs.rowMu.Lock()
+	recorded := len(hs.resendEnds)
+	hs.rowMu.Unlock()
+	if recorded != 1 {
+		t.Fatalf("the pump recorded %d dropped ends, want 1", recorded)
+	}
+
+	sink2 := newRowsSink()
+	hs.mu.Lock()
+	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
+	hs.mu.Unlock()
+	hs.wakeRows()
+
+	sink2.waitFor(2, 1, 0)
+
+	batches := decodeResentRows(t, sink2.rowFrames())
+	// First frame: the counted gap [4, 17), stated where the survivors start.
+	gap := batches[0]
+	if gap.lost != 13 || gap.from != 17 || len(gap.texts) != 0 {
+		t.Fatalf("the first frame = (from %d, lost %d, %d rows), want the counted gap [4, 17) with no rows",
+			gap.from, gap.lost, len(gap.texts))
+	}
+	if gap.cause != "coordinator-unavailable" {
+		t.Fatalf("the gap's cause = %q, want the absence named", gap.cause)
+	}
+	// The end marker sits between the gap and the survivors: stream order.
+	ends := sink2.endFrames()
+	if len(ends) != 1 || ends[0].EndRow != 17 {
+		t.Fatalf("the re-emitted end = %+v, want the boundary at row 17", ends[0])
+	}
+	// The survivors: indices [17, D) — the fed lines' head, in order.
+	var got []string
+	for i, b := range batches[1:] {
+		wantFrom := uint64(17)
+		if i > 0 {
+			wantFrom = batches[i].from + uint64(len(batches[i].texts))
+		}
+		if b.from != wantFrom || b.lost != 0 || b.cause != "" {
+			t.Fatalf("survivor batch %d = (from %d, lost %d, cause %q), want a plain walk from %d",
+				i, b.from, b.lost, b.cause, wantFrom)
+		}
+		got = append(got, b.texts...)
+	}
+	var want []string
+	for i, n := 100, len(got); i < 100+n; i++ {
+		want = append(want, fmt.Sprintf("L%06d", i))
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("the survivors are not the rows above the boundary:\n got %d %q\nwant %d %q",
+			len(got), strings.Join(got, ","), len(want), strings.Join(want, ","))
+	}
+}

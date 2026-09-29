@@ -51,6 +51,11 @@ type blockRowsPayload struct {
 	// LostRows is what the emulator pruned before the coordinator could
 	// read it, carried here because no cap chose it.
 	LostRows uint64 `json:"lostRows,omitempty"`
+	// UnavailableRows is the part of LostRows the coordinator's own absence
+	// caused (nocx-zg3k3.5.3): rows pruned from the helper's scrollback
+	// before the resend could read them back. Same index space as LostRows,
+	// a different why.
+	UnavailableRows uint64 `json:"unavailableRows,omitempty"`
 	// DroppedRows is written once, at close, derived from the chunks.
 	DroppedRows uint64 `json:"droppedRows,omitempty"`
 	// Appended is the total bytes ever appended, BEFORE any eviction. It is
@@ -241,6 +246,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			// and that is all it has to say.
 			state.payload.NextRow = in.FromRow
 			state.payload.LostRows += in.LostRows
+			state.payload.UnavailableRows += unavailableShare(in)
 			if _, err := tx.ExecContext(ctx,
 				`UPDATE artifacts SET payload = ? WHERE id = ?`,
 				state.payload.json(), in.ArtifactID); err != nil {
@@ -304,6 +310,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 
 		state.payload.NextRow = in.FromRow + uint64(len(in.Rows)) //nolint:gosec // row counts, not byte counts
 		state.payload.LostRows += in.LostRows
+		state.payload.UnavailableRows += unavailableShare(in)
 		state.payload.Appended += appended
 
 		if _, err := tx.ExecContext(ctx,
@@ -353,9 +360,9 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		if err != nil {
 			return err
 		}
-		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows}
+		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
 
-		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows}
+		final := blockRowsPayload{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
 		// The PRIMARY reason, one of them: the cap names rows it dropped by
 		// count, so it wins over a gap it would otherwise hide inside.
 		var truncated any
@@ -384,6 +391,16 @@ type blockRowsState struct {
 	hasCursor bool
 	sealed    bool
 	summary   BlockRowsSummary
+}
+
+// unavailableShare answers how much of a delivery's loss the coordinator's
+// own absence caused: the whole gap when the delivery named that cause,
+// nothing otherwise.
+func unavailableShare(in AppendBlockRows) uint64 {
+	if in.LostCause == LostCauseCoordinatorUnavailable {
+		return in.LostRows
+	}
+	return 0
 }
 
 // json is the payload's stored form. The error json.Marshal declares for
@@ -432,7 +449,7 @@ func blockRowsArtifactFor(ctx context.Context, tx *sql.Tx, entryID, artifactID s
 	state.hasCursor = state.payload.NextRow > 0
 	state.sealed = stateHeld == string(ArtifactSealed)
 	if state.sealed {
-		state.summary = BlockRowsSummary{DroppedRows: state.payload.DroppedRows, LostRows: state.payload.LostRows}
+		state.summary = BlockRowsSummary{DroppedRows: state.payload.DroppedRows, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
 	}
 	return state, nil
 }

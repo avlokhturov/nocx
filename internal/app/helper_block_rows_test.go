@@ -39,7 +39,7 @@ func (f *fakeSink) DetachBlockRows(sid session.ID) {
 	f.detached = append(f.detached, sid)
 }
 
-func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row) (uint64, bool) {
+func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row, _ string) (uint64, bool) {
 	f.mu.Lock()
 	f.rows = append(f.rows, client.OutputRows{FromRow: fromRow, LostRows: lost, Rows: rows})
 	answer := f.answer

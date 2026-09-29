@@ -41,10 +41,16 @@ import (
 // Incomplete is the helper's one marker that its row buffer overflowed
 // (nocx-2v80t.3.36): the block in flight ends incomplete here, Rows is empty,
 // and FromRow is the first row that was not recorded.
+//
+// LostCause names which bucket LostRows belongs to when it is not the
+// emulator's own: coordinator-unavailable says the rows left the screen
+// while nobody was attached and the scrollback pruned them before the
+// resend could read them back (nocx-zg3k3.5.3).
 type OutputRows struct {
 	FromRow    uint64
 	Rows       []emulator.Row
 	LostRows   uint64
+	LostCause  string
 	Incomplete bool
 }
 

@@ -617,17 +617,30 @@ func (s *hostSession) resendFromScrollback() bool {
 	ends := append([]droppedEnd(nil), s.resendEnds...)
 	s.rowMu.Unlock()
 	d := s.runtime.DepartedRowCount()
-	if mark >= d && len(ends) == 0 {
+	// The walked span stops at the newest dropped boundary. That boundary's
+	// own closing screen departs after it — suppressed, unindexed — and
+	// sits in the history between the rows below and the rows above, at a
+	// position only the boundary-time bookkeeping knows. Rows below the cut
+	// cannot be proven against the history top; they are counted with the
+	// absence as their cause, at the positions the survivors start at, and
+	// the walk covers exactly the provable span above the cut.
+	stop := mark
+	for _, e := range ends {
+		if e.endRow > stop {
+			stop = e.endRow
+		}
+	}
+	if mark >= d && stop <= mark {
 		return true
 	}
-	// The walked span's rows, oldest first, as the scrollback holds them.
+	// The provable span's rows, oldest first, as the scrollback holds them.
 	var rows []emulator.Row
 	_, _, err := s.runtime.ReadScreen(func(t emulator.Terminal) error {
 		page, err := t.HistoryRows(0, 0)
 		if err != nil {
 			return err
 		}
-		count := d - mark
+		count := d - stop
 		start := 0
 		if uint64(page.Total) > count { //nolint:gosec // a row count, not a byte count
 			start = page.Total - int(count) //nolint:gosec // page.Total >= count here
@@ -645,36 +658,42 @@ func (s *hostSession) resendFromScrollback() bool {
 	}
 	// Whatever the history cannot fill was pruned while the coordinator was
 	// away. The rows below the walk's reach are stated as the loss they
-	// are, and the survivors follow.
+	// are — the absence is the cause — and the survivors follow.
 	var short uint64
-	if uint64(len(rows)) < d-mark { //nolint:gosec // len is never negative
-		short = d - mark - uint64(len(rows)) //nolint:gosec // a row count, not a byte count
+	if uint64(len(rows)) < d-stop { //nolint:gosec // len is never negative
+		short = d - stop - uint64(len(rows)) //nolint:gosec // a row count, not a byte count
 	}
-	from := mark
-	if short > 0 {
-		if !s.sendResentRows(subs, from, short, nil) {
-			return false
-		}
-		from += short
-	}
-	// Stream order: the rows below each dropped boundary, then that
-	// boundary's marker again, then the rows above it.
-	cursor := from // the absolute index the next pool row carries
-	pool := rows   // pool[cursor-from] is the next row to send
+	// Stream order: every unprovable stretch is stated where it sits —
+	// before the boundary that ends it — then that boundary's marker again,
+	// and after the last one the provable rows, walked exactly.
+	prev := mark
 	for _, e := range ends {
-		if e.endRow > cursor {
-			n := e.endRow - cursor
-			if !s.sendResentRows(subs, cursor, 0, pool[cursor-from:cursor-from+n]) { //nolint:gosec // slice arithmetic, never negative
+		if e.endRow > prev {
+			if !s.sendResentRows(subs, e.endRow, e.endRow-prev, proto.LostCauseCoordinatorUnavailable, nil) { //nolint:gosec // a row count, not a byte count
 				return false
 			}
-			cursor = e.endRow
+			prev = e.endRow
 		}
 		if !s.deliverRowEmission(rowEmission{end: true, nonce: e.nonce, from: e.endRow, noFence: e.noFence}) {
 			return false
 		}
 	}
-	if cursor < d {
-		if !s.sendResentRows(subs, cursor, 0, pool[cursor-from:]) { //nolint:gosec // slice arithmetic, never negative
+	if stop > prev {
+		if !s.sendResentRows(subs, stop, stop-prev, proto.LostCauseCoordinatorUnavailable, nil) { //nolint:gosec // a row count, not a byte count
+			return false
+		}
+		prev = stop
+	}
+	if prev < d {
+		if short > 0 {
+			// The bottom of the provable span was pruned while the
+			// coordinator was away: stated first, the survivors after it.
+			if !s.sendResentRows(subs, prev+short, short, proto.LostCauseCoordinatorUnavailable, nil) { //nolint:gosec // a row count, not a byte count
+				return false
+			}
+			prev += short
+		}
+		if !s.sendResentRows(subs, prev, 0, "", rows) {
 			return false
 		}
 	}
@@ -704,7 +723,7 @@ func (s *hostSession) keepDroppedEnd(em rowEmission) {
 
 // sendResentRows writes one resend as the ordinary rows frames, split at the
 // same bound a live batch is, to every subscriber bound at this moment.
-func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, rows []emulator.Row) bool {
+func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, cause string, rows []emulator.Row) bool {
 	delivered := true
 	for start := 0; start <= len(rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
@@ -716,7 +735,7 @@ func (s *hostSession) sendResentRows(subs []*subscriber, from, lost uint64, rows
 			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
 			return false
 		}
-		payload, err := json.Marshal(proto.OutputRowsDoc{FromRow: from, LostRows: lost, Rows: encoded})
+		payload, err := json.Marshal(proto.OutputRowsDoc{FromRow: from, LostRows: lost, LostCause: cause, Rows: encoded})
 		if err != nil {
 			s.log.Warn("session row resend: rows not encodable", "session", s.id.Session, "err", err)
 			return false
