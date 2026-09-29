@@ -468,6 +468,19 @@ type openBlock struct {
 	// prepend; the trim and every confirmation cover [floor, rows) and
 	// never a span the artifact does not hold. Guarded by blockStream.mu.
 	floor uint64
+	// held is the block's own below-floor head, offered again by the
+	// resend while the chain could not yet join the stored span: a
+	// prepend must END at the floor, and the resend's batches may land
+	// inside the gap (the loaded R33 run: [0,32) refused against a
+	// floor of 57, [32,57) accepted, and the second batch's ack leapt
+	// over the refused [0,32) — nocx-zg3k3.5.3 Round 9). The chain
+	// grows downward/continuations until it reaches the floor, then
+	// joins in one prepend. Bounded by the gap itself; never
+	// confirmed while held; dropped only where the block seals without
+	// it (the same honest loss as before this chain existed). Guarded
+	// by blockStream.mu.
+	heldFrom uint64
+	held     []emulator.Row
 	// settled is whether this block has been said closed — by its own end,
 	// a lost boundary or the session's detach, whichever came first. The
 	// one that sets it seals and says block.closed; any other finds it set
@@ -1055,20 +1068,45 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		if block != nil && block.kept && fromRow < block.rows {
 			// The stored span is [floor, rows): a delivery reaching below
 			// the floor is the block's own head, offered again by the
-			// resend (nocx-zg3k3.5.3 Round 8). It is split off here and
-			// prepended below — AFTER the lock, BEFORE anything is
-			// confirmed — so the acknowledgement never claims a span the
-			// artifact does not hold.
+			// resend (nocx-zg3k3.5.3 Round 8). The below-floor part joins
+			// the block's held chain; the chain prepends only when it
+			// reaches the floor — a prepend must END there, and the
+			// resend's batches may land inside the gap (Round 9). Nothing
+			// held is ever confirmed.
 			if block.floor > 0 && fromRow < block.floor {
 				n := block.floor - fromRow
 				if n > uint64(len(rows)) { //nolint:gosec // a row count, not a byte count
 					n = uint64(len(rows))
 				}
-				head = rows[:n]
-				headFrom = fromRow
+				part := rows[:n]
+				switch {
+				case len(block.held) == 0:
+					block.heldFrom = fromRow
+					block.held = append([]emulator.Row(nil), part...)
+				case fromRow+uint64(len(part)) == block.heldFrom: //nolint:gosec // a row count, not a byte count
+					// the part sits directly below the chain: it extends it
+					block.held = append(append([]emulator.Row(nil), part...), block.held...)
+					block.heldFrom = fromRow
+				case fromRow >= block.heldFrom+uint64(len(block.held)): //nolint:gosec // a row count, not a byte count
+					// the part continues the chain upward
+					block.held = append(block.held, part...)
+				default:
+					// the part overlaps or precedes the chain with a hole:
+					// keep the EARLIER fragment — the replaced one was
+					// never confirmed, so the resend offers it again.
+					block.heldFrom = fromRow
+					block.held = append([]emulator.Row(nil), part...)
+				}
 				rows = rows[n:]
 				fromRow = block.floor
 				lost = 0
+				if block.heldFrom+uint64(len(block.held)) == block.floor { //nolint:gosec // a row count, not a byte count
+					// the chain now reaches the stored span: it joins in
+					// one prepend below (after the lock, before anything
+					// is confirmed).
+					head = block.held
+					headFrom = block.heldFrom
+				}
 			}
 			if len(rows) > 0 {
 				skip := block.rows - fromRow
@@ -1084,16 +1122,32 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			}
 		}
 		if fullyStored {
-			bs.mu.Unlock()
-			if len(head) > 0 {
-				if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
+			if len(head) == 0 {
+				bs.mu.Unlock()
+				if len(block.held) > 0 {
+					// the chain is still short of the floor: the held rows
+					// are not in the artifact, and this delivery named them
+					// — nothing here may be confirmed (Round 9).
 					return 0, false
 				}
-				bs.mu.Lock()
-				block.floor = headFrom
-				bs.mu.Unlock()
+				return block.rows, true
 			}
+			bs.mu.Unlock()
+			if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
+				return 0, false
+			}
+			bs.mu.Lock()
+			block.floor = headFrom
+			block.held = nil
+			bs.mu.Unlock()
 			return block.rows, true
+		}
+		if len(head) > 0 {
+			// the chain is still short of the floor: the held rows are
+			// not confirmable, and neither is anything behind them in
+			// this delivery.
+			bs.mu.Unlock()
+			return 0, false
 		}
 		// The interval's end marker may have arrived without the completion
 		// that names its fence. Its EndRow is the boundary either way, and
@@ -1193,6 +1247,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		}
 		bs.mu.Lock()
 		block.floor = headFrom
+		block.held = nil
 		bs.mu.Unlock()
 	}
 	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
