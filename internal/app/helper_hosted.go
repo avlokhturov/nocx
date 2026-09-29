@@ -102,6 +102,14 @@ type hostedSpawnResult struct {
 	LifecycleTransport lifecycle.TransportID
 	StartLifecycle     func()
 	AbortLifecycle     func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss
+	// anywhere: the kernel is not told, the open attempts stay, and the
+	// store's open entry and open block survive for whichever coordinator
+	// re-adopts (ADR-0076). AbortLifecycle above is the failure rollback;
+	// this is the departure.
+	DetachLifecycle    func()
 	ObserveOutputHoles func(func(lost uint64, reason string))
 }
 
@@ -223,6 +231,18 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 			stopDownlink()
 		}
 	}
+	// The detach mirrors the rollback but ends the adapter with Detach, not
+	// Close: the leg's adapter learns the handover from this side instead of
+	// reading its own carrier's EOF as the loss it is not.
+	detachLifecycleNow := func() {
+		if lifecycleAdapter != nil {
+			_ = lifecycleAdapter.Detach()
+			_ = lifecyclePeer.Close()
+		}
+		if stopDownlink != nil {
+			stopDownlink()
+		}
+	}
 
 	entry, err := spawn(ctx, life)
 	if err != nil {
@@ -324,6 +344,8 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		}
 		var abortOnce sync.Once
 		out.AbortLifecycle = func() { abortOnce.Do(abortLifecycleNow) }
+		var detachOnce sync.Once
+		out.DetachLifecycle = func() { detachOnce.Do(detachLifecycleNow) }
 	}
 	return out, nil
 }

@@ -150,6 +150,9 @@ type Adapter struct {
 	closed bool
 	loss   sync.Once
 	timer  *time.Timer
+	// pumpDone is closed when the pump goroutine ends — the observable a
+	// test waits on to know the pump's own end-of-stream has run.
+	pumpDone chan struct{}
 }
 
 // NewStream constructs the same authenticated lifecycle adapter over an
@@ -207,6 +210,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 	a.mu.Lock()
 	a.timer = t
 	a.mu.Unlock()
+	a.pumpDone = make(chan struct{})
 	go a.pump()
 	return a, nil
 }
@@ -288,6 +292,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 	}
 	logger.Info("lifecycle channel adopted",
 		"transport", a.id, "lane", a.lane, "domain", a.domain, "epoch", a.epoch)
+	a.pumpDone = make(chan struct{})
 	go a.pump()
 	return a, nil
 }
@@ -404,6 +409,34 @@ func (a *Adapter) Close() error {
 	return nil
 }
 
+// Detach ends this adapter's leg as an ORDERLY HANDOVER: the coordinator is
+// giving the session back to its helper on its own authority — process
+// shutdown, a re-adopt that lost the write-lease — and the helper keeps
+// owning both, so the domain is not lost and its open attempts are not this
+// kernel's to settle. The kernel hears nothing from this side: a
+// coordinator going away is not data from the helper (ADR-0076), and the
+// re-adopting coordinator adopts the domain fresh (lifecycle.AdoptDomain).
+// The pump's EOF echo afterwards finds the adapter already closed and
+// answers for nothing.
+//
+// This is Close's sibling for the coordinator-detach verb, never a second
+// loss cause: a carrier that dies while the coordinator lives still runs
+// lose, and a shell that says goodbye still reaches endOfStream's clean
+// branch. Shares lose's once, so whichever of detach, loss or disposal runs
+// first decides what this leg's end was.
+func (a *Adapter) Detach() error {
+	a.loss.Do(func() {
+		a.log.Info("lifecycle channel detached for handover",
+			"transport", a.id, "lane", a.lane, "domain", a.domain)
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
+	return nil
+}
+
 // lose is the single loss path, executed once: say which caller fired,
 // report the cause, notify the kernel, mark the adapter closed, and close
 // the descriptor so the pump unblocks. Idempotent under concurrent callers
@@ -460,6 +493,7 @@ func (a *Adapter) reportGap(bytes, frames int) {
 // pump moves inbound envelopes and loss into the kernel until the stream
 // ends. It is the sole reader of the descriptor.
 func (a *Adapter) pump() {
+	defer close(a.pumpDone)
 	defer func() { _ = a.conn.Close() }()
 	for {
 		env, err := a.dec.ReadFrame()
@@ -518,6 +552,15 @@ func (a *Adapter) pump() {
 // still live lost its speaker without saying goodbye, so the kernel marks it
 // Lost and its open attempts unknown (protocol §12).
 func (a *Adapter) endOfStream() {
+	a.mu.Lock()
+	closed := a.closed
+	a.mu.Unlock()
+	if closed {
+		// This leg already ended here — an orderly detach or a loss. The
+		// EOF is its echo, and the policy ran with the ending.
+		a.log.Info("lifecycle transport ended after the leg was already accounted for", "domain", a.domain)
+		return
+	}
 	d, ok := a.kernel.Domain(a.domain)
 	if ok {
 		switch d.State {
