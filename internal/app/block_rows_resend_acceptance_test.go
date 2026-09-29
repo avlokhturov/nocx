@@ -125,6 +125,23 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	// never noticed.
 	a.Shutdown(ctx)
 
+	// THE TAIL DEPARTS FOR NOBODY: with no coordinator anywhere, the
+	// release lets the command print its last hundred rows and finish.
+	// The done file is the state that says the whole tail has departed;
+	// only then does the replacement root come up, so the rows can reach
+	// the block only through the helper's resend from scrollback.
+	if werr := os.WriteFile(release, []byte("go"), 0o600); werr != nil {
+		t.Fatalf("releasing the command: %v", werr)
+	}
+	for {
+		if _, statErr := os.Stat(done); statErr == nil {
+			break
+		} else if !os.IsNotExist(statErr) {
+			t.Fatalf("stat the done file: %v", statErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
 	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
 	if err != nil {
 		t.Fatalf("New after restart: %v", err)
@@ -138,28 +155,6 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	// worth asserting about this incarnation.
 	conn2 := dialAppWS(t, a2)
 	defer func() { _ = conn2.Close() }()
-
-	// The coordinator is gone; the release file is the state that tells
-	// the command to produce its output now -- every row departs for
-	// nobody.
-	if werr := os.WriteFile(release, []byte("go"), 0o600); werr != nil {
-		t.Fatalf("releasing the command: %v", werr)
-	}
-
-	// The re-adopted session's resend has had its chance; the release
-	// lets the command print its tail and finish, and the done file is
-	// the state that says it has.
-	if werr := os.WriteFile(release, []byte("go"), 0o600); werr != nil {
-		t.Fatalf("releasing the command: %v", werr)
-	}
-	for {
-		if _, statErr := os.Stat(done); statErr == nil {
-			break
-		} else if !os.IsNotExist(statErr) {
-			t.Fatalf("stat the done file: %v", statErr)
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
 
 	// The block closes on the command's completion and reads back whole:
 	// every row, in order, however many restarts it crossed. The entry is
@@ -419,19 +414,12 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	// changes (the detach is no-seal, ADR-0076).
 	a.Shutdown(ctx)
 
-	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
-	if err != nil {
-		t.Fatalf("New after restart: %v", err)
-	}
-	if startErr := a2.Start(ctx); startErr != nil {
-		t.Fatalf("Start after restart: %v", startErr)
-	}
-	defer a2.Shutdown(ctx)
-	conn2 := dialAppWS(t, a2)
-	defer func() { _ = conn2.Close() }()
-
-	// THE SHELL EXITS WHILE THE COORDINATOR IS AWAY: the release lets the
-	// command finish and the `exit` end the shell, with nobody watching.
+	// THE SHELL EXITS WHILE THE COORDINATOR IS AWAY: with no coordinator
+	// anywhere, the release lets the command finish and the `exit` end
+	// the shell. The done file says the command ran; the pane's own end —
+	// the session's Done, the same edge the teardown owner waits on —
+	// says the shell has actually exited, so the replacement root cannot
+	// arrive before the exit it must settle on return.
 	if werr := os.WriteFile(release, []byte("go"), 0o600); werr != nil {
 		t.Fatalf("releasing the command: %v", werr)
 	}
@@ -443,6 +431,22 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	select {
+	case <-p.sess.Done():
+	case <-time.After(60 * time.Second):
+		t.Fatal("the pane never ended after its shell exited")
+	}
+
+	a2, err := newTestApp(t, withLocalHelperArtifacts(src))
+	if err != nil {
+		t.Fatalf("New after restart: %v", err)
+	}
+	if startErr := a2.Start(ctx); startErr != nil {
+		t.Fatalf("Start after restart: %v", startErr)
+	}
+	defer a2.Shutdown(ctx)
+	conn2 := dialAppWS(t, a2)
+	defer func() { _ = conn2.Close() }()
 
 	// On return the block is settled, not left running: the entry is
 	// terminal — the shell exited with no completion fact, so the honest

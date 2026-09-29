@@ -689,16 +689,21 @@ func (rp *readoptPass) readopt(
 			// range it lost — when the host out-produced the window while
 			// nobody was listening, which is the case this epic is about.
 			Offset: proto.StreamOffset(from), Fresh: false,
-			// THE LIFECYCLE STREAM RESUMES AT THE HELPER'S HEAD, NOT AT ITS
-			// BASE, and that is a security property rather than an
-			// optimisation. The adopted domain keeps the capability the shell
-			// has been stamping every frame with, so the helper's retained
-			// window is a stretch of already-authenticated events: replaying
-			// it into the new kernel would re-deliver commands that already
-			// ran. `Fresh` is true because this coordinator holds no lifecycle
-			// state at all — the offset is where the stream stands now, and
-			// what came before it belongs to the kernel that is gone.
-			LifecycleOffset: proto.StreamOffset(entry.LifecycleWindow.Written),
+			// THE LIFECYCLE STREAM RESUMES AT THE WINDOW'S BASE, NOT ITS
+			// HEAD. ADR-0076 decision 4: an end the helper saw while no
+			// coordinator was attached closes the block on return, and the
+			// helper's retained window is the only place that end exists.
+			// The frames are capability-stamped by the shell and the helper
+			// kept them because they authenticated; replaying them into the
+			// replacing kernel re-delivers events, not commands — the start
+			// of an entry that is already open is a ledger no-op, and the
+			// completion of a command that ran for the process before this
+			// one is the completion-only replay the kernel reconstructs
+			// under a synthetic id (ADR-0076). Asking for the head instead
+			// skips the whole retained record: every frame the shell spoke
+			// while nobody was attached is lost for good, and the entry a
+			// command left open stays open forever.
+			LifecycleOffset: 0,
 			LifecycleFresh:  true,
 			RequestWrite:    true,
 		})
