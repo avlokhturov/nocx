@@ -174,6 +174,14 @@ type Config struct {
 	// It carries provenance and nothing else: no part of Open reads it to
 	// decide what the session may do.
 	Parent Ref
+	// OpenedAt is the moment this session's pipe was really opened. A fresh
+	// open leaves it zero and the registry stamps the construction instant;
+	// a RE-ADOPTION carries the original across (the helper's session
+	// record, via the pending session's started-at), because a re-adopted
+	// session is THE SAME session -- a floor stamped at the adoption would
+	// hide every block recorded before the restart (nocx-zg3k3.5.3,
+	// REVIEW-1).
+	OpenedAt time.Time
 	// PaneID names the pane this session is the pipe of (design §6.1 and
 	// §7). Frontend-minted UUIDv7, validated and resolved by the transport
 	// BEFORE anything is spawned, and empty when this session is attached to
@@ -709,8 +717,14 @@ func (r *Reg) Adopt(ctx context.Context, cfg Config, id ID, ch Channel) (Session
 	if cfg.Remote != nil {
 		opts = sshOptionsFromConfig(cfg.Remote)
 	}
+	// The carried opened-at wins when a re-adoption supplies it; a fresh
+	// open is stamped here, at construction.
+	openedAt := time.Now()
+	if !cfg.OpenedAt.IsZero() {
+		openedAt = cfg.OpenedAt
+	}
 	s := &realSession{
-		id: id, openedAt: time.Now(), identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
+		id: id, openedAt: openedAt, identity: Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent: cfg.Parent, kind: cfg.Kind, host: cfg.Host, cwd: resolveSessionCwd(cfg.Cwd),
 		paneID: cfg.PaneID, profileID: cfg.ProfileID, credentialID: cfg.CredentialID,
 		sshOpts: opts, ch: ch, size: eff, log: r.log.WithContext(ctx).With("session_id", string(id)),
