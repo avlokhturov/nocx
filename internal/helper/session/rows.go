@@ -703,6 +703,7 @@ func (s *hostSession) resendFromScrollback() bool {
 	if mark >= d && stop <= mark {
 		return true
 	}
+	s.log.Debug("session row resend: walk", "session", s.id.Session, "mark", mark, "stop", stop, "departed", d, "ends", len(ends))
 	// Whatever the history cannot fill was pruned while the coordinator was
 	// away. The rows below the walk's reach are stated as the loss they
 	// are — the absence is the cause — and the survivors follow.
@@ -744,6 +745,7 @@ func (s *hostSession) resendFromScrollback() bool {
 			return false
 		}
 	}
+	s.log.Debug("session row resend: sent", "session", s.id.Session, "spans_end", prev, "rows", len(rows), "short", short)
 	s.rowMu.Lock()
 	s.resendEnds = nil
 	s.rowMu.Unlock()
