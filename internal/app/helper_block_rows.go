@@ -33,6 +33,10 @@ import (
 type blockRowsSink interface {
 	AttachBlockRows(sid session.ID)
 	DetachBlockRows(sid session.ID)
+	// HelperSessionEnded settles the session's streaming because THE
+	// HELPER reported the session's end (ADR-0076) — sealed, unlike the
+	// coordinator's own detach, which changes no block.
+	HelperSessionEnded(sid session.ID)
 	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool)
 	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row, noFence bool)
 	// BlockBoundaryLost settles the block a boundary would have closed when

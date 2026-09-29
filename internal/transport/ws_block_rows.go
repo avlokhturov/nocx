@@ -690,14 +690,20 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64
 // sealed with whatever arrived — the honest end when the interval's own end
 // never will. The composition root calls it where the session's helper
 // callbacks are torn down.
+// DetachBlockRows ends a session's streaming attachment: the coordinator is
+// going away, and per ADR-0076 that changes NO block — the open block, its
+// cursor and its open ledger entry stay exactly as they are in the store,
+// and the re-adopted stream continues them. Only the helper-reported end of
+// the session settles open blocks: HelperSessionEnded.
 func (s *WSServer) DetachBlockRows(sid session.ID) {
-	// The session's end is the event that settles every interval still open
-	// on it (ADR-0074 decision 3), and nothing after it can send block.closed
-	// — so it is said here, for each, or the renderer, which finishes a block
-	// on that notification alone, shows it running forever (nocx-2v80t.3.27).
-	//
-	// Owner: this stream, on behalf of the detached session.
-	// Closing event: the detach's own seals — nothing is held past them.
+	s.blockStream.detachCoordinator(sid)
+}
+
+// HelperSessionEnded settles a session's streaming because THE HELPER
+// REPORTED the session's end (ADR-0074 decision 3, as amended by ADR-0076):
+// every still-open block is sealed with whatever arrived and said closed —
+// the honest end when the interval's own end never will.
+func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	ctx := log.WithLogger(context.Background(), s.log)
 	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
@@ -707,6 +713,17 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 // detach forgets the session and seals what it held, and answers the
 // block.closed each still-unended interval is owed: every open block, and
 // every completion whose end marker never arrived.
+// detachCoordinator forgets the session's streaming attachment and nothing
+// else: the coordinator going away changes no block (ADR-0076). The open
+// blocks, their cursors (in the artifacts' payloads), and every parked fact
+// that still describes them stay exactly as they are; whatever re-adopts
+// the session continues them.
+func (bs *blockStream) detachCoordinator(sid session.ID) {
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	delete(bs.sources, sid)
+}
+
 func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid session.ID) []blockClosedParams {
 	bs.mu.Lock()
 	opens := bs.open[sid]

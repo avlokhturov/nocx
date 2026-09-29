@@ -196,6 +196,28 @@ describe('stored block rows', () => {
     )
   })
 
+  it('names rows lost while the server was unavailable as its own cause (nocx-zg3k3.5.3)', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, unavailableRows: 4, sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      "Output incomplete: 4 rows were lost while nocx's server was unavailable.",
+    )
+  })
+
+  it('says nothing about server unavailability when the store carries none', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(block, { ...stored, sealed: true }, { metric: null, palette: DEFAULT_SNAPSHOT })
+
+    expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+  })
+
   it('names the overflowed stream as its own cause', () => {
     const block = document.createElement('article')
 

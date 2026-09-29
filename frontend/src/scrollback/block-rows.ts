@@ -12,6 +12,12 @@ export interface StoredBlockRows {
   readonly lines: readonly LedgerBlockRowsLine[]
   readonly droppedRows: number
   readonly lostRows: number
+  /** Rows lost while nocx's server was unavailable: the terminal kept them
+   *  in its scrollback, but the server that stores blocks was away, and the
+   *  scrollback pruned them before it returned (ADR-0076 decision 3).
+   *  Optional so hand-built fixtures need not carry it; the store omits it
+   *  when zero. */
+  readonly unavailableRows?: number
   readonly truncated: 'cap' | 'gap' | 'suppressed' | null
   /** The artifact is sealed — its block can grow no more. Only a sealed
    *  read may say a block printed nothing: an open one may simply not have
@@ -79,6 +85,7 @@ export function parseStoredBlockRows(
     lines,
     droppedRows: nonNegativeInteger(payload.droppedRows),
     lostRows: nonNegativeInteger(payload.lostRows),
+    unavailableRows: nonNegativeInteger(payload.unavailableRows),
     truncated: metadata.truncated,
     sealed: metadata.state === 'sealed',
   }
@@ -176,6 +183,16 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
     count: (s) => s.lostRows,
     sentence: (n) =>
       `Output incomplete: ${n} rows left the terminal's scrollback before they could be captured; that output is lost.`,
+  },
+  {
+    // Rows lost while nocx's server was unavailable (ADR-0076 decision 3):
+    // the terminal kept them in its scrollback, but the server that stores
+    // blocks was away, and the scrollback pruned them before it returned.
+    // Distinct from the scrollback's own losses above: the server's absence
+    // is the cause, and it is not a limit a person can raise.
+    present: (s) => (s.unavailableRows ?? 0) > 0,
+    count: (s) => s.unavailableRows ?? 0,
+    sentence: (n) => `Output incomplete: ${n} rows were lost while nocx's server was unavailable.`,
   },
   {
     // The stream never arrived whole — its completion fence was never seen,

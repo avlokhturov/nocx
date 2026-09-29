@@ -296,7 +296,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
 	}
-	bindDownlinkToSession(sess, stopBlockRows)
+	bindBlockEndToSession(sess, attached, h.blockRows, session.ID(entry.HostSessionID.Session), stopBlockRows)
 	if stopDownlink != nil {
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists, and
 		// the delivery context ends when it does.
@@ -334,9 +334,37 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 // hangs off the existing edge rather than owning a lifetime of its own — two
 // owners of one lifetime being the defect whichever wins. One goroutine per
 // hosted pane, exactly like that monitor; it exits at the session's end.
+// bindDownlinkToSession ends a completion downlink's delivery context when
+// the hosted session's own lifetime ends. sess.Done() is the signal the
+// transport's teardown owner already waits on (monitorExit), so the downlink
+// hangs off the existing edge rather than owning a lifetime of its own — two
+// owners of one lifetime being the defect whichever wins. One goroutine per
+// hosted pane, exactly like that monitor; it exits at the session's end.
 func bindDownlinkToSession(sess session.Session, stop context.CancelFunc) {
 	go func() {
 		<-sess.Done()
+		stop()
+	}()
+}
+
+// bindBlockEndToSession ends a hosted session's block-rows streaming when
+// the session's own lifetime ends. sess.Done() is the helper-reported end
+// of the shell (the same edge monitorExit waits on), so the block the
+// helper still holds open settles HERE — the one detach that seals
+// (ADR-0076) — and the coordinator-side teardown afterwards changes no
+// block. One goroutine per hosted pane, exactly like monitorExit; it exits
+// at the session's end.
+func bindBlockEndToSession(sess session.Session, attached *helperclient.AttachedSession, sink blockRowsSink, sid session.ID, stop context.CancelFunc) {
+	go func() {
+		<-sess.Done()
+		// sess.Done fires on coordinator wire loss too; only the HELPER'S
+		// OWN exit report (recordExit, the status monitorExit reads) is
+		// the session's end as the helper states it (ADR-0076). A wire
+		// loss seals nothing: the open block and its cursor survive for
+		// whichever coordinator re-adopts the session.
+		if _, reported := attached.WaitErr(); reported {
+			sink.HelperSessionEnded(sid)
+		}
 		stop()
 	}()
 }

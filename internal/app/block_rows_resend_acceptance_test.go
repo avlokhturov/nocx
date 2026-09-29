@@ -162,6 +162,7 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	// the item read, which takes the entry directly.
 	deadline := time.Now().Add(30 * time.Second)
 	var itemID string
+	var settledStatus string
 	for {
 		resp := callAppWS(t, conn, "history.query", map[string]any{
 			"scope": "everywhere", "text": "resend-release", "limit": 50,
@@ -185,6 +186,7 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 		// are the acceptance's subject.
 		if len(q.Entries) == 1 && q.Entries[0].Status != "running" {
 			itemID = q.Entries[0].ID
+			settledStatus = q.Entries[0].Status
 			break
 		}
 		if time.Now().After(deadline) {
@@ -198,20 +200,36 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	}
 	lines := strings.Split(strings.TrimSuffix(read.Text, "\n"), "\n")
 	// THE BLOCK HOLDS THE COMMAND'S WHOLE OUTPUT: three hundred rows, in
-	// order, every one of which departed while the coordinator was away
-	// and every one of which arrived by the resend.
+	// order. The coordinator went away mid-command and changed nothing --
+	// the first root's rows stayed stored, the second root's resend and
+	// live stream continued the same open block, and the helper's own end
+	// report settled it (ADR-0076).
 	//
-	// THE BLOCKED STEP, and only this one: a re-adopted session's attempt
-	// is settled unknown at re-adoption -- the lane's transport to the
-	// previous coordinator died with it -- and the sealed block takes the
-	// command's post-restart rows with it: they are rows of no block, and
-	// the block seals at whatever the resend had carried. Until the
-	// lifecycle carries an attempt (or at least its open block) across a
-	// coordinator restart, the tail after the restart is orphaned by
-	// construction and this assertion cannot hold. When attempt survival
-	// lands, the skip stops firing and the 300-row assertion runs.
+	// THE REMAINING SEAM (REPORT.md, "The remaining seam"): the lane is
+	// Desynchronized until the shell's post-command prompt, so the
+	// command's post-restart rows are dropped as rows of no block before
+	// establishment can open anything. Until the lifecycle owner decides
+	// how establishment treats a mid-flight attempt on a re-adopted lane,
+	// this assertion cannot hold; the skip fires only on the exact
+	// observed signature and fails on anything else.
+	orderedPrefix := true
+	for i, line := range lines {
+		if want := fmt.Sprintf("R%d", i+1); line != want {
+			orderedPrefix = false
+			break
+		}
+	}
+	// The exact observed desync signature: the entry settled unknown and
+	// the block holds the ordered prefix that departed before the restart.
+	// Any other count, order, or end state is a different defect and
+	// fails. When establishment keeps a mid-flight attempt on a
+	// re-adopted lane open, this skip stops firing and the 300-row
+	// assertion below runs.
+	if settledStatus == "unknown" && len(lines) > 0 && len(lines) < 300 && orderedPrefix {
+		t.Skipf("the post-restart tail is quarantined by lane desync (establishment awaits the shell's post-command prompt): the block holds the %d-row pre-restart prefix with an unknown end, want 300 once establishment keeps a mid-flight attempt open", len(lines))
+	}
 	if len(lines) != 300 {
-		t.Skipf("the re-adopted attempt is sealed unknown at re-adoption, orphaning the command's post-restart tail: the block holds %d rows, want 300 (the lifecycle attempt-survival seam)", len(lines))
+		t.Fatalf("the block holds %d rows (status %q), want the command's whole output of 300", len(lines), settledStatus)
 	}
 	for i, line := range lines {
 		if want := fmt.Sprintf("R%d", i+1); line != want {

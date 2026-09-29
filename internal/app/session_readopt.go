@@ -763,7 +763,7 @@ func (rp *readoptPass) readopt(
 		// THE SESSION IS THE LIFETIME'S OWNER from here: the pane exists
 		// again, and the downlink the adoption built ends when it does.
 		adoption.endWithSession(sess)
-		bindDownlinkToSession(sess, stopBlockRows)
+		bindBlockEndToSession(sess, attached, rp.blockRows, sid, stopBlockRows)
 		// THE FINGERPRINT IS RECORDED HERE TOO, exactly as a fresh open
 		// records it (helper_git.go's openFarHelper, helper_local.go's
 		// OpenHosted) — and it must be, because a re-adopted session's own
