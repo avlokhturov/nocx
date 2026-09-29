@@ -188,7 +188,9 @@ describe('stored block rows', () => {
     // hundreds of rows — the emulator's ABI cannot count what a prune
     // took), and any rows a helper drop states into the same field would
     // be exact rows. No reader can tell which, so the card claims
-    // LOSSES, never a row count (nocx-zg3k3.5.9).
+    // LOSSES, never a row count (nocx-zg3k3.5.9). The tail stays
+    // source-neutral: the same stored field is documented to carry exact
+    // helper-drop rows too, so no producer is named as the limitation.
     const block = document.createElement('article')
 
     paintStoredRows(
@@ -198,7 +200,7 @@ describe('stored block rows', () => {
     )
 
     expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
-      'Output incomplete: output was lost 2 times before it could be captured; the terminal does not report how many rows each loss took.',
+      'Output incomplete: output was lost 2 times before it could be captured; this count is not a row count.',
     )
   })
 
@@ -215,7 +217,7 @@ describe('stored block rows', () => {
 
     const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
     expect(text).toBe(
-      'Output incomplete: output was lost once before it could be captured; the terminal does not report how many rows each loss took.',
+      'Output incomplete: output was lost once before it could be captured; this count is not a row count.',
     )
     expect(text).not.toContain('1 row')
   })

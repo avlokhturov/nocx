@@ -176,13 +176,15 @@ const MISSING_ROW_CAUSES: readonly RowsMissingCause[] = [
     // the wire contract also lets a helper's own dropped rows ride the
     // same field as exact rows (internal/helper/proto/rows_frame.go). No
     // reader can tell which produced the number, so the sentence claims
-    // LOSSES, never a row count (nocx-zg3k3.5.9). Not the cap's doing
-    // (deriveBlockRowsDropped subtracts loss before its verdict): raising
-    // a limit recovers none of these.
+    // LOSSES, never a row count (nocx-zg3k3.5.9). The tail stays
+    // source-neutral: the same stored field is documented to carry exact
+    // helper-drop rows too, so no producer is named as the limitation.
+    // Not the cap's doing (deriveBlockRowsDropped subtracts loss before
+    // its verdict): raising a limit recovers none of these.
     present: (s) => s.lostRows > 0,
     count: (s) => s.lostRows,
     sentence: (n) =>
-      `Output incomplete: output was lost ${n === 1 ? 'once' : `${n} times`} before it could be captured; the terminal does not report how many rows each loss took.`,
+      `Output incomplete: output was lost ${n === 1 ? 'once' : `${n} times`} before it could be captured; this count is not a row count.`,
   },
   {
     // The stream never arrived whole — its completion fence was never seen,
