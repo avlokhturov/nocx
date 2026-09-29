@@ -1085,7 +1085,15 @@ function isOutputEmpty(html: string): boolean {
  */
 export function blockOutputText(blockEl: HTMLElement | null): string {
   if (!blockEl) return ''
-  const outputEl = blockEl.querySelector('.cmd-output')
+  // A block whose stored rows could not be painted still says WHY on an
+  // incomplete notice (paintStoredRows); with no output container that
+  // notice IS the output, so the model read and Copy keep seeing it rather
+  // than an empty string (nocx-2v80t.3.27's separation, kept by this
+  // fallback). The empty-output statement is deliberately not read: a
+  // command that printed nothing answers ''.
+  const outputEl =
+    blockEl.querySelector<HTMLElement>('.cmd-output') ??
+    blockEl.querySelector<HTMLElement>('[data-output-incomplete]')
   if (!outputEl) return ''
   const lines = outputEl.querySelectorAll('.term-line, .term-grid-row')
   if (lines.length === 0) return outputEl.textContent ?? ''
