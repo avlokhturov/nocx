@@ -838,7 +838,10 @@ stop that loop.
   done". Stopping means setting it back to `open` in the same minute, because an unheld bead
   sitting in `in_progress` is invisible to `br ready` and to every colleague looking for
   work. A bead once sat held with its work already shipped and named in the tree, and a
-  worker re-derived that entire surface before noticing it existed.
+  worker re-derived that entire surface before noticing it existed. Work handed in and
+  waiting is not held either: it has its own status, `submitted` (awaiting merge) or
+  `implemented` (merged, awaiting stage acceptance), which `br` refuses to set without the
+  record — see `docs/agents/backlog.md`, "Submitted and implemented".
 
 - **An epic's own timestamp is not its liveness**, because an epic does not move when its
   children do. Ask the children before believing it:

@@ -16,9 +16,8 @@
  *
  * MAPPING, and the places it is not mechanical:
  *
- *   status  open -> open · deferred -> deferred · closed -> closed.
- *           in_progress -> active, UNLESS the latest execution marker among
- *           its comments says otherwise (below).
+ *   status  open -> open · in_progress -> active · deferred -> deferred ·
+ *           closed -> closed · submitted -> submitted · implemented -> implemented.
  *           blocked -> open: older exports stored the computed "blocked"
  *           status, and it still reaches us through --at on an old revision;
  *           blockedBy carries the same fact.
@@ -33,17 +32,18 @@
  *           is how three brainstorms were rescued into the work queue.
  *   holder  the assignee, or null. A released leaf has its assignee cleared.
  *
- * SUBMITTED AND IMPLEMENTED. Beads has neither status, and AGENTS.md forbids a
- * label that restates a field, so they are comments with a fixed first word,
- * on an issue that stays in_progress (which keeps it out of `br ready`):
+ * SUBMITTED AND IMPLEMENTED are br statuses, declared in .beads/policy.yaml,
+ * which also makes br refuse a transition into either without a comment
+ * written in the same transaction. That comment carries the record:
  *
  *   submitted: <revision> -- <local-check evidence>
  *   implemented: <revision> -- <related-check evidence>
- *   reopened: <why>
  *
- * The LATEST of these on an in_progress issue decides. `reopened` cancels an
- * earlier marker, so the issue is active again. On any other status the
- * markers are history and read as nothing.
+ * The LATEST comment of the issue's own status's kind is its record. One
+ * without both halves, or none at all, still passes the status through with an
+ * empty record, so the gate's *-without-evidence check can report it. On any
+ * other status these comments are history and read as nothing: a reopen is a
+ * status change, not a comment.
  *
  * WORK RECORDS. A comment whose text starts with `[shady2k-time` is a claim or
  * time record printed by the set's run script. Every one goes out RAW and
@@ -68,10 +68,12 @@ const STATUS = {
   open: 'open',
   blocked: 'open',
   in_progress: 'active',
+  submitted: 'submitted',
+  implemented: 'implemented',
   deferred: 'deferred',
   closed: 'closed',
 }
-const MARKER = /^(submitted|implemented|reopened):\s*(.*)$/s
+const MARKER = /^(submitted|implemented):\s*(.*)$/s
 const RECORD = /^(\S+)\s+--\s+(\S[\s\S]*)$/
 const WORK_RECORD = '[shady2k-time'
 
@@ -81,8 +83,9 @@ export function workRecords(comments) {
     .map((c) => ({ id: String(c.id), at: c.created_at, author: c.author, body: c.text }))
 }
 
-// The latest execution marker's status and its record, or null for none.
-export function execution(comments) {
+// The record of the latest `<kind>:` comment, or an empty one where there is
+// none or it lacks a half.
+export function record(comments, kind) {
   let last = null
   // Oldest first by the tracker's own clock, then its id, whatever order the
   // export happens to write them in: "latest" must not depend on that.
@@ -91,37 +94,22 @@ export function execution(comments) {
   )
   for (const c of ordered) {
     const m = MARKER.exec((c.text || '').trim())
-    if (m) last = m
+    if (m && m[1] === kind) last = m[2]
   }
-  if (!last || last[1] === 'reopened') return null
-  const r = RECORD.exec(last[2].trim())
-  // A marker without both halves still decides the status: the gate's own
-  // *-without-evidence check is what reports it, and it can only do that if
-  // the status reaches it.
-  return {
-    status: last[1],
-    record: { revision: r ? r[1] : '', evidence: r ? r[2].trim() : '' },
-  }
+  const r = last === null ? null : RECORD.exec(last.trim())
+  return { revision: r ? r[1] : '', evidence: r ? r[2].trim() : '' }
 }
 
 export function normalize(rows) {
   const issues = []
   for (const r of rows) {
     if (r.status === 'tombstone') continue
-    let status = STATUS[r.status]
+    const status = STATUS[r.status]
     if (!status) {
       throw new Error(`${r.id} has the beads status "${r.status}", which this adapter does not map`)
     }
-    let delivery
-    let integration
-    if (r.status === 'in_progress') {
-      const ex = execution(r.comments)
-      if (ex) {
-        status = ex.status
-        if (ex.status === 'submitted') delivery = ex.record
-        else integration = ex.record
-      }
-    }
+    const delivery = status === 'submitted' ? record(r.comments, 'submitted') : undefined
+    const integration = status === 'implemented' ? record(r.comments, 'implemented') : undefined
     let parent = null
     const blockedBy = []
     for (const d of r.dependencies || []) {
