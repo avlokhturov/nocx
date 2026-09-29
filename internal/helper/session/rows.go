@@ -600,6 +600,27 @@ type droppedEnd struct {
 // that was away for the whole span the scrollback could answer for anyway.
 const maxResendEnds = 64
 
+// resendRuntime is the runtime seam the resend's scrollback walk reads
+// through: the session's departed-row count and the scrollback the walk
+// measures with it, answered as ONE read. The seam exists because those
+// are one fact — the count names the rows the walk is about to read — and
+// nocx-zg3k3.5.10 holds the walk to it: production answers with the
+// runtime's own single lock, and the tests' probe arms a departure at
+// this seam to keep the invariant honest.
+type resendRuntime interface {
+	ReadDepartedScreen(read func(departed uint64, t emulator.Terminal) error) (sessionruntime.Revision, sessionruntime.Completeness, error)
+}
+
+// resender answers the seam the resend reads through. Spawn wires the
+// session's own runtime; a fixture that never resends may leave the
+// field nil, and the runtime answers.
+func (s *hostSession) resender() resendRuntime {
+	if s.resendRT != nil {
+		return s.resendRT
+	}
+	return s.runtime
+}
+
 // resendFromScrollback delivers, to every subscriber bound now, what the
 // stream dropped for want of a subscriber: the rows of [mark, D) read back
 // out of ghostty's scrollback at the absolute indices they departed under,
@@ -609,11 +630,12 @@ const maxResendEnds = 64
 // then — a send that failed leaves the work queued for the next wake, the
 // same retry shape the pump's ordinary deliveries take.
 //
-// The read is one instant: the runtime lock spans it, so the page the walk
-// reads and the departure count it is measured against cannot disagree. A
-// span the history cannot fill was pruned before the coordinator could come
-// back for it — the shortfall is stated as a loss at the position it
-// happened, and the rows that survive follow it.
+// The count and the read are ONE acquisition of the runtime lock
+// (nocx-zg3k3.5.10): the page the walk reads and the departure count it is
+// measured against cannot disagree. A span the history cannot fill was
+// pruned before the coordinator could come back for it — the shortfall is
+// stated as a loss at the position it happened, and the rows that survive
+// follow it.
 func (s *hostSession) resendFromScrollback() bool {
 	s.mu.Lock()
 	mark := s.rowsConfirmed
@@ -633,7 +655,6 @@ func (s *hostSession) resendFromScrollback() bool {
 	s.rowMu.Lock()
 	ends := append([]droppedEnd(nil), s.resendEnds...)
 	s.rowMu.Unlock()
-	d := s.runtime.DepartedRowCount()
 	// The walked span stops at the newest dropped boundary. That boundary's
 	// own closing screen departs after it — suppressed, unindexed — and
 	// sits in the history between the rows below and the rows above, at a
@@ -647,16 +668,20 @@ func (s *hostSession) resendFromScrollback() bool {
 			stop = e.endRow
 		}
 	}
-	if mark >= d && stop <= mark {
-		return true
-	}
-	// The provable span's rows, oldest first, as the scrollback holds them.
+	// One snapshot: the departed count and the scrollback rows are read
+	// under one runtime lock acquisition (nocx-zg3k3.5.10). The two-read
+	// shape this replaces took the count and the screen in separate
+	// acquisitions, and rows departing between them shifted the window:
+	// the walk labelled the newest rows with the oldest indices — the
+	// span's head lost, the same rows duplicated at their next delivery.
+	var d uint64
 	var rows []emulator.Row
-	_, _, err := s.runtime.ReadScreen(func(t emulator.Terminal) error {
+	_, _, err := s.resender().ReadDepartedScreen(func(departed uint64, t emulator.Terminal) error {
 		page, err := t.HistoryRows(0, 0)
 		if err != nil {
 			return err
 		}
+		d = departed
 		count := d - stop
 		start := 0
 		if uint64(page.Total) > count { //nolint:gosec // a row count, not a byte count
@@ -672,6 +697,11 @@ func (s *hostSession) resendFromScrollback() bool {
 	if err != nil {
 		s.log.Warn("session row resend: the scrollback could not be read", "session", s.id.Session, "err", err)
 		return false
+	}
+	// The empty walk, decided on the snapshot's own count: nothing
+	// unconfirmed above the mark and no dropped end above it.
+	if mark >= d && stop <= mark {
+		return true
 	}
 	// Whatever the history cannot fill was pruned while the coordinator was
 	// away. The rows below the walk's reach are stated as the loss they

@@ -119,10 +119,15 @@ func TestRealRegistry_CloseRunsTheLifecycleDetachBeforeTheChannelCloses(t *testi
 		t.Fatalf("Open: %v", err)
 	}
 
-	var order []string
+	// Both events arrive on one buffered channel: the channel's own
+	// synchronization is the race fix (nocx-zg3k3.5.10), the buffer
+	// preserves the order the events fired in, and the receives below
+	// wait on the events themselves — no shared slice, no poll, no
+	// sleep, no deadline.
+	events := make(chan string, 2)
 	armed := false
 	if d, ok := sess.(interface{ SetLifecycleDetach(func()) }); ok {
-		d.SetLifecycleDetach(func() { order = append(order, "detach") })
+		d.SetLifecycleDetach(func() { events <- "detach" })
 		armed = true
 	}
 	if !armed {
@@ -132,25 +137,19 @@ func TestRealRegistry_CloseRunsTheLifecycleDetachBeforeTheChannelCloses(t *testi
 	// through Done, which Close is what fires.
 	go func() {
 		<-sess.Done()
-		order = append(order, "channel") //nolint:staticcheck // appended under the test's own sequencing
+		events <- "channel"
 	}()
 
 	err = reg.Close(sess.ID())
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if len(order) == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("close sequence = %v, want detach then channel", order)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	if order[0] != "detach" {
-		t.Fatalf("close sequence = %v, want the detach before the channel close", order)
+	// The detach runs inside Close and Done closes inside it, so both
+	// sends are already in flight when it returns; the receives block on
+	// the real events and answer in fire order.
+	e1, e2 := <-events, <-events
+	if e1 != "detach" || e2 != "channel" {
+		t.Fatalf("close sequence = [%s, %s], want detach then channel", e1, e2)
 	}
 
 	// The un-armed sibling: a session with no lifecycle leg closes plainly.
