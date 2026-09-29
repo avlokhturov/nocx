@@ -691,7 +691,24 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	if c.AttemptID != nil {
 		named, ok := k.attempts[*c.AttemptID]
 		if !ok {
-			return nil, ErrAttemptNotOpen
+			// A completion naming an attempt this kernel never saw is the
+			// retained window's replay of a command that ran for the
+			// coordinator BEFORE this one: the shell is the only witness
+			// its old attempt ever had, and the frame carries the same
+			// authenticated capability the live commands do. On an adopted
+			// domain the attempt is reconstructed from that word and
+			// completed below, so the lane fact closes the ledger row the
+			// previous coordinator opened under the same id and resolves
+			// the interval end the helper resent (ADR-0076). The lane is
+			// set Running with the attempt named, which is what carries
+			// the terminal fact — a completion never changes the lane
+			// state itself. A kernel-native domain keeps the foreign-id
+			// refusal: an id it neither minted nor adopted names nothing.
+			if !d.adopted {
+				return nil, ErrAttemptNotOpen
+			}
+			named = k.createAttempt(d, *c.AttemptID, OriginShell, true, "", "", "", k.now())
+			k.setLifecycle(ls, LifecycleRunning, d.ID, named.ID)
 		}
 		if named.Domain != d.ID {
 			return nil, ErrAttemptDomainMismatch
@@ -702,7 +719,22 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 		att = named
 	}
 	if att == nil {
-		return nil, ErrAttemptNotOpen
+		// The shell's own complete frame names no attempt id (the kernel
+		// resolves the domain's single open attempt), so a completion-only
+		// replay of a command that ran for the coordinator BEFORE this one
+		// arrives unnamed on an adopted domain with no open attempt to
+		// resolve. The attempt is reconstructed under a synthetic id — the
+		// real id lives in the previous coordinator's ledger, which the
+		// transport resolves when the fact closes the row — and completed
+		// below with the frame's authenticated fence and exit (ADR-0076).
+		// A kernel-native domain keeps the refusal: an unnamed completion
+		// with no open attempt says nothing this kernel can hear.
+		if !d.adopted {
+			return nil, ErrAttemptNotOpen
+		}
+		att = k.createAttempt(d, AttemptID("adopted-complete/"+string(d.ID)+"/"+strconv.FormatUint(env.Sequence, 10)),
+			OriginShell, true, "", "", "", k.now())
+		k.setLifecycle(ls, LifecycleRunning, d.ID, att.ID)
 	}
 	if !att.Started {
 		return nil, ErrAttemptNotStarted
@@ -1421,6 +1453,7 @@ func (k *Kernel) AdoptDomain(lane LaneID, id DomainID, epoch uint64, capability 
 		State:      DomainEstablished,
 		capability: capability,
 		recovery:   recovery,
+		adopted:    true,
 	}
 	k.registry.Register(d)
 	// The adopted epoch came from another process's counter. Lifting ours
