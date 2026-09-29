@@ -650,6 +650,7 @@ func (s *hostSession) resendFromScrollback() bool {
 	if mark >= d && stop <= mark {
 		return true
 	}
+	s.log.Debug("session row resend: walk", "session", s.id.Session, "mark", mark, "stop", stop, "departed", d, "ends", len(ends))
 	// The provable span's rows, oldest first, as the scrollback holds them.
 	var rows []emulator.Row
 	_, _, err := s.runtime.ReadScreen(func(t emulator.Terminal) error {
@@ -714,6 +715,7 @@ func (s *hostSession) resendFromScrollback() bool {
 			return false
 		}
 	}
+	s.log.Debug("session row resend: sent", "session", s.id.Session, "spans_end", prev, "rows", len(rows), "short", short)
 	s.rowMu.Lock()
 	s.resendEnds = nil
 	s.rowMu.Unlock()
