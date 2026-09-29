@@ -1041,6 +1041,17 @@ func (s *hostSession) detach(sink Sink, att proto.AttachmentID) (bool, bool) {
 	}
 	sub := s.subs[entry.subscriber]
 	delete(s.subs, entry.subscriber)
+	// The departing reader may have taken rows above the confirmed mark —
+	// it went away without confirming, exactly what a coordinator's death
+	// does to its last in-flight window. The mark is the only dedup line
+	// there is, so the next attach owes a read-back from it: arm the
+	// resend unconditionally (an empty span reads back nothing). Set
+	// under rowMu because the pump owns the flag everywhere else, and
+	// wake the pump so a quiet queue still reaches the check.
+	s.rowMu.Lock()
+	s.resendDue = true
+	s.rowMu.Unlock()
+	s.wakeRows()
 	s.mu.Unlock()
 
 	s.stopSubscriber(sub)

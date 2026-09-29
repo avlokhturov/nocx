@@ -126,6 +126,80 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 	}
 }
 
+// The detach shape the acceptance's first half rides (nocx-zg3k3.5.3):
+// the coordinator TOOK the rows — the pump delivered them, delivered=true,
+// no drop, no resendDue — and went away without confirming. The pump's own
+// bookkeeping is the only witness (the confirmed mark is behind what the
+// pump handed out), and the next attach must read the scrollback back from
+// the mark, or the taken rows are silently gone: never re-sent, never
+// counted. Ordered events, no load.
+func TestThePumpResendsRowsAnUnconfirmingReaderTook(t *testing.T) {
+	hs, rt, sink := rowsBridgeSession(t, 80, 24)
+
+	// Forty lines: sixteen depart; the pump delivers every one; the reader
+	// confirms nothing.
+	rowsFeed(t, rt, 0, 40)
+	sink.waitFor(1, 0, 0)
+
+	// The reader goes away the way a coordinator's death does — through
+	// the session's own detach, with the teardown a real subscriber
+	// carries. The pump delivered every row above the mark.
+	done := make(chan struct{})
+	lifecycleDone := make(chan struct{})
+	close(done)
+	close(lifecycleDone)
+	hs.mu.Lock()
+	hs.attachments = make(map[proto.AttachmentID]*attachment)
+	hs.subs["coord-1"].stop = func() {}
+	hs.subs["coord-1"].done = done
+	hs.subs["coord-1"].lifecycleDone = lifecycleDone
+	hs.subs["coord-1"].wake = newGate()
+	hs.subs["coord-1"].lifecycleWake = newGate()
+	att := proto.AttachmentID("att-test")
+	hs.attachments[att] = &attachment{id: att, subscriber: "coord-1", sink: sink}
+	hs.mu.Unlock()
+	if _, ok := hs.detach(sink, att); !ok {
+		t.Fatal("the detach did not find the reader it was given")
+	}
+
+	// The coordinator comes back.
+	sink2 := newRowsSink()
+	hs.mu.Lock()
+	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
+	hs.mu.Unlock()
+	hs.wakeRows()
+
+	// The sixteen taken rows are read back from the scrollback: the mark
+	// never moved, and it is the only dedup line there is.
+	sink2.waitFor(1, 0, 0)
+	batches := decodeResentRows(t, sink2.rowFrames())
+	var got []string
+	for i, b := range batches {
+		wantFrom := uint64(0)
+		if i > 0 {
+			wantFrom = batches[i-1].from + uint64(len(batches[i-1].texts))
+		}
+		if b.from != wantFrom {
+			t.Fatalf("resend batch %d names FromRow %d, want %d", i, b.from, wantFrom)
+		}
+		if b.lost != 0 {
+			t.Fatalf("resend batch %d claims %d lost: taken rows are not lost rows", i, b.lost)
+		}
+		got = append(got, b.texts...)
+	}
+	// The count rides the scrollback's own trailing-newline scroll (the
+	// sibling test pins it by hand); what the invariant needs is that the
+	// rows the reader took came back first, in order, content intact.
+	if len(got) < 16 {
+		t.Fatalf("the resent rows are %d, want at least the sixteen the unconfirming reader took", len(got))
+	}
+	for i, text := range got {
+		if want := fmt.Sprintf("L%06d", i); text != want {
+			t.Fatalf("resent row %d = %q, want %q — the taken rows must come back in stream order", i, text, want)
+		}
+	}
+}
+
 // The acceptance's third criterion (nocx-zg3k3.5.3): a command whose end
 // marker arrived while the coordinator was away is closed when the
 // coordinator returns. The pump dropped the marker for want of a reader;

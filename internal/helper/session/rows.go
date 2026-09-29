@@ -525,9 +525,14 @@ func (s *hostSession) serveRows() {
 		// resent rows are older than everything the bridge holds. During a
 		// shutdown drain the resend is pointless — the reader is going
 		// away, and the next one attaches a pump of its own.
-		if s.resendDue && !s.drainRequested() {
+		s.rowMu.Lock()
+		resendDue := s.resendDue
+		s.rowMu.Unlock()
+		if resendDue && !s.drainRequested() {
 			if s.resendFromScrollback() {
+				s.rowMu.Lock()
 				s.resendDue = false
+				s.rowMu.Unlock()
 			}
 		}
 		em, ok := s.dequeueRowEmission()
@@ -564,14 +569,18 @@ func (s *hostSession) serveRows() {
 			// coordinator's return owes its marker however the drop
 			// happened.
 			s.countRowLossOnce(em)
+			s.rowMu.Lock()
 			s.resendDue = true
+			s.rowMu.Unlock()
 			s.keepDroppedEnd(em)
 		} else if !delivered {
 			// Nobody took it: the scrollback is the buffer, and the
 			// coordinator's return owes a read-back (nocx-zg3k3.5.3). An
 			// end is kept by name — the boundary's own identity — so the
 			// return can be handed the marker again.
+			s.rowMu.Lock()
 			s.resendDue = true
+			s.rowMu.Unlock()
 			s.keepDroppedEnd(em)
 		}
 	}
