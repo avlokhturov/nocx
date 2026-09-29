@@ -804,6 +804,12 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	// detach seals the block's artifact, and the read below keys on the
 	// artifact being open.
 	openEntry := ""
+	if bsStore := s.blockStore(); bsStore != nil {
+		if open, openErr := bsStore.OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
+			s.log.Debug("helper session end: an open block will be sealed at its stored cursor",
+				"session", sid, "entry", open.EntryID)
+		}
+	}
 	if store := s.blockStore(); store != nil {
 		if open, err := store.OpenBlockRowsForSession(ctx, string(sid)); err == nil {
 			openEntry = open.EntryID
@@ -2015,6 +2021,8 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		}
 		return false
 	}
+	s.log.Debug("interval end sealed the block", "session", sid, "entry", block.entry,
+		"cursor", block.rows, "endRow", endRow)
 	// The block owns its own departed rows: [begin, endRow). Its closing
 	// screen is appended after everything the artifact actually holds —
 	// at [endRow, endRow+len(closing)) when the interval's rows all reached

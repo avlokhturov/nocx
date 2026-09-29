@@ -251,7 +251,7 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	// resend and the live stream appended behind its cursor, and the
 	// helper's own end report settled it.
 	if len(lines) != 300 {
-		t.Fatalf("the block holds %d rows (status %q), want the command's whole output of 300", len(lines), settledStatus)
+		t.Fatalf("the block holds %d rows (status %q) spanning %q..%q, want the command's whole output of 300", len(lines), settledStatus, lines[0], lines[len(lines)-1])
 	}
 	for i, line := range lines {
 		if want := fmt.Sprintf("R%d", i+1); line != want {
