@@ -12,14 +12,14 @@ import (
 // The streamed block output's helper half (nocx-2v80t.3.6): rows leave the
 // runtime as they leave the screen, handed once each, in order, to the
 // session's row stream; the interval's end marker follows its rows on the
-// same ordered stream. The runtime keeps NO copy of departed rows — the
-// record keeps boundaries, counts and the closing screen only — because the
+// same ordered stream. The runtime keeps NO copy of departed rows at all —
+// and no sealed record either (nocx-zg3k3.5.4) — because the
 // owner's decision gives the helper no second buffer: ghostty's own
 // scrollback is the store (nocx-2v80t.3.4's decisions, 2026-09-23).
 //
 // Every test here runs over the real emulator (libghostty-vt behind its
-// port) with the harness terminal, the way the observation record's tests
-// do: the test controls every ingest, and nothing waits on a duration.
+// port) with the harness terminal, the way the interval tests do: the test
+// controls every ingest, and nothing waits on a duration.
 
 // rowEvent is one emission in stream order: a row batch or an interval's
 // end marker. One slice, because the order between the two kinds is the
@@ -74,8 +74,8 @@ func streamSession(t *testing.T, g Geometry) (*Session, *recordingRowStream) {
 	return s, rs
 }
 
-// streamRowText reads one streamed row's text the way the record's reader
-// does: the graphemes that carry text, trailing blanks dropped.
+// streamRowText reads one streamed row's text: the graphemes that carry
+// text, trailing blanks dropped.
 func streamRowText(r emulator.Row) string {
 	var sb strings.Builder
 	for _, c := range r.Cells {
@@ -280,17 +280,8 @@ func TestDepartedRowsStreamOnceInOrderBeforeTheEnd(t *testing.T) {
 		t.Fatalf("the closing screen ends at %q, want L000029", last)
 	}
 
-	// The record itself holds no departed rows: the stream took them as they
-	// left. Reading the record back names boundaries, counts, screens.
-	rec, ok := s.ObservationFor(obsNonce(1))
-	if !ok {
-		t.Fatal("the interval sealed no record")
-	}
-	if rec.Completeness != CompletenessComplete {
-		t.Fatalf("an ordinary streamed interval reads back %v, want complete", rec.Completeness)
-	}
-	if len(rec.Closing.Lines) != 24 {
-		t.Fatalf("the record's closing screen is %d rows, want 24", len(rec.Closing.Lines))
+	if end.noFence {
+		t.Fatal("an ordinary streamed interval's end marker claims its fence never arrived")
 	}
 }
 
