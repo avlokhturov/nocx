@@ -198,6 +198,47 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	if settledStatus != "success" {
 		t.Fatalf("the command settled %q, want success: the completion is carried across the restart", settledStatus)
 	}
+	// The entry closes the instant the completion lands; the tail rows'
+	// appends are still in flight behind the same single-writer store. The
+	// observable that says no more rows are coming is the artifact's seal
+	// — the resent end marker, wire-ordered after every row — or the count
+	// reaching the command's whole output. Count only after one of them.
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		read, readErr := a2.Transport.ReadSessionItem(ctx, string(p.sess.ID()), itemID, 0, 400)
+		if readErr != nil {
+			t.Fatalf("ReadSessionItem after the restart: %v", readErr)
+		}
+		if read.Total >= 300 {
+			break
+		}
+		got := callAppWS(t, conn2, "ledger.get", map[string]any{"id": itemID}, 8)
+		if got.Error != nil {
+			t.Fatalf("ledger.get: %+v", got.Error)
+		}
+		var probe struct {
+			Artifacts []struct {
+				MediaType string `json:"mediaType"`
+				State     string `json:"state"`
+			} `json:"artifacts"`
+		}
+		if unmarshalErr := json.Unmarshal(got.Result, &probe); unmarshalErr != nil {
+			t.Fatalf("decode ledger.get: %v (raw %s)", unmarshalErr, got.Result)
+		}
+		sealed := false
+		for _, art := range probe.Artifacts {
+			if art.MediaType == string(content.MediaBlockRows) && art.State == "sealed" {
+				sealed = true
+			}
+		}
+		if sealed {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the block never finished draining: %d rows, artifact unsealed", read.Total)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 	read, err := a2.Transport.ReadSessionItem(ctx, string(p.sess.ID()), itemID, 0, 400)
 	if err != nil {
 		t.Fatalf("ReadSessionItem after the restart: %v", err)
