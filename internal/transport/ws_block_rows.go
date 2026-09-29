@@ -460,6 +460,14 @@ type openBlock struct {
 	// rather than where the interval's index says it should be
 	// (nocx-2v80t.3.9). Guarded by blockStream.mu.
 	rows uint64
+	// floor is the absolute index the artifact's stored span begins at —
+	// the store's FirstRow, read at the re-bind. The stored span is
+	// [floor, rows): a delivery reaching below the floor is the block's
+	// own head (rows that departed before its open, offered again by the
+	// resend, nocx-zg3k3.5.3 Round 8) and goes back to the store as a
+	// prepend; the trim and every confirmation cover [floor, rows) and
+	// never a span the artifact does not hold. Guarded by blockStream.mu.
+	floor uint64
 	// settled is whether this block has been said closed — by its own end,
 	// a lost boundary or the session's detach, whichever came first. The
 	// one that sets it seals and says block.closed; any other finds it set
@@ -711,6 +719,9 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 	}
 	if b.rows < found.NextRow {
 		b.rows = found.NextRow
+	}
+	if found.NextRow > 0 {
+		b.floor = found.FirstRow
 	}
 	if bs.current[sid] == nil {
 		bs.current[sid] = b
@@ -1018,6 +1029,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		return 0, false
 	}
 	block := bs.current[sid]
+	var head []emulator.Row
+	var headFrom uint64
+	fullyStored := false
 	if sourced {
 		if closed := bs.closedThrough[sid]; fromRow < closed {
 			skip := closed - fromRow
@@ -1039,14 +1053,47 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		// they are not durable, and an overlap with them is refused by the
 		// store and offered again, by which time the cursor has moved.
 		if block != nil && block.kept && fromRow < block.rows {
-			skip := block.rows - fromRow
-			if skip >= uint64(len(rows)) {
-				bs.mu.Unlock()
-				return block.rows, true
+			// The stored span is [floor, rows): a delivery reaching below
+			// the floor is the block's own head, offered again by the
+			// resend (nocx-zg3k3.5.3 Round 8). It is split off here and
+			// prepended below — AFTER the lock, BEFORE anything is
+			// confirmed — so the acknowledgement never claims a span the
+			// artifact does not hold.
+			if block.floor > 0 && fromRow < block.floor {
+				n := block.floor - fromRow
+				if n > uint64(len(rows)) { //nolint:gosec // a row count, not a byte count
+					n = uint64(len(rows))
+				}
+				head = rows[:n]
+				headFrom = fromRow
+				rows = rows[n:]
+				fromRow = block.floor
+				lost = 0
 			}
-			rows = rows[skip:]
-			fromRow = block.rows
-			lost = 0
+			if len(rows) > 0 {
+				skip := block.rows - fromRow
+				if skip >= uint64(len(rows)) {
+					fullyStored = true
+				} else {
+					rows = rows[skip:]
+					fromRow = block.rows
+					lost = 0
+				}
+			} else {
+				fullyStored = true
+			}
+		}
+		if fullyStored {
+			bs.mu.Unlock()
+			if len(head) > 0 {
+				if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
+					return 0, false
+				}
+				bs.mu.Lock()
+				block.floor = headFrom
+				bs.mu.Unlock()
+			}
+			return block.rows, true
 		}
 		// The interval's end marker may have arrived without the completion
 		// that names its fence. Its EndRow is the boundary either way, and
@@ -1139,6 +1186,14 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Unlock()
 	if !sourced {
 		return 0, false
+	}
+	if len(head) > 0 {
+		if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
+			return 0, false
+		}
+		bs.mu.Lock()
+		block.floor = headFrom
+		bs.mu.Unlock()
 	}
 	writtenUpTo = fromRow + uint64(len(rows)) //nolint:gosec // a row count, not a byte count
 	if block == nil || !block.kept {
@@ -2689,4 +2744,28 @@ func (s *WSServer) blockStore() blockOutputStore {
 		return nil
 	}
 	return s.contentDB.Ledger()
+}
+
+// prependBlockHead stores one below-floor delivery — the block's own head,
+// departed before its open and offered again by the resend (nocx-zg3k3.5.3
+// Round 8) — through the store's contiguous-below-floor path. It answers
+// whether the artifact now holds the head: a failure is the one answer that
+// withholds the confirmation, so the mark never claims rows the store does
+// not hold.
+func (s *WSServer) prependBlockHead(sid session.ID, entry, artifact string, from uint64, rows []emulator.Row) bool {
+	store := s.blockStore()
+	if store == nil {
+		return false
+	}
+	ctx := log.WithLogger(context.Background(), s.log)
+	if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entry, ArtifactID: artifact, FromRow: from, Rows: rows,
+	}); err != nil {
+		log.From(ctx).Warn("block rows head prepend failed",
+			"session", sid, "entry", entry, "artifact", artifact, "from", from, "error", err)
+		return false
+	}
+	log.From(ctx).Debug("block rows head prepend: stored",
+		"session", sid, "entry", entry, "artifact", artifact, "from", from, "rows", len(rows))
+	return true
 }

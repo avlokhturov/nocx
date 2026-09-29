@@ -1308,6 +1308,11 @@ type OpenBlockRowsEntry struct {
 	// NextRow is the absolute departed-row index the NEXT delivery must
 	// start at — the cursor a re-adopting stream continues the block from.
 	NextRow uint64
+	// FirstRow is the absolute index the stored span begins at: the block's
+	// own head may be missing below it (its first delivery started above
+	// the session's origin), and the re-adopting stream must not trim or
+	// confirm rows the artifact does not hold (nocx-zg3k3.5.3 Round 8).
+	FirstRow uint64
 }
 
 // LostCauseCoordinatorUnavailable is the lost-rows cause the resend names:

@@ -617,6 +617,14 @@ const maxResendEnds = 64
 func (s *hostSession) resendFromScrollback() bool {
 	s.mu.Lock()
 	mark := s.rowsConfirmed
+	// The running interval's own start bounds the walk from below: its
+	// head rows are this command's own even when the mark sits above
+	// them — the coordinator's first ack can have leapt past rows its
+	// block never held (nocx-zg3k3.5.3 Round 7) — and the resend must
+	// offer them again. The coordinator trims what it already holds.
+	if start, ok := s.runtime.RunningIntervalStart(); ok && start < mark {
+		mark = start
+	}
 	subs := s.subscribersLocked()
 	s.mu.Unlock()
 	if len(subs) == 0 {

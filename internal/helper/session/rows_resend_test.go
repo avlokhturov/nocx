@@ -82,15 +82,17 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 	hs.mu.Unlock()
 	hs.wakeRows()
 
-	// The resend: rows 16..115 — the twenty-four rows that were on the
-	// screen at the mark, then the new command's first seventy-six — at
-	// exactly the indices the stream would have carried them under.
+	// The resend: rows 0..115 — the command's whole streamed output. The
+	// walk's lower bound is the running interval's own start (Round 8):
+	// the mark alone no longer clamps it, because a first ack can have
+	// leapt over rows the coordinator's block never held. The coordinator
+	// trims the overlap it already holds; the index never skips.
 	sink2.waitFor(4, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
 	var got []string
 	for i, b := range batches {
-		wantFrom := uint64(16)
+		wantFrom := uint64(0)
 		if i > 0 {
 			wantFrom = batches[i-1].from + uint64(len(batches[i-1].texts))
 		}
@@ -103,21 +105,21 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 		got = append(got, b.texts...)
 	}
 	var want []string
-	// The span is the acceptance's own definition — every row after the
-	// mark, to where departures reached — and its CONTENT is built here by
-	// hand: the twenty-four rows that were on the screen at the mark, then
-	// the fed lines in order. A feed whose trailing newline scrolls one
-	// extra row departs one more old row than arithmetic suggests; the
-	// texts below are what the scrollback provably held, and the assertion
-	// pins order, indices and content against them.
+	// The span is the acceptance's own definition — every row the interval
+	// streamed, to where departures reached — and its CONTENT is built here
+	// by hand: the rows the screen held at the mark (the walk starts at the
+	// interval's own start now), then the fed lines in order. A feed whose
+	// trailing newline scrolls one extra row departs one more old row than
+	// arithmetic suggests; the texts below are what the scrollback provably
+	// held, and the assertion pins order, indices and content against them.
 	want = nil
-	for i := 16; i < 40; i++ {
+	for i := 0; i < 40; i++ {
 		want = append(want, fmt.Sprintf("L%06d", i))
 	}
-	for i, n := 100, len(got)-24; i < 100+n; i++ {
+	for i, n := 100, len(got)-40; i < 100+n; i++ {
 		want = append(want, fmt.Sprintf("L%06d", i))
 	}
-	if len(got) <= 24 {
+	if len(got) <= 40 {
 		t.Fatalf("the resent rows are %d, want more than the mark-time screen held", len(got))
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {

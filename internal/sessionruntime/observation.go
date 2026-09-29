@@ -117,6 +117,14 @@ type observationOpen struct {
 	// it: parking carries it, a split hands it to the capture, and whatever
 	// ends the interval releases it.
 	OutputStartTrack emulator.RowTrack
+	// streamedFrom is the absolute row-stream index of the first row this
+	// interval has streamed (streamRowsLocked), set once, on the first
+	// batch that carried rows. The helper session's resend reads it as its
+	// lower bound: rows from here on are THIS command's own, and a
+	// confirmed mark that leapt over them must not stop the resend from
+	// offering them again (nocx-zg3k3.5.3 Round 7/8).
+	streamedFrom    uint64
+	streamedFromSet bool
 	// OutputPrefix is what stood above the output's first row at the mark —
 	// the prompt and the echoed command line — so the cut removes those rows
 	// only while they still read as that, never output that overwrote them
@@ -477,6 +485,10 @@ func (s *Session) drainObservationLocked() {
 func (s *Session) streamRowsLocked(rows []emulator.Row, lost uint64) {
 	s.departedRows += lost
 	from := s.departedRows
+	if len(rows) > 0 && s.observation != nil && !s.observation.streamedFromSet {
+		s.observation.streamedFrom = from
+		s.observation.streamedFromSet = true
+	}
 	s.departedRows += uint64(len(rows)) // #nosec G115 -- len is never negative
 	if rs := s.rowStream; rs != nil {
 		rs.OutputRows(from, rows, lost)
@@ -1420,4 +1432,22 @@ func cloneObservationRows(rows []emulator.Row) []emulator.Row {
 		}
 	}
 	return out
+}
+
+// RunningIntervalStart returns the absolute row-stream index of the first
+// row the interval in flight has streamed, and whether such an interval is
+// running and has streamed rows at all. The helper session's resend reads
+// it as its lower bound (nocx-zg3k3.5.3 Round 8): rows from the start on
+// are the running command's own, and a confirmed mark that leapt over its
+// head — the block's first delivery acking past rows the artifact never
+// held (Round 7) — must not stop the resend from offering them again. Rows
+// below the start belong to earlier intervals and are the mark's to speak
+// for.
+func (s *Session) RunningIntervalStart() (uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.observation == nil || !s.observation.streamedFromSet {
+		return 0, false
+	}
+	return s.observation.streamedFrom, true
 }
