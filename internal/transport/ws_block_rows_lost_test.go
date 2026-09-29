@@ -190,12 +190,16 @@ func TestALossAndADetachSettleOneBlockOnce(t *testing.T) {
 		fence := lifecycleFence(0x65)
 		e, sid, attempt, db := completedWithRows(t, fence)
 
-		e.ws.DetachBlockRows(sid)
+		// ADR-0076: the coordinator's detach changes no block. The loss
+		// report arrives after the coordinator returns (it travels the
+		// re-adopted connection), and settles the still-open block.
+		e.ws.AttachBlockRows(sid)
 		e.ws.BlockBoundaryLost(sid, fence)
 
-		// The detach sealed it as the session's end seals everything it
-		// holds, and the loss arriving after found nothing left to settle.
-		assertSealedAs(t, db, attempt, nil)
+		// The boundary was lost: its end never arrived, so the seal says
+		// the block is a gap — the rows it holds are whole.
+		gap := content.TruncGap
+		assertSealedAs(t, db, attempt, &gap)
 		if n := closedCount(t, e, sid, attempt); n != 1 {
 			t.Fatalf("block.closed sent %d times, want once", n)
 		}

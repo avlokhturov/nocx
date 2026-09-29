@@ -45,9 +45,12 @@ func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 		t.Fatalf("cursor = %d after the coordinator detach, want 2", payload.NextRow)
 	}
 
-	// The stream re-attaches (the coordinator came back) and continues the
-	// same block by absolute departed-row index.
+	// The stream re-attaches (the coordinator came back). The re-adopt's
+	// attempt fact re-opens the attempt, and performOpen resumes the open
+	// artifact at its stored cursor — that is what lets the continued rows
+	// append rather than drop.
 	e.ws.AttachBlockRows(session.ID(sid))
+	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), attempt)
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); !confirm || written != 4 {
 		t.Fatalf("continued ack = (%d, %v), want rows 2 and 3 appended to the open block", written, confirm)
 	}

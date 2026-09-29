@@ -27,7 +27,7 @@ func detachWithSeal(t *testing.T, sealFails bool) (blockClosedParams, string, co
 		t.Fatal("the streamed row was not confirmed")
 	}
 
-	e.ws.DetachBlockRows(session.ID(sid))
+	e.ws.HelperSessionEnded(session.ID(sid))
 	return awaitBlockClosed(t, e), attempt, db
 }
 

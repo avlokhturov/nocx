@@ -90,7 +90,7 @@ func TestADetachAndAnInFlightCloseSealOnce(t *testing.T) {
 				closeFailureBlockStore: closeFailureBlockStore{ledger: db.Ledger()},
 				detachInSeal:           tc.detachInSeal, detachInClose: tc.detachInClose,
 			}
-			store.detach = func() { e.ws.DetachBlockRows(sid) }
+			store.detach = func() { e.ws.HelperSessionEnded(sid) }
 			e.ws.blockRowsStore = store
 			e.ws.AttachBlockRows(sid)
 			attempt := startsACommand(t, e, pub, lane, h, 2, "make")

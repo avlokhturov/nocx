@@ -1858,7 +1858,7 @@ func TestBlockIntervalEnded_EveryResolvedEndSaysBlockClosed(t *testing.T) {
 // completion whose end marker never came, and a block whose command never
 // ended, are each said closed at the detach — the renderer waits for
 // block.closed and nothing after this can send it (nocx-2v80t.3.27).
-func TestDetachBlockRows_SaysEveryUnendedBlockClosed(t *testing.T) {
+func TestHelperSessionEnded_SaysEveryUnendedBlockClosed(t *testing.T) {
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnv(t, true)
 	e.ws.AttachBlockRows(session.ID(sid))
 
@@ -1866,7 +1866,7 @@ func TestDetachBlockRows_SaysEveryUnendedBlockClosed(t *testing.T) {
 	fence := lifecycleFence(0x54)
 	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 3, lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, fence)))
 	// No end marker: the helper went away first.
-	e.ws.DetachBlockRows(session.ID(sid))
+	e.ws.HelperSessionEnded(session.ID(sid))
 
 	got := awaitBlockClosed(t, e)
 	if got.EntryID != attempt || !got.Kept {

@@ -704,6 +704,9 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 // every still-open block is sealed with whatever arrived and said closed —
 // the honest end when the interval's own end never will.
 func (s *WSServer) HelperSessionEnded(sid session.ID) {
+	// Owner: this stream, on behalf of the session the helper just
+	// reported ended. Closing event: HelperSessionEnded's own seals —
+	// nothing is held past them (ADR-0076).
 	ctx := log.WithLogger(context.Background(), s.log)
 	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
@@ -713,17 +716,48 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 // detach forgets the session and seals what it held, and answers the
 // block.closed each still-unended interval is owed: every open block, and
 // every completion whose end marker never arrived.
-// detachCoordinator forgets the session's streaming attachment and nothing
-// else: the coordinator going away changes no block (ADR-0076). The open
-// blocks, their cursors (in the artifacts' payloads), and every parked fact
-// that still describes them stay exactly as they are; whatever re-adopts
-// the session continues them.
+// detachCoordinator forgets the session's streaming state and nothing
+// else: the coordinator going away changes no block (ADR-0076). Nothing is
+// sealed and nothing is said closed — the open block, its cursor (in the
+// artifact's payload), and its open ledger entry survive in the store, and
+// a re-adopting coordinator's open resumes them exactly there. Only the
+// helper-reported end of the session settles what this forgot:
+// HelperSessionEnded runs the old sealing detach over whatever in-memory
+// state a same-process session still holds.
 func (bs *blockStream) detachCoordinator(sid session.ID) {
 	bs.mu.Lock()
 	defer bs.mu.Unlock()
+	delete(bs.closedThrough, sid)
+	delete(bs.beyond, sid)
+	delete(bs.beyondThrough, sid)
 	delete(bs.sources, sid)
+	delete(bs.open, sid)
+	delete(bs.current, sid)
+	delete(bs.queued, sid)
+	delete(bs.queuedEnds, sid)
+	delete(bs.ends, sid)
+	delete(bs.fences, sid)
+	delete(bs.confirmers, sid)
+	delete(bs.waiting, sid)
+	delete(bs.pending, sid)
+	delete(bs.flushing, sid)
+	delete(bs.opening, sid)
+	delete(bs.pendingCloses, sid)
+	delete(bs.closing, sid)
+	delete(bs.closeTries, sid)
+	delete(bs.entered, sid)
+	delete(bs.lost, sid)
+	delete(bs.reopen, sid)
+	delete(bs.closedWhileOpening, sid)
+	delete(bs.unrecorded, sid)
+	delete(bs.budgets, sid)
+	delete(bs.flushingBytes, sid)
+	delete(bs.attachGen, sid)
 }
 
+// detach is the HELPER-REPORTED settlement of a session's streaming
+// (ADR-0074 decision 3 as amended by ADR-0076): every still-open block is
+// sealed with whatever arrived and said closed.
 func (bs *blockStream) detach(ctx context.Context, store blockOutputStore, sid session.ID) []blockClosedParams {
 	bs.mu.Lock()
 	opens := bs.open[sid]
