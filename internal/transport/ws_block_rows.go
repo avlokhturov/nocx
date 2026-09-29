@@ -645,6 +645,13 @@ func (s *WSServer) AttachBlockRows(sid session.ID) {
 	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, nil, s.blockRowsBuffer())
 	s.blockStream.adoptOpenBlock(sid, found)
+	// The helper's end fact may have arrived before this lane registered
+	// (the shell exited while the coordinator was away): the adopted
+	// domain's recorded terminal state settles the session now (Round 10).
+	// Idempotent — HelperSessionEnded seals only open blocks.
+	if s.adoptedDomainTerminal(sid) {
+		s.HelperSessionEnded(sid)
+	}
 }
 
 // AttachBlockRowsWithConfirmation additionally gives deferred rows a way to
@@ -654,6 +661,10 @@ func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(
 	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, confirm, s.blockRowsBuffer())
 	s.blockStream.adoptOpenBlock(sid, found)
+	// The same boundary consult as AttachBlockRows (Round 10).
+	if s.adoptedDomainTerminal(sid) {
+		s.HelperSessionEnded(sid)
+	}
 }
 
 // adoptableOpenBlock is the store half of the re-adopt re-bind: the open
@@ -821,6 +832,30 @@ func (bs *blockStream) attach(sid session.ID, confirm func(uint64), budget int64
 // cursor and its open ledger entry stay exactly as they are in the store,
 // and the re-adopted stream continues them. Only the helper-reported end of
 // the session settles open blocks: HelperSessionEnded.
+// adoptedDomainTerminal answers whether any lane bound to this session
+// carries a domain the helper already closed or lost — the helper's own
+// recorded end, held by the kernel even when the fact arrived before the
+// lane registered (nocx-zg3k3.5.3 Round 10).
+func (s *WSServer) adoptedDomainTerminal(sid session.ID) bool {
+	if s.lifecyclePub == nil {
+		return false
+	}
+	s.lifecycleMu.Lock()
+	var lanes []lifecycle.LaneID
+	for lane, cur := range s.lifecycleLanes {
+		if cur == sid {
+			lanes = append(lanes, lane)
+		}
+	}
+	s.lifecycleMu.Unlock()
+	for _, lane := range lanes {
+		if _, ok := s.lifecyclePub.TerminalDomainOfLane(lane); ok {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *WSServer) DetachBlockRows(sid session.ID) {
 	s.blockStream.detachCoordinator(sid)
 }
@@ -851,6 +886,24 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	}
 	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
+	}
+	// The settle can run before the re-adopting stream has installed the
+	// open block (the terminal-state consult at the attach boundary,
+	// nocx-zg3k3.5.3 Round 10): the store's own open artifact then seals at
+	// its stored cursor here. Idempotent — an artifact the in-memory path
+	// just sealed answers sealed and changes nothing.
+	if bsStore := s.blockStore(); bsStore != nil {
+		if open, openErr := bsStore.OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
+			if _, sealErr := bsStore.CloseBlockRows(ctx, content.CloseBlockRows{
+				EntryID: open.EntryID, ArtifactID: open.ArtifactID,
+			}); sealErr != nil {
+				log.From(ctx).Warn("helper session end: the store's open block could not be sealed at its stored cursor",
+					"session", sid, "entry", open.EntryID, "artifact", open.ArtifactID, "error", sealErr)
+			} else {
+				s.log.Debug("helper session end: the store's open block sealed at its stored cursor",
+					"session", sid, "entry", open.EntryID, "artifact", open.ArtifactID)
+			}
+		}
 	}
 	// The helper's end report also closes the session's still-open LEDGER
 	// entry (ADR-0074 decision 3 as amended by ADR-0076): the completion

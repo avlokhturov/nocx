@@ -828,6 +828,40 @@ func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 	}
 }
 
+// settleAdoptedTerminalDomains settles the session's streaming when a lane
+// bound to it carries a domain the helper already closed or lost. The
+// helper's own end fact can arrive while the lane is still unregistered —
+// the shell exits while the coordinator is away, the re-adopting process
+// adopts the channel, and the domain_closed is ingested before anything
+// routes it (the loaded 3/20 shell-exit shape, nocx-zg3k3.5.3 Round 9) —
+// and the projection replay derives nothing for an already-closed domain,
+// so the one-shot settle was lost. The kernel still holds the domain's
+// recorded terminal state — the helper's own word, replayed, never a guess
+// (ADR-0076) — and the session's open entry settles from it now.
+// Idempotent: a session whose entry the completion already closed has
+// nothing open to settle, and HelperSessionEnded seals only open blocks.
+func (s *WSServer) settleAdoptedTerminalDomains(sid session.ID) {
+	if s.lifecyclePub == nil {
+		return
+	}
+	s.lifecycleMu.Lock()
+	var lanes []lifecycle.LaneID
+	for lane, cur := range s.lifecycleLanes {
+		if cur == sid {
+			lanes = append(lanes, lane)
+		}
+	}
+	s.lifecycleMu.Unlock()
+	for _, lane := range lanes {
+		// The derive clears a closed lane's domain from the snapshot (its
+		// Domain reads empty) — the kernel's own record is the source.
+		if _, ok := s.lifecyclePub.TerminalDomainOfLane(lane); ok {
+			s.HelperSessionEnded(sid)
+			return
+		}
+	}
+}
+
 // ── lifecycle.submitAttempt (ADR-0024 decision 5) ────────────────────────
 
 // submitAttemptParams is the payload of the "lifecycle.submitAttempt" RPC:

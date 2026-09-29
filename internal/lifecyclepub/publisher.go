@@ -252,6 +252,7 @@ type Kernel interface {
 	AbandonAttempt(id lifecycle.AttemptID) error
 	State(lane lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
+	TerminalDomainOfLane(lane lifecycle.LaneID) (lifecycle.Domain, bool)
 	Attempt(id lifecycle.AttemptID) (lifecycle.ExecutionAttempt, bool)
 	OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionAttempt, bool)
 }
@@ -834,6 +835,13 @@ func (p *Publisher) deliverAccept(out lifecycle.Outbound) {
 // became Established.
 func (p *Publisher) Domain(id lifecycle.DomainID) (lifecycle.Domain, bool) {
 	return p.kernel.Domain(id)
+}
+
+// TerminalDomainOfLane returns the lane's most recent domain in a terminal
+// state (closed or lost), and whether one exists — the helper's own recorded
+// end, replayed for a re-adopting attach (nocx-zg3k3.5.3 Round 10).
+func (p *Publisher) TerminalDomainOfLane(lane lifecycle.LaneID) (lifecycle.Domain, bool) {
+	return p.kernel.TerminalDomainOfLane(lane)
 }
 
 // State returns the read model of one lane. Projection consumers (a future

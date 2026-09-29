@@ -550,6 +550,30 @@ func (k *Kernel) OpenAttempt(domain DomainID) (ExecutionAttempt, bool) {
 }
 
 // Domain returns the read model of one domain.
+// TerminalDomainOfLane returns the lane's most recent domain in a terminal
+// state (closed or lost). A domain_closed can be ingested while the lane is
+// still unregistered — the shell exits while the coordinator is away — and
+// the projection replay derives nothing for an already-closed domain, so
+// the recorded terminal state is what a re-adopting attach settles from
+// (nocx-zg3k3.5.3 Round 9/10).
+func (k *Kernel) TerminalDomainOfLane(lane LaneID) (Domain, bool) {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	var out *Domain
+	for _, d := range k.registry.All() {
+		if d.Lane != lane || (d.State != DomainClosed && d.State != DomainLost) {
+			continue
+		}
+		if out == nil || d.ID > out.ID {
+			out = d
+		}
+	}
+	if out == nil {
+		return Domain{}, false
+	}
+	return *out, true
+}
+
 func (k *Kernel) Domain(id DomainID) (Domain, bool) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
