@@ -34,6 +34,7 @@ package session
 // re-measurement, and the whole-path wall clock as a report only.
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -85,6 +86,9 @@ type budgetSink struct {
 	mu           sync.Mutex
 	frames       int
 	payloadBytes int64
+	// incomplete counts the bridge's own overflow markers: anything above
+	// zero means the stand lost rows and measured a truncated stream.
+	incomplete int
 }
 
 func newBudgetSink() *budgetSink {
@@ -109,6 +113,14 @@ func (s *budgetSink) SendOutputRows(f proto.OutputRowsFrame) error {
 	s.mu.Lock()
 	s.frames++
 	s.payloadBytes += int64(len(f.Payload)) //nolint:gosec // len is never negative
+	if bytes.Contains(f.Payload, []byte(`"incomplete":true`)) {
+		// The bridge's overflow marker: rows the stand LOST while the sink
+		// was parked. A byte scan, not a decode — no allocation on the
+		// measured path — and a gate that fails loudly instead of
+		// measuring a truncated stream (the row buffer is sized to make
+		// this unreachable; this proves it).
+		s.incomplete++
+	}
 	s.mu.Unlock()
 	return nil
 }
@@ -188,18 +200,18 @@ func feedBudgetPump(rt *sessionruntime.Session) error {
 // not wait for some other event to notice), and answers the allocations the
 // pump spent per MiB fed. The wait allocates nothing: the window contains
 // the pump's work and nothing else's.
-func measureBudgetPumpWindow(hs *hostSession, sink *budgetSink) (allocsPerMiB, bytesPerMiB float64, frames int, payload int64) {
+func measureBudgetPumpWindow(hs *hostSession, sink *budgetSink) (allocsPerMiB, bytesPerMiB float64, frames int, payload int64, incomplete int) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 	sink.openGate()
 	<-hs.requestRowsDrain()
 	runtime.ReadMemStats(&after)
 	sink.mu.Lock()
-	frames, payload = sink.frames, sink.payloadBytes
+	frames, payload, incomplete = sink.frames, sink.payloadBytes, sink.incomplete
 	sink.mu.Unlock()
 	mib := float64(len(budgetFeed())) / (1 << 20)
 	return float64(after.Mallocs-before.Mallocs) / mib,
-		float64(after.TotalAlloc-before.TotalAlloc) / mib, frames, payload
+		float64(after.TotalAlloc-before.TotalAlloc) / mib, frames, payload, incomplete
 }
 
 // BenchmarkPumpEncoding measures the shipped pump's own window — the row
@@ -228,8 +240,11 @@ func BenchmarkPumpEncoding(b *testing.B) {
 			b.Fatal(feedErr)
 		}
 		b.StartTimer()
-		a, by, frames, _ := measureBudgetPumpWindow(hs, sink)
+		a, by, frames, _, incomp := measureBudgetPumpWindow(hs, sink)
 		b.StopTimer()
+		if incomp != 0 {
+			b.Fatalf("the stand's row buffer overflowed (%d incomplete markers): the benchmark measured a truncated stream", incomp)
+		}
 		stop()
 		if frames == 0 {
 			b.Fatal("the feed produced no frames: the pump measured nothing")
@@ -289,8 +304,11 @@ func TestPumpEncodingStaysWithinItsBudget(t *testing.T) {
 		stopWarm()
 		t.Fatal(feedErr)
 	}
-	allocs, _, warmFrames, _ := measureBudgetPumpWindow(warmHS, warmSink)
+	allocs, _, warmFrames, _, warmIncomp := measureBudgetPumpWindow(warmHS, warmSink)
 	stopWarm()
+	if warmIncomp != 0 {
+		t.Fatalf("the warm-up stand's row buffer overflowed (%d incomplete markers)", warmIncomp)
+	}
 	t.Logf("warm-up: %.0f allocs/MiB over %d frames", allocs, warmFrames)
 	if warmFrames == 0 {
 		t.Fatal("the warm-up feed produced no frames: the pump measured nothing")
@@ -305,9 +323,12 @@ func TestPumpEncodingStaysWithinItsBudget(t *testing.T) {
 	if feedErr := feedBudgetPump(rt); feedErr != nil {
 		t.Fatal(feedErr)
 	}
-	allocsPerMiB, bytesPerMiB, frames, streamed := measureBudgetPumpWindow(hs, sink)
+	allocsPerMiB, bytesPerMiB, frames, streamed, incomp := measureBudgetPumpWindow(hs, sink)
 	if frames == 0 {
 		t.Fatal("the feed produced no frames: the pump measured nothing")
+	}
+	if incomp != 0 {
+		t.Fatalf("the stand's row buffer overflowed (%d incomplete markers): the gate measured a truncated stream, not the pump", incomp)
 	}
 	t.Logf("fed %.2f MiB through the shipped pump: %.0f allocs/MiB, %.0f B/MiB, %d frames, %.2f MiB of payload",
 		float64(len(budgetFeed()))/(1<<20), allocsPerMiB, bytesPerMiB, frames, float64(streamed)/(1<<20))
