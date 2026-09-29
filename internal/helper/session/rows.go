@@ -639,14 +639,6 @@ func (s *hostSession) resender() resendRuntime {
 func (s *hostSession) resendFromScrollback() bool {
 	s.mu.Lock()
 	mark := s.rowsConfirmed
-	// The running interval's own start bounds the walk from below: its
-	// head rows are this command's own even when the mark sits above
-	// them — the coordinator's first ack can have leapt past rows its
-	// block never held (nocx-zg3k3.5.3 Round 7) — and the resend must
-	// offer them again. The coordinator trims what it already holds.
-	if start, ok := s.runtime.RunningIntervalStart(); ok && start < mark {
-		mark = start
-	}
 	subs := s.subscribersLocked()
 	s.mu.Unlock()
 	if len(subs) == 0 {
@@ -655,6 +647,22 @@ func (s *hostSession) resendFromScrollback() bool {
 	s.rowMu.Lock()
 	ends := append([]droppedEnd(nil), s.resendEnds...)
 	s.rowMu.Unlock()
+	// The earliest interval start bounds the walk from below: the head rows
+	// are this command's own even when the mark sits above them — the
+	// coordinator's first ack can have leapt past rows its block never held
+	// (nocx-zg3k3.5.3 Round 7) — and the resend must offer them again. The
+	// start survives the interval's end (nocx-zg3k3.5.11): the tail-unwatched
+	// ordering re-adopts after the command has completed, when a running
+	// interval's start is already gone. The dip applies only while NO
+	// dropped boundary sits in the walk: below a boundary the history map is
+	// broken and the span is stated as losses, and counting the CONFIRMED
+	// head rows among them would be a lie. The coordinator trims what it
+	// already holds.
+	if len(ends) == 0 {
+		if start, ok := s.runtime.EarliestIntervalStart(); ok && start < mark {
+			mark = start
+		}
+	}
 	// The walked span stops at the newest dropped boundary. That boundary's
 	// own closing screen departs after it — suppressed, unindexed — and
 	// sits in the history between the rows below and the rows above, at a
