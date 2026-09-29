@@ -367,6 +367,11 @@ type hostSession struct {
 	// going are all inside that interval and none of them creates it or ends
 	// it (requirement 5 of nocx-ygxjv.12).
 	runtime *sessionruntime.Session
+	// resendRT is the seam the resend's scrollback walk reads the runtime
+	// through (rows.go's resendRuntime). Spawn wires the session's own
+	// runtime; only a test that arms a departure at the seam sets
+	// anything else, and resender() answers the runtime when this is nil.
+	resendRT resendRuntime
 	// screen is the emulator the runtime directs. It is held here for its
 	// LIFETIME and not for its behaviour: every read and every write goes
 	// through runtime, and Close is this object's to call because a runtime

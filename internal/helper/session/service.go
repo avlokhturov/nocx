@@ -1382,6 +1382,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		proc:            proc,
 		win:             win,
 		runtime:         rt,
+		resendRT:        rt,
 		screen:          screen,
 		owner:           owner,
 		tokens:          tokens,

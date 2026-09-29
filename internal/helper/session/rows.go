@@ -600,6 +600,28 @@ type droppedEnd struct {
 // that was away for the whole span the scrollback could answer for anyway.
 const maxResendEnds = 64
 
+// resendRuntime is the runtime seam the resend's scrollback walk reads
+// through: the session's departed-row count and the lend of the emulator
+// that walk measures the count against. The seam exists because those two
+// reads are one fact — the count names the rows the walk is about to
+// read — and nocx-zg3k3.5.10 holds them to that: production answers with
+// the runtime's own single lock, and the tests' double arms a departure
+// at the seam to keep the invariant honest.
+type resendRuntime interface {
+	DepartedRowCount() uint64
+	ReadScreen(read func(emulator.Terminal) error) (sessionruntime.Revision, sessionruntime.Completeness, error)
+}
+
+// resender answers the seam the resend reads through. Spawn wires the
+// session's own runtime; a fixture that never resends may leave the
+// field nil, and the runtime answers.
+func (s *hostSession) resender() resendRuntime {
+	if s.resendRT != nil {
+		return s.resendRT
+	}
+	return s.runtime
+}
+
 // resendFromScrollback delivers, to every subscriber bound now, what the
 // stream dropped for want of a subscriber: the rows of [mark, D) read back
 // out of ghostty's scrollback at the absolute indices they departed under,
@@ -633,7 +655,7 @@ func (s *hostSession) resendFromScrollback() bool {
 	s.rowMu.Lock()
 	ends := append([]droppedEnd(nil), s.resendEnds...)
 	s.rowMu.Unlock()
-	d := s.runtime.DepartedRowCount()
+	d := s.resender().DepartedRowCount()
 	// The walked span stops at the newest dropped boundary. That boundary's
 	// own closing screen departs after it — suppressed, unindexed — and
 	// sits in the history between the rows below and the rows above, at a
@@ -652,7 +674,7 @@ func (s *hostSession) resendFromScrollback() bool {
 	}
 	// The provable span's rows, oldest first, as the scrollback holds them.
 	var rows []emulator.Row
-	_, _, err := s.runtime.ReadScreen(func(t emulator.Terminal) error {
+	_, _, err := s.resender().ReadScreen(func(t emulator.Terminal) error {
 		page, err := t.HistoryRows(0, 0)
 		if err != nil {
 			return err
