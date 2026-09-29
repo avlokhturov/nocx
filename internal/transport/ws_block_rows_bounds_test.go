@@ -74,6 +74,15 @@ const floodRows = 4000
 // so the paired block stores every row it streamed.
 const underCapRows = 50
 
+// burstRows prints short rows — eleven bytes of row each — so any read the
+// pty hands the runtime that is a few hundred bytes already carries more
+// than the helper's 32-row split bound. Full-width rows alone never did:
+// observed maxima were 29 and 19 rows per frame at 120x40 and 200x50, so
+// the frame-bound assertion had nothing over the bound to bite on at two
+// of the three sizes (nocx-zg3k3.5.9). The burst forces a batch past the
+// bound at every size, which is what makes the bound load-bearing.
+const burstRows = 1500
+
 // boundsHelperConn is the pty-less exec lane client.Dial asks for, with the
 // REAL helper host and the REAL session service — real local spawner, real
 // shell, real PTY — serving it on the other end of the pipes.
@@ -321,6 +330,20 @@ func fenceNonce(n int) (lifecycle.FenceNonce, string) {
 	return f, hex.EncodeToString(f[:])
 }
 
+// burstCommand prints n short rows and closes with the interval's own
+// render fence. The rows are deliberately narrow: they never wrap, and
+// their small size is what packs more than 32 departures into any ordinary
+// read the pty delivers.
+func burstCommand(n int, nonceHex string) string {
+	var b strings.Builder
+	b.WriteString("stty -echo 2>/dev/null; i=0; while [ $i -lt ")
+	fmt.Fprintf(&b, "%d", n)
+	b.WriteString(" ]; do printf '%09d\\n' \"$i\"; i=$((i+1)); done; printf '\\033]1337;NOCX_FENCE;")
+	b.WriteString(nonceHex)
+	b.WriteString("\\007'")
+	return b.String()
+}
+
 // styledFloodCommand builds a shell loop that prints n styled, full-width
 // rows (the case the retired stage never ran: real geometry, real styling,
 // scrollback departures) and closes with the interval's own render fence.
@@ -428,10 +451,9 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			// rendezvous produces — and the shell's prompt_ready, which
 			// is what admits the NEXT submit (the kernel's own interval
 			// rhythm: complete, prompt_ready, submit).
-			runCommand := func(seqSubmit uint64, endIdx, nonceIdx, n int) (attempt string, end client.IntervalEnd) {
+			runCommand := func(seqSubmit uint64, endIdx, nonceIdx int, command string) (attempt string, end client.IntervalEnd) {
 				t.Helper()
 				nonce, nonceHex := fenceNonce(nonceIdx)
-				command := styledFloodCommand(n, g.cols, nonceHex)
 				attempt = startsACommand(t, e, pub, lane, h, seqSubmit, command)
 				typeCommand(t, c, spawned.Entry.Session, command+"\r")
 				if err := pub.Ingest("T", lifecycleEnv(lane, h, seqSubmit+1,
@@ -454,7 +476,8 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 			}
 
 			// ── THE FLOOD: past the cap, under the ceiling ────────────────
-			flood, _ := runCommand(2, 1, 1, floodRows)
+			_, floodHex := fenceNonce(1)
+			flood, _ := runCommand(2, 1, 1, styledFloodCommand(floodRows, g.cols, floodHex))
 			flooded, closing := rec.intervalAt(0)
 			art := waitForSealed(t, db, flood)
 
@@ -503,9 +526,51 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 				t.Fatalf("the block holds %d rows and dropped %d, but the interval produced %d streamed + %d closing: the numbers do not close", held, dropped, flooded, closing)
 			}
 
+			// ── THE BURST: one batch past the frame bound, at this size ────
+			_, burstHex := fenceNonce(2)
+			burst, _ := runCommand(5, 2, 2, burstCommand(burstRows, burstHex))
+			burstStreamed, _ := rec.intervalAt(1)
+			burstArt := waitForSealed(t, db, burst)
+			burstLost, burstDropped := blockRowsSummaryOf(t, db, burst)
+
+			// THE FRAME BOUND'S PRECONDITION (nocx-zg3k3.5.9): a batch
+			// larger than the split bound reached the pump at this size.
+			// Frames are the pump's output, so the evidence is the split's
+			// own signature: a frame carrying exactly the bound whose
+			// successor continues the same batch — fromRow moves on without
+			// a loss of its own. Without this, the bound assertion below
+			// has proved nothing here: at 120x40 and 200x50 the observed
+			// maxima were 29 and 19 rows, so removing the production split
+			// stayed green.
+			fullSplits := 0
+			for i := 0; i+1 < len(rec.batches); i++ {
+				cur, next := rec.batches[i], rec.batches[i+1]
+				if len(cur.Rows) == rowsPerFrameBound &&
+					next.FromRow == cur.FromRow+uint64(len(cur.Rows)) && //nolint:gosec // a row count
+					next.LostRows == 0 && len(next.Rows) > 0 {
+					fullSplits++
+				}
+			}
+			if fullSplits == 0 {
+				t.Fatalf("no frame carried the full %d-row split with a continuing successor, and the burst streamed %d rows: no batch over the bound reached the pump, so the frame bound proved nothing at this size", rowsPerFrameBound, burstStreamed)
+			}
+			if burstStreamed < burstRows-500 {
+				t.Fatalf("the burst streamed %d of %d rows: the forced batch was not delivered whole", burstStreamed, burstRows)
+			}
+			if rec.maxRowsInFrame != rowsPerFrameBound {
+				t.Fatalf("the largest frame carried %d rows, want exactly the %d-row bound: the split was never exercised at this size", rec.maxRowsInFrame, rowsPerFrameBound)
+			}
+			if burstLost != 0 || burstDropped != 0 {
+				t.Fatalf("the burst states lost=%d dropped=%d, want zero and zero: the burst measured a loss, not a bound", burstLost, burstDropped)
+			}
+			if burstArt.Truncated != nil {
+				t.Fatalf("the burst says truncated=%v, want none", burstArt.Truncated)
+			}
+
 			// ── THE PAIRED CASE: under the cap, nothing lost ──────────────
-			small, _ := runCommand(5, 2, 3, underCapRows)
-			smallRows, smallClosing := rec.intervalAt(1)
+			_, smallHex := fenceNonce(3)
+			small, _ := runCommand(8, 3, 3, styledFloodCommand(underCapRows, g.cols, smallHex))
+			smallRows, smallClosing := rec.intervalAt(2)
 			smallArt := waitForSealed(t, db, small)
 			smallLost, smallDropped := blockRowsSummaryOf(t, db, small)
 			if smallLost != 0 || smallDropped != 0 {
