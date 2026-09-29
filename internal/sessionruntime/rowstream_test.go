@@ -285,6 +285,43 @@ func TestDepartedRowsStreamOnceInOrderBeforeTheEnd(t *testing.T) {
 	}
 }
 
+// A heavy interval streams every row it departs, at the session's own
+// indices, oldest first: six hundred lines on a twenty-four row screen, and
+// no batch ever skips or reorders, however far past one screen the command
+// runs. The stream half of the lean-interval test the retired record's file
+// carried (nocx-zg3k3.5.4).
+func TestAHeavyIntervalStreamsEveryRowAtItsOwnIndex(t *testing.T) {
+	s, rs := streamSession(t, harnessGeometry(80, 24))
+
+	obsFeed(t, s, 0, 600)
+
+	const departed = 600 - 23
+	var streamed uint64
+	first, last := "", ""
+	for _, e := range rs.snapshot() {
+		if e.kind != "rows" {
+			t.Fatalf("a running interval streamed a %q event, want row batches only", e.kind)
+		}
+		if len(e.rows) == 0 {
+			continue
+		}
+		if got := e.from; got != streamed {
+			t.Fatalf("a batch names FromRow %d with %d rows already streamed, want %d — the index never skips", got, streamed, streamed)
+		}
+		if streamed == 0 {
+			first = streamRowText(e.rows[0])
+		}
+		last = streamRowText(e.rows[len(e.rows)-1])
+		streamed += uint64(len(e.rows)) // #nosec G115 -- len is never negative
+	}
+	if streamed != departed {
+		t.Fatalf("the stream carried %d rows, want every one of the %d departures", streamed, departed)
+	}
+	if first != "L000000" || last != "L"+fmt6(departed-1) {
+		t.Fatalf("the stream ran %q..%q, want L000000..L%s, oldest first", first, last, fmt6(departed-1))
+	}
+}
+
 // streamLastText reads the last non-blank row's text: after a flood the
 // cursor parks on an empty bottom row, and a blank row ends no screen.
 func streamLastText(rows []emulator.Row) string {
