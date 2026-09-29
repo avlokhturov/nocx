@@ -361,9 +361,12 @@ func bindBlockEndToSession(sess session.Session, attached *helperclient.Attached
 		// OWN exit report (recordExit, the status monitorExit reads) is
 		// the session's end as the helper states it (ADR-0076). A wire
 		// loss seals nothing: the open block and its cursor survive for
-		// whichever coordinator re-adopts the session.
-		if _, reported := attached.WaitErr(); reported {
-			sink.HelperSessionEnded(sid)
+		// whichever coordinator re-adopts the session. No attached session
+		// object means no helper-reported exit either.
+		if attached != nil && sink != nil {
+			if _, reported := attached.WaitErr(); reported {
+				sink.HelperSessionEnded(sid)
+			}
 		}
 		stop()
 	}()
