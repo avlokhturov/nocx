@@ -598,63 +598,82 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 	sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
 	s.lifecycleMu.Unlock()
 	if row == nil {
-		if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
-			s.lifecycleMu.Lock()
-			scope, scoped := s.historySources[f.Attempt.ID]
-			sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-			s.lifecycleMu.Unlock()
-			if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
-				return nil
+		// A completion the kernel reconstructed for a command that ran for
+		// the coordinator BEFORE this one (the completion-only replay,
+		// ADR-0076) names no ledger row: its real id lives in the previous
+		// process, and the shell's own complete frame names no id at all.
+		// The session's one open entry IS that command's row — the same
+		// session-id join the re-adopting block stream re-binds from — and
+		// the authenticated completion is the fact that closes it with its
+		// real status. Resolved here, the row skips the record-a-new-entry
+		// path below: that path is for a shell attempt the ledger never
+		// saw, and this one the ledger saw under its real id.
+		if f.Attempt.State == lifecyclepub.AttemptCompleted && f.Attempt.Origin == lifecyclepub.OriginShell {
+			if open, openErr := s.blockStore().OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
+				if reopened, rerr := ledger.Entry(ctx, open.EntryID); rerr == nil && reopened != nil && reopened.Phase != content.PhaseClosed {
+					row = reopened
+				}
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
-				return nil
-			}
-			s.lifecycleMu.Lock()
-			delete(s.historySources, f.Attempt.ID)
-			s.lifecycleMu.Unlock()
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
-				Generation: scope.Generation, Source: scope.Source,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
-			}
-		}
-		s.lifecycleMu.Lock()
-		laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
-		sid = laneSID
-		s.lifecycleMu.Unlock()
-		if !ok {
-			return nil
-		}
-		sess, sessErr := s.registry.Get(sid)
-		if sessErr != nil {
-			return nil
-		}
-		s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
-			lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
-		row, err = ledger.Entry(ctx, f.Attempt.ID)
-		if err != nil {
-			s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
-			return nil
 		}
 		if row == nil {
-			if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+			if f.Attempt.Origin != lifecyclepub.OriginShell || strings.TrimSpace(f.Attempt.Command) == "" {
+				s.lifecycleMu.Lock()
+				scope, scoped := s.historySources[f.Attempt.ID]
+				sid = s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+				s.lifecycleMu.Unlock()
+				if !scoped || (f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown) {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				s.lifecycleMu.Lock()
+				delete(s.historySources, f.Attempt.ID)
+				s.lifecycleMu.Unlock()
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: scope.Pane,
+					Generation: scope.Generation, Source: scope.Source,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
+			}
+			s.lifecycleMu.Lock()
+			laneSID, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+			sid = laneSID
+			s.lifecycleMu.Unlock()
+			if !ok {
 				return nil
 			}
-			prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
-			if prepareErr != nil {
-				s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+			sess, sessErr := s.registry.Get(sid)
+			if sessErr != nil {
 				return nil
 			}
-			return &historyRecordedData{
-				SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
-				Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
-				Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
-				MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
-				Credentials: prepared.credentials,
+			s.recordAttemptEntry(ctx, f.Attempt.ID, f.Attempt.Command, "",
+				lifecycleShellLedgerClient, sess, f.Attempt.StartedAt, content.SourceUser)
+			row, err = ledger.Entry(ctx, f.Attempt.ID)
+			if err != nil {
+				s.log.Warn("lifecycle ledger read failed", "attempt", f.Attempt.ID, "error", err)
+				return nil
+			}
+			if row == nil {
+				if f.Attempt.State != lifecyclepub.AttemptCompleted && f.Attempt.State != lifecyclepub.AttemptUnknown {
+					return nil
+				}
+				prepared, prepareErr := prepareHistoryCommand(f.Attempt.Command, s.captures)
+				if prepareErr != nil {
+					s.log.Warn("history.recorded masking failed", "attempt", f.Attempt.ID, "error", prepareErr)
+					return nil
+				}
+				return &historyRecordedData{
+					SessionID: sid, AttemptID: f.Attempt.ID, PaneID: sess.PaneID(),
+					Generation: s.nextHistoryGeneration.Add(1), Source: content.SourceUser,
+					Command: prepared.rowCommand, MaskedCount: prepared.maskedCount,
+					MaskedKinds: prepared.maskedKinds, Redactions: prepared.redactions,
+					Credentials: prepared.credentials,
+				}
 			}
 		}
 	}

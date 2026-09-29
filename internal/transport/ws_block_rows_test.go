@@ -58,6 +58,10 @@ func (s *closeFailureBlockStore) CloseBlockRows(ctx context.Context, in content.
 	return s.ledger.CloseBlockRows(ctx, in)
 }
 
+func (s *closeFailureBlockStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
+	return s.ledger.OpenBlockRowsForSession(ctx, sessionID)
+}
+
 func (s *closeFailureBlockStore) RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error) {
 	return s.ledger.RecordClearBoundary(ctx, in)
 }
@@ -75,6 +79,10 @@ type blockingAppendStore struct {
 
 func newBlockingAppendStore(ledger content.LedgerRepository) *blockingAppendStore {
 	return &blockingAppendStore{ledger: ledger, entered: make(chan struct{}, 64), release: make(chan struct{})}
+}
+
+func (s *blockingAppendStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
+	return s.ledger.OpenBlockRowsForSession(ctx, sessionID)
 }
 
 func (s *blockingAppendStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {

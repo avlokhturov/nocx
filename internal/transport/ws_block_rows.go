@@ -62,6 +62,10 @@ type blockOutputStore interface {
 	// a read applies rather than a mark on every entry it hides
 	// (nocx-2v80t.3.17).
 	RecordClearBoundary(ctx context.Context, in content.RecordClearBoundary) (content.ClearBoundaryRecorded, error)
+	// OpenBlockRowsForSession is the re-adopt read (ADR-0076 decision 3):
+	// the open block the session still holds, with the artifact's own row
+	// cursor. The zero value (no entry id) means none stands open.
+	OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error)
 }
 
 // maxPendingEnds bounds the interval ends parked while their completion is
@@ -605,14 +609,102 @@ type blockClosedParams struct {
 
 // AttachBlockRows registers a session's helper rows callbacks as this
 // stream's source. Without a source the stream is inert — see the header.
+//
+// Before the source is exposed, the stream re-binds the session to the
+// open block the store still holds (adoptOpenBlock): a session re-adopted
+// after a coordinator restart owns a block opened by an authenticated
+// start BEFORE the restart, still open in the durable store with its row
+// cursor — that is what the no-seal detach preserves — and its rows
+// continue it by absolute departed-row index. No lifecycle fact is waited
+// for: the re-adopted lane stays Desynchronized until the shell answers
+// the snapshot at its post-command prompt, and until then the very fact
+// the block stream would wait on is quarantined, so the tail rows would
+// land on no block and be dropped (ADR-0076 decision 3).
 func (s *WSServer) AttachBlockRows(sid session.ID) {
+	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, nil, s.blockRowsBuffer())
+	s.blockStream.adoptOpenBlock(sid, found)
 }
 
 // AttachBlockRowsWithConfirmation additionally gives deferred rows a way to
 // advance the helper's watermark after the bind retry has persisted them.
+// It re-binds from the store exactly as AttachBlockRows does.
 func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(uint64)) {
+	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, confirm, s.blockRowsBuffer())
+	s.blockStream.adoptOpenBlock(sid, found)
+}
+
+// adoptableOpenBlock is the store half of the re-adopt re-bind: the open
+// block this session still holds in the store, if any. No store, or a
+// failed read, is no block — the stream attaches as ever and rows wait on
+// the ordinary lifecycle path.
+func (s *WSServer) adoptableOpenBlock(sid session.ID) content.OpenBlockRowsEntry {
+	store := s.blockStore()
+	if store == nil {
+		return content.OpenBlockRowsEntry{}
+	}
+	// Owner: this stream, at the re-adopting attach, on behalf of the block
+	// a previous coordinator process opened. Closing event: the read —
+	// nothing is held past it.
+	ctx := log.WithLogger(context.Background(), s.log)
+	found, err := store.OpenBlockRowsForSession(ctx, string(sid))
+	if err != nil {
+		s.log.Warn("block rows re-adopt read failed", "session", sid, "error", err)
+		return content.OpenBlockRowsEntry{}
+	}
+	return found
+}
+
+// adoptOpenBlock installs the store's open block into a freshly attached
+// stream: the same shape performOpen's install gives a block this process
+// opened — attempt, entry (one id by construction), artifact, kept — plus
+// the durable cursor, because an artifact this process did not open is
+// already holding rows. That cursor is the truth about what the artifact
+// holds: a lifecycle open racing this install carries the same artifact at
+// rows 0, and every tail delivery would sit behind a store refusal (a
+// cursor at 0 turns the first delivery at the real cursor into a
+// discontinuity), so the merge lifts rows to the store's answer and never
+// lowers it, and the artifact identity the store names is the one kept.
+//
+// A later open — a NEW command after the re-adopt — may already own the
+// stream by the time this lands: the recovered block stays named in
+// bs.open so the end its own interval still owes can close it, and current
+// keeps the later command's rows. Otherwise the recovered block IS
+// current: the session's rows continue it from the artifact's cursor.
+func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRowsEntry) {
+	if found.EntryID == "" {
+		return
+	}
+	bs.mu.Lock()
+	defer bs.mu.Unlock()
+	if _, sourced := bs.sources[sid]; !sourced {
+		// The attachment this read was made for is gone already.
+		return
+	}
+	if bs.open == nil {
+		bs.open = make(map[session.ID]map[string]*openBlock)
+	}
+	if bs.open[sid] == nil {
+		bs.open[sid] = make(map[string]*openBlock)
+	}
+	if bs.current == nil {
+		bs.current = make(map[session.ID]*openBlock)
+	}
+	b := bs.open[sid][found.EntryID]
+	if b == nil {
+		b = &openBlock{
+			attempt: found.EntryID, entry: found.EntryID,
+			artifactID: found.ArtifactID, kept: true,
+		}
+		bs.open[sid][found.EntryID] = b
+	}
+	if b.rows < found.NextRow {
+		b.rows = found.NextRow
+	}
+	if bs.current[sid] == nil {
+		bs.current[sid] = b
+	}
 }
 
 // blockRowsBuffer is the buffer a session attached now gets.
@@ -708,8 +800,32 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	// reported ended. Closing event: HelperSessionEnded's own seals —
 	// nothing is held past them (ADR-0076).
 	ctx := log.WithLogger(context.Background(), s.log)
+	// The session's open entry is resolved BEFORE the sealing detach: the
+	// detach seals the block's artifact, and the read below keys on the
+	// artifact being open.
+	openEntry := ""
+	if store := s.blockStore(); store != nil {
+		if open, err := store.OpenBlockRowsForSession(ctx, string(sid)); err == nil {
+			openEntry = open.EntryID
+		}
+	}
 	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
 		s.notifyBlockSubscriber(sid, "block.closed", closed)
+	}
+	// The helper's end report also closes the session's still-open LEDGER
+	// entry (ADR-0074 decision 3 as amended by ADR-0076): the completion
+	// fact is never coming — the kernel that would have turned it into a
+	// close is gone, and on a re-adopt the new kernel never saw the
+	// attempt — so the entry closes unknown with the transport gone,
+	// exactly the verdict a live kernel records for a session whose shell
+	// vanished. The open entry is the session's own (the entry id IS the
+	// attempt id), so the fact rides the ordinary writer.
+	if openEntry != "" {
+		s.syncLifecycleLedger(lifecyclepub.Fact{
+			Attempt: &lifecyclepub.Attempt{
+				ID: openEntry, State: lifecyclepub.AttemptUnknown, Origin: lifecyclepub.OriginShell,
+			},
+		})
 	}
 }
 
@@ -1983,6 +2099,21 @@ func (bs *blockStream) attemptFact(s *WSServer, f lifecyclepub.Fact) {
 		if f.Attempt.Fence == "" {
 			return
 		}
+		// A completion the kernel reconstructed for a command that ran for
+		// the coordinator BEFORE this one (the completion-only replay,
+		// ADR-0076) names a synthetic attempt — the shell's frame carries
+		// no id. The command's real block is the one the re-adopting
+		// stream re-bound from the store: this session's current open
+		// block. The fence resolves against THAT attempt, so the resent
+		// interval end seals it; the close parks behind any deferred
+		// append, so the rows still short of its cursor land first.
+		bs.mu.Lock()
+		if _, named := bs.open[sid][f.Attempt.ID]; !named {
+			if cur := bs.current[sid]; cur != nil && !cur.settled {
+				f.Attempt.ID = cur.attempt
+			}
+		}
+		bs.mu.Unlock()
 		bs.publishFence(s, sid, f.Attempt.Fence, f.Attempt.ID)
 	case lifecyclepub.AttemptUnknown:
 		bs.forgetEntered(sid, f.Attempt.ID)

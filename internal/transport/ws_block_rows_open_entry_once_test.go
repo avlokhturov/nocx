@@ -46,6 +46,10 @@ type raceOpenStore struct {
 	closeCalls    int
 }
 
+func (s *raceOpenStore) OpenBlockRowsForSession(ctx context.Context, sessionID string) (content.OpenBlockRowsEntry, error) {
+	return s.ledger.OpenBlockRowsForSession(ctx, sessionID)
+}
+
 func (s *raceOpenStore) OpenBlockOutput(ctx context.Context, in content.OpenBlockOutput) (string, error) {
 	select {
 	case <-s.bound:
@@ -245,6 +249,13 @@ type queueingOpenStore struct {
 	hold    chan struct{}
 	entered chan struct{}
 	seals   int
+}
+
+// OpenBlockRowsForSession: no ledger behind this fake holds an open
+// block, so the honest answer is the zero value — what every fresh
+// session's re-adopt read answers.
+func (s *queueingOpenStore) OpenBlockRowsForSession(context.Context, string) (content.OpenBlockRowsEntry, error) {
+	return content.OpenBlockRowsEntry{}, nil
 }
 
 func (s *queueingOpenStore) OpenBlockOutput(_ context.Context, in content.OpenBlockOutput) (string, error) {
