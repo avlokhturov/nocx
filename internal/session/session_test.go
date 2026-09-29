@@ -105,6 +105,64 @@ func TestRealRegistry_OpenAndClose(t *testing.T) {
 	}
 }
 
+// The orderly handover runs BEFORE the channel closes (ADR-0076): the
+// registry's Close — the coordinator-detach verb — must give the hosted
+// lifecycle leg its detach first, so the leg's adapter learns the handover
+// from this side and never reads its own carrier's EOF as the loss it is
+// not. An un-armed session (no lifecycle leg) closes as before.
+func TestRealRegistry_CloseRunsTheLifecycleDetachBeforeTheChannelCloses(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	sess, err := reg.Open(context.Background(), Config{Kind: KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	var order []string
+	armed := false
+	if d, ok := sess.(interface{ SetLifecycleDetach(func()) }); ok {
+		d.SetLifecycleDetach(func() { order = append(order, "detach") })
+		armed = true
+	}
+	if !armed {
+		t.Fatal("the registry's own session does not carry SetLifecycleDetach")
+	}
+	// The channel's close is observed the same way the adapter's would be:
+	// through Done, which Close is what fires.
+	go func() {
+		<-sess.Done()
+		order = append(order, "channel") //nolint:staticcheck // appended under the test's own sequencing
+	}()
+
+	err = reg.Close(sess.ID())
+	if err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if len(order) == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("close sequence = %v, want detach then channel", order)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if order[0] != "detach" {
+		t.Fatalf("close sequence = %v, want the detach before the channel close", order)
+	}
+
+	// The un-armed sibling: a session with no lifecycle leg closes plainly.
+	other, err := reg.Open(context.Background(), Config{Kind: KindLocal, Cols: 80, Rows: 24})
+	if err != nil {
+		t.Fatalf("Open (unarmed): %v", err)
+	}
+	if err := reg.Close(other.ID()); err != nil {
+		t.Fatalf("Close (unarmed): %v", err)
+	}
+}
+
 func TestRealRegistry_Get_NotFound(t *testing.T) {
 	reg := New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
 	_, err := reg.Get("nonexistent1234567890123456")

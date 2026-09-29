@@ -1296,6 +1296,20 @@ type BlockRowsSummary struct {
 	UnavailableRows uint64
 }
 
+// OpenBlockRowsEntry is the one streamed block a session still holds open,
+// read back by its session: the entry that opened it, the open rows
+// artifact under that entry, and the artifact's own row cursor. The entry
+// id doubles as the block stream's attempt id — OpenBlockOutput is called
+// with EntryID: attempt, so the two are one id by construction and this
+// read needs no second registry to name the attempt.
+type OpenBlockRowsEntry struct {
+	EntryID    string
+	ArtifactID string
+	// NextRow is the absolute departed-row index the NEXT delivery must
+	// start at — the cursor a re-adopting stream continues the block from.
+	NextRow uint64
+}
+
 // LostCauseCoordinatorUnavailable is the lost-rows cause the resend names:
 // the coordinator was away while ghostty pruned what it had not confirmed.
 const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
@@ -1992,6 +2006,14 @@ type LedgerRepository interface {
 	// the cap dropped (derived from the chunks that are actually there) and
 	// how many the emulator lost before they could be read.
 	CloseBlockRows(ctx context.Context, in CloseBlockRows) (BlockRowsSummary, error)
+	// OpenBlockRowsForSession returns the streamed block the session still
+	// holds open — its newest open rows artifact, with the artifact's own
+	// row cursor — or the zero value when none stands open. The read a
+	// re-adopting coordinator re-binds its block stream from (ADR-0076
+	// decision 3): the open block and its cursor survive the coordinator's
+	// restart in this store, and the session's rows continue them without
+	// waiting for a lifecycle fact.
+	OpenBlockRowsForSession(ctx context.Context, sessionID string) (OpenBlockRowsEntry, error)
 	// RecordClearBoundary records one sighted erase-saved-lines as a cursor
 	// an ordinary read applies rather than a mark on every entry it hides
 	// (nocx-2v80t.3.17, nocx-zg3k3.10.3's decision). Idempotent on nothing:

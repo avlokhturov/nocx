@@ -382,6 +382,45 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 	return summary, err
 }
 
+// OpenBlockRowsForSession reads the session's newest open rows artifact
+// with its cursor. The join is on the entry's session — the artifact rows
+// carry no session of their own — and the newest wins (entries.ingest_seq,
+// the store's total order) because at most one of a session's blocks is
+// the one still receiving rows: the current interval's. An earlier open
+// artifact under a still-unclosed interval would be found by its own
+// stream's continuation, never by this read.
+func (s *sqliteContent) OpenBlockRowsForSession(ctx context.Context, sessionID string) (OpenBlockRowsEntry, error) {
+	if sessionID == "" {
+		return OpenBlockRowsEntry{}, errors.New("content: block rows: session id is required")
+	}
+	var out OpenBlockRowsEntry
+	err := s.run(ctx, func(ctx context.Context) error {
+		var entryID, artifactID, payload string
+		scanErr := s.db.QueryRowContext(ctx,
+			`SELECT a.entry_id, a.id, a.payload
+			   FROM artifacts a
+			   JOIN entries e ON e.id = a.entry_id
+			  WHERE e.session_id = ? AND a.media_type = ? AND a.state = ?
+			  ORDER BY e.ingest_seq DESC
+			  LIMIT 1`,
+			sessionID, string(MediaBlockRows), string(ArtifactOpen)).Scan(&entryID, &artifactID, &payload)
+		if errors.Is(scanErr, sql.ErrNoRows) {
+			// No open block: the honest empty answer, never an error —
+			// every fresh session's first attach lands here.
+			return nil
+		}
+		if scanErr != nil {
+			return scanErr
+		}
+		out = OpenBlockRowsEntry{
+			EntryID: entryID, ArtifactID: artifactID,
+			NextRow: decodeBlockRowsPayload(payload).NextRow,
+		}
+		return nil
+	})
+	return out, err
+}
+
 // blockRowsState is what an append or a close reads the block as.
 type blockRowsState struct {
 	payload blockRowsPayload
