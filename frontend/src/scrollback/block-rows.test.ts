@@ -3,13 +3,17 @@
 import { describe, expect, it } from 'vitest'
 import type { LedgerBlockRowsLine, Mark } from '../generated/ledger.blockRows'
 import { styleOf, wireRowOf, type CellSpec } from '../painter/fixtures'
+import { CommandSnapshotStore } from '../command-snapshot'
 import { DEFAULT_SNAPSHOT } from './serializer'
+import { restoredBlock } from './restored-block'
 import {
   blockColumnsOf,
   paintStoredRows,
+  paintUnreadableRows,
   parseStoredBlockRows,
   type StoredBlockRows,
 } from './block-rows'
+import { blockOutputText } from './blocks'
 
 const PLAIN = styleOf()
 
@@ -144,64 +148,210 @@ describe('stored block rows', () => {
     )
   })
 
-  it('reports the count when the stored rows are incomplete', () => {
+  // The causes reach the card separately (ledger.get carries the artifact's
+  // truncated reason and the payload summary's two counts), so the card says
+  // WHY rows are missing, one cause at a time, each with its count where the
+  // store counted one (nocx-zg3k3.5.5). A cause that arrives later — rows
+  // lost while the coordinator was away, say — is one more table entry in
+  // block-rows.ts, not a second derivation.
+  it('names the cap cause with its count and the setting that raises it', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, droppedRows: 2, lostRows: 1, truncated: 'cap' },
-      {
-        metric: null,
-        palette: DEFAULT_SNAPSHOT,
-      },
-    )
-
-    expect(block.textContent).toContain('Output incomplete: 3 rows missing')
-  })
-
-  it('reports the notice for a truncated block even when no count is known (suppressed)', () => {
-    const block = document.createElement('article')
-
-    paintStoredRows(
-      block,
-      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'suppressed' },
+      { ...stored, droppedRows: 3, truncated: 'cap', sealed: true },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
-    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
-    expect(block.textContent).toContain('Output incomplete')
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      'Output incomplete: 3 rows are missing — the output passed the history output limit. Raise the history.outputCapKB setting to keep more.',
+    )
   })
 
-  it('reports the notice for a truncated block with a gap and no counted rows', () => {
+  it('names the cap cause without a count while the block is still open', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'gap' },
+      { ...stored, truncated: 'cap' },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
-    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      'Output incomplete: the output passed the history output limit (the history.outputCapKB setting).',
+    )
   })
 
-  it('reports the notice for a truncated block capped with no counted rows', () => {
+  it('names pruned-from-scrollback as its own cause, apart from the cap', () => {
     const block = document.createElement('article')
 
     paintStoredRows(
       block,
-      { ...stored, droppedRows: 0, lostRows: 0, truncated: 'cap' },
+      { ...stored, lostRows: 2, sealed: true },
       { metric: null, palette: DEFAULT_SNAPSHOT },
     )
 
-    expect(block.querySelector('[data-output-incomplete]')).not.toBeNull()
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      "Output incomplete: 2 rows left the terminal's scrollback before they could be captured; that output is lost.",
+    )
   })
 
-  it('shows no incomplete notice for a complete block (truncated null, no missing rows)', () => {
+  it('names the overflowed stream as its own cause', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, truncated: 'gap', sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      'Output incomplete: the output stream overflowed, so part of it could not be kept.',
+    )
+  })
+
+  it('names a refused capture, which has no count because capture never ran', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, truncated: 'suppressed', sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
+      'Output incomplete: capture was refused by policy, so nothing was kept.',
+    )
+  })
+
+  it('names two causes at once, each with its own count', () => {
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, droppedRows: 3, lostRows: 2, truncated: 'cap', sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
+    expect(text).toContain('3 rows are missing')
+    expect(text).toContain('the output passed the history output limit')
+    expect(text).toContain("2 rows left the terminal's scrollback")
+  })
+
+  it('shows no missing-rows notice for a complete block (paired positive)', () => {
     const block = document.createElement('article')
 
     paintStoredRows(block, stored, { metric: null, palette: DEFAULT_SNAPSHOT })
 
     expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+  })
+
+  it('says a sealed block that holds no rows printed nothing, and says it only once sealed', () => {
+    const open = document.createElement('article')
+    paintStoredRows(
+      open,
+      { ...stored, lines: [], sealed: false },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(open.querySelector('[data-output-empty]')).toBeNull()
+
+    const sealedEmpty = document.createElement('article')
+    paintStoredRows(
+      sealedEmpty,
+      { ...stored, lines: [], sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+    expect(sealedEmpty.querySelector('[data-output-empty]')?.textContent).toBe(
+      'This command printed no output.',
+    )
+    expect(sealedEmpty.querySelector('[data-output-incomplete]')).toBeNull()
+  })
+
+  it('replaces the empty statement when a later read carries rows', () => {
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      { ...stored, lines: [], sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    paintStoredRows(block, { ...stored, sealed: true }, { metric: null, palette: DEFAULT_SNAPSHOT })
+
+    expect(block.querySelector('[data-output-empty]')).toBeNull()
+    expect(block.querySelector('[data-output-incomplete]')).toBeNull()
+    expect([...block.querySelectorAll('.term-grid-row')].map((el) => el.textContent)).toEqual([
+      'ok\n',
+      'abc',
+    ])
+  })
+
+  it('keeps an incomplete notice readable as the block output when no rows painted', () => {
+    // The agent-run completion and Copy output read the block's output
+    // (blockOutputText). With no rows painted, the incomplete notice IS
+    // what the block holds — a run whose output never arrived must not
+    // answer '' and read as one that printed nothing (nocx-2v80t.3.27).
+    const block = document.createElement('article')
+    paintStoredRows(
+      block,
+      { ...stored, lines: [], droppedRows: 3, truncated: 'cap', sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    expect(blockOutputText(block)).toContain('3 rows are missing')
+  })
+
+  it('renders every readable state with its own words, none an unexplained empty body', () => {
+    // The states a card can be read in (nocx-zg3k3.5.5): complete, capture
+    // refused, incomplete with EACH cause, evicted, empty, unreadable. Each
+    // must carry visible words, and no two may share them — a person staring
+    // at any card must be able to tell which state it is in without opening
+    // anything else.
+    const paint = (over: Partial<StoredBlockRows>): string => {
+      const block = document.createElement('article')
+      paintStoredRows(
+        block,
+        { ...stored, sealed: true, ...over },
+        { metric: null, palette: DEFAULT_SNAPSHOT },
+      )
+      const text = block.textContent ?? ''
+      expect(text.trim(), `state ${JSON.stringify(over)} must render words`).not.toBe('')
+      return text
+    }
+    const unreadable = document.createElement('article')
+    paintUnreadableRows(unreadable)
+    const evicted = restoredBlock(
+      {
+        id: 1,
+        command: 'make test',
+        cwd: '/repo',
+        location: '',
+        durationMs: 1200,
+        exitCode: 0,
+        status: 'success' as const,
+        body: null,
+        author: 'shell' as const,
+        kind: 'command' as const,
+        entryId: 'entry-1',
+      },
+      DEFAULT_SNAPSHOT,
+      () => document.createElement('div'),
+      () => {},
+      new CommandSnapshotStore(),
+    )
+
+    const states: ReadonlyArray<readonly [string, string]> = [
+      ['complete', paint({})],
+      ['cap', paint({ droppedRows: 3, truncated: 'cap' })],
+      ['lost', paint({ lostRows: 2 })],
+      ['gap', paint({ truncated: 'gap' })],
+      ['suppressed', paint({ truncated: 'suppressed' })],
+      ['two causes', paint({ droppedRows: 3, lostRows: 2, truncated: 'cap' })],
+      ['empty', paint({ lines: [] })],
+      ['unreadable', unreadable.textContent ?? ''],
+      ['evicted', evicted.textContent ?? ''],
+    ]
+    expect(new Set(states.map(([, text]) => text)).size).toBe(states.length)
   })
 
   it('rejects malformed JSONL instead of inventing local output', () => {
