@@ -653,6 +653,16 @@ func (s *WSServer) adoptableOpenBlock(sid session.ID) content.OpenBlockRowsEntry
 		s.log.Warn("block rows re-adopt read failed", "session", sid, "error", err)
 		return content.OpenBlockRowsEntry{}
 	}
+	// Probe (nocx-zg3k3.5.3 round 7): which open block — entry, artifact,
+	// cursor — the re-adopt re-binds from, or that none survives.
+	if found.EntryID != "" {
+		log.From(ctx).Debug("block rows re-bind: the store holds the session's open block",
+			"session", sid, "entry", found.EntryID, "artifact", found.ArtifactID,
+			"cursor", found.NextRow)
+	} else {
+		log.From(ctx).Debug("block rows re-bind: the store holds no open block",
+			"session", sid)
+	}
 	return found
 }
 
@@ -1143,16 +1153,23 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	}
 	// Owner: this stream, inside the helper's row delivery. Closing event:
 	// the append — one store write per delivery, nothing held past it.
-	err := store.AppendBlockRows(context.Background(), content.AppendBlockRows{
+	ctx := log.WithLogger(context.Background(), s.log)
+	err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 		EntryID: block.entry, ArtifactID: block.artifactID,
 		FromRow: fromRow, LostRows: lost, LostCause: lostCause, Rows: rows,
 	})
 	if err != nil {
 		// A store failure is not a refusal: the rows are still wanted, and
 		// refusing to confirm is what lets them be offered again.
-		s.log.Warn("block rows append failed", "session", sid, "entry", block.entry, "error", err)
+		log.From(ctx).Warn("block rows append failed", "session", sid, "entry", block.entry,
+			"artifact", block.artifactID, "from", fromRow, "error", err)
 		return 0, false
 	}
+	// Probe (nocx-zg3k3.5.3 round 7): the direct append's answer — which
+	// artifact took the delivery, and what the acknowledgement will claim.
+	log.From(ctx).Debug("block rows direct append: stored",
+		"session", sid, "entry", block.entry, "artifact", block.artifactID,
+		"from", fromRow, "rows", len(rows), "upTo", writtenUpTo)
 	// The append committed, so the artifact's cursor is now the exclusive end
 	// of this delivery. The close reads it to place its closing screen.
 	bs.mu.Lock()
@@ -1709,7 +1726,7 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 	// Closing event: the seal — the closing append and the close are the
 	// last writes this interval can cause.
 	store := s.blockStore()
-	ctx := context.Background()
+	ctx := log.WithLogger(context.Background(), s.log)
 	// Every ordinary close is also a chance to retry a row a PAST discarded
 	// open never managed to seal (nocx-2v80t.3.51) — unrelated to this
 	// interval's own attempt, so it runs regardless of what this close
@@ -2306,7 +2323,8 @@ func (bs *blockStream) performOpen(s *WSServer, sid session.ID, attempt string, 
 		// Owner: this stream, at the command's authenticated start.
 		// Closing event: the open — one store write that decides keep or
 		// refuse; nothing is held past it.
-		opened, err := store.OpenBlockOutput(context.Background(), content.OpenBlockOutput{
+		openCtx := log.WithLogger(context.Background(), s.log)
+		opened, err := store.OpenBlockOutput(openCtx, content.OpenBlockOutput{
 			EntryID: attempt, ArtifactID: v7.String(),
 		})
 		if err != nil {

@@ -33,6 +33,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -612,6 +613,10 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 			if open, openErr := s.blockStore().OpenBlockRowsForSession(ctx, string(sid)); openErr == nil && open.EntryID != "" {
 				if reopened, rerr := ledger.Entry(ctx, open.EntryID); rerr == nil && reopened != nil && reopened.Phase != content.PhaseClosed {
 					row = reopened
+					// Probe (nocx-zg3k3.5.3 round 7): the synthetic completion
+					// resolved to the session's open entry.
+					log.From(ctx).Debug("lifecycle completion replay resolved the session's open entry",
+						"attempt", f.Attempt.ID, "entry", open.EntryID, "artifact", open.ArtifactID)
 				}
 			}
 		}
@@ -698,6 +703,11 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
 		if row.Phase == content.PhaseOpen {
+			// Probe (nocx-zg3k3.5.3 round 7): this line firing twice for one
+			// entry means two execution rows — the seam a second, artifact-less
+			// execution opens through.
+			log.From(ctx).Debug("lifecycle ledger start on an open fact for an open entry",
+				"attempt", row.ID)
 			if _, startErr := start(); startErr != nil {
 				s.log.Warn("lifecycle ledger start failed", "attempt", row.ID, "error", startErr)
 			}
