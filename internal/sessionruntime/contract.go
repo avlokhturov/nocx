@@ -546,16 +546,6 @@ const (
 	// nothing but its own expiry. Settled meetings (complete, expired) give
 	// up their slot to the oldest first: they are record, not authority.
 	MaxPendingRendezvous = 8
-	// MaxObservations is the most sealed records one session's store holds.
-	// Beyond it the oldest records go, first out, and
-	// [Session.ObservationsEvicted] counts them: a record that is gone must
-	// not look like a command that never ran. Since nocx-2v80t.3.6 a record
-	// holds boundaries, counts and two screens — the departed rows stream
-	// out and the helper keeps no copy — so the bound costs eight records'
-	// worth of screens at a cost MEASURED in
-	// TestTheRecordStoreIsMeasuredAtTheThreeGeometries, a number rather
-	// than a policy statement.
-	MaxObservations = 8
 )
 
 // ---------------------------------------------------------------------------

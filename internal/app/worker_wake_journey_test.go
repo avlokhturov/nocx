@@ -298,7 +298,7 @@ func (s *s14RealStand) mailRows(t *testing.T) []workers.Message {
 	return rows
 }
 
-// waitForObservations waits until the mailbox holds at least want observations
+// waitForObservedStates waits until the mailbox holds at least want observations
 // of one worker in one state, and returns them. It is what every "the worker
 // settled / blocked / exited" step waits on, and the COUNT is the point: a
 // worker that comes up idle and then settles idle again after its turn
@@ -306,7 +306,7 @@ func (s *s14RealStand) mailRows(t *testing.T) []workers.Message {
 // idle observation" would be satisfied by the arrival and would let a step
 // that needs the second one run early — measured, under a loaded machine, in
 // this check's own first package-wide run.
-func (s *s14RealStand) waitForObservations(t *testing.T, worker string, state workers.ObservedState, want int) []workers.Message {
+func (s *s14RealStand) waitForObservedStates(t *testing.T, worker string, state workers.ObservedState, want int) []workers.Message {
 	t.Helper()
 	var found []workers.Message
 	waittest.WaitForDetail(t, fmt.Sprintf("%q to be seen %s %d time(s)", worker, state, want), func() string {
@@ -703,7 +703,7 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// that HELD is news (design §4.3) — the first row the coordinator's mailbox
 	// holds, and the row the settle probe below counts on. It is not the
 	// report: nothing has been said yet.
-	stand.waitForObservations(t, w1, workers.ObservedIdle, 1)
+	stand.waitForObservedStates(t, w1, workers.ObservedIdle, 1)
 
 	// THE COORDINATOR'S OWN FIRST READING, and the settle-window probe begins
 	// with it: nothing has been delivered to the coordinator yet, so this is
@@ -757,7 +757,7 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	// FOLLOWS the report in the mailbox, in the order the brief states.
 	stand.cueMock(t, w1Session, "idle")
 	stand.waitForState(t, w1Session, agentdriver.StateFreeText)
-	stand.waitForObservations(t, w1, workers.ObservedIdle, 2)
+	stand.waitForObservedStates(t, w1, workers.ObservedIdle, 2)
 
 	// NOTHING BUT A NOTE IS NEEDED FOR THIS: the call that ends the search for
 	// workers.wait is that the vocabulary is gone, so the coordinator's own
@@ -851,7 +851,7 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	blockedSession := stand.liveSession(t, blockedSpawn.ID)
 	stand.cueMock(t, blockedSession, "menu")
 	stand.waitForState(t, blockedSession, agentdriver.StatePermissionChoice)
-	stand.waitForObservations(t, blockedSpawn.ID, workers.ObservedBlocked, 1)
+	stand.waitForObservedStates(t, blockedSpawn.ID, workers.ObservedBlocked, 1)
 
 	// The worker whose PROCESS ends. The command runs the agent and then ENDS
 	// THE PANE, which is what a worker's process ending actually is here: the
@@ -872,11 +872,11 @@ func TestACoordinatorHearsItsWorkersThroughTheRealHelper(t *testing.T) {
 	}
 	doomedSession := stand.liveSession(t, doomedSpawn.ID)
 	stand.cueMock(t, doomedSession, "exit")
-	stand.waitForObservations(t, doomedSpawn.ID, workers.ObservedExited, 1)
+	stand.waitForObservedStates(t, doomedSpawn.ID, workers.ObservedExited, 1)
 	// What nocx SAW, as the coordinator is about to read it back: the pane's
 	// own classification for the blocked one, and the process fact for the
 	// other — both addressed to this coordinator by the record itself.
-	blockedRow := stand.waitForObservations(t, blockedSpawn.ID, workers.ObservedBlocked, 1)[0]
+	blockedRow := stand.waitForObservedStates(t, blockedSpawn.ID, workers.ObservedBlocked, 1)[0]
 	if blockedRow.Sender != "nocx" {
 		t.Fatalf("the blocked observation is %+v, want the record's own sender", blockedRow)
 	}
