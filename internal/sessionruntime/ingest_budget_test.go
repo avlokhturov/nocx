@@ -1,40 +1,42 @@
 package sessionruntime
 
-// The ingest hot path's speed budget (nocx-zg3k3.5.8): taking a program's
-// output in and streaming its departed rows out has a BUDGET, held by a
-// test, and a benchmark that measures the path.
+// The ingest window's speed budget (nocx-zg3k3.5.8), restored by the round-2
+// review of nocx-zg3k3.5.9. The stage's criterion is about the INGEST hot
+// path — taking a program's output in through the real emulator and
+// capturing its departed rows — which carries ~99% of the whole path's cost
+// (8.4M allocs/MiB against the pump's 53k), and which the pump-only gate in
+// internal/helper/session cannot see. This file gates THAT window; the
+// pump's own window stays gated where the pump lives
+// (internal/helper/session/rows_budget_test.go). Two windows, one
+// implementation each: this one drives the production code and stops at the
+// rows the RowStream hands out — the stream is a counter, not a second
+// encoding, so nothing here re-implements work the shipped code does
+// elsewhere.
 //
-// The path measured here is the production one, over the real emulator
+// The path measured is the production one, over the real emulator
 // (libghostty-vt behind its port) and the real runtime, with no PTY: the
 // carrier's bytes arrive through [Session.Ingest] in [MaxIngestBytes]
-// chunks, the emulator departs rows off the live rectangle, the drain hands
-// each batch to this session's [RowStream], and the stream does the pump's
-// encoding — [EncodeRows] per [pumpRowsPerFrame]-row split, then the
-// [proto.OutputRowsDoc] marshal, exactly as
-// internal/helper/session/rows.go's deliverRowEmission does it before a
-// sink takes the frame. The pump's queue, its goroutine and the socket are
-// not reachable without a helper session; everything up to the encoded
-// frame is, and that is the work whose shape a regression would change.
+// chunks, the emulator departs rows off the live rectangle, and the drain
+// hands each batch to this session's [RowStream] — all synchronously inside
+// the feed, so the MemStats window opens before it and closes after.
 //
 // The feed is fixed: about four MiB of numbered, styled, full-width lines
 // at 120x40 — the same shape the real chain test floods with
 // (internal/transport/ws_block_rows_bounds_test.go's styledFloodCommand),
 // one column short of wrap so every line stays one row. No fence rides the
-// feed: the budget is the cost of TAKING OUTPUT IN AND STREAMING ITS ROWS,
-// not the once-per-command rendezvous of sealing one.
+// feed: the budget is the cost of TAKING OUTPUT IN AND CAPTURING ITS
+// DEPARTED ROWS, not the once-per-command rendezvous of sealing one.
 //
 // What gates and what only reports is the owner's decision of 2026-09-29
 // (run preflight, point 5, on nocx-zg3k3.5): the budget GATES on
 // allocations and bytes allocated per MiB fed — numbers that do not depend
 // on the machine — and THROUGHPUT IS MEASURED AND REPORTED, NEVER GATED
-// (AGENTS.md: a test may not depend on timing; CI machines differ from
-// this one). [TestIngestToRowStreamStaysWithinItsBudget] holds the gate;
-// [BenchmarkIngestToDepartedRows] reports ns/op, MiB/s, allocs/MiB and
-// B/MiB for the next baseline re-measurement.
+// (AGENTS.md: a test may not depend on timing; CI machines differ from this
+// one). [TestIngestCaptureStaysWithinItsBudget] holds the gate;
+// [BenchmarkIngestCapture] reports ns/op, MiB/s, allocs/MiB and B/MiB for
+// the next baseline re-measurement.
 
 import (
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"runtime"
 	"strings"
@@ -43,34 +45,26 @@ import (
 
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/emulator/ghostty"
-	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
-// budgetFeedBytes is how much output one feed carries: a few MiB, large
+// ingestFeedBytes is how much output one feed carries: a few MiB, large
 // enough that per-call constants amortize away and small enough that the
 // whole package suite stays quick with the budget test in it.
-const budgetFeedBytes = 4 << 20
+const ingestFeedBytes = 4 << 20
 
-// pumpRowsPerFrame is the helper's own split bound, spelled here because
-// internal/helper/session declares it unexported (rowsPerFrame = 32): the
-// pump splits every batch at this row count before one rows frame is
-// encoded, and the budget's stream splits the same way, or it would measure
-// a shape production never builds.
-const pumpRowsPerFrame = 32
-
-// budgetGeometry is 120x40, the geometry this bead names.
-func budgetGeometry() Geometry {
+// ingestGeometry is 120x40, the geometry this bead names.
+func ingestGeometry() Geometry {
 	return harnessGeometry(120, 40)
 }
 
-// budgetFeed builds the fixed feed once per process: numbered, styled,
+// ingestFeed builds the fixed feed once per process: numbered, styled,
 // full-width lines at 120 columns (119 to stay one short of wrap), a
 // truecolour foreground over the whole line the way a program's colourised
 // output arrives. Built outside the timed regions; a lazily-built package
 // value, so the rest of the suite pays nothing for it.
-var budgetFeed = sync.OnceValue(func() []byte {
+var ingestFeed = sync.OnceValue(func() []byte {
 	var b strings.Builder
-	for i := 0; b.Len() < budgetFeedBytes; i++ {
+	for i := 0; b.Len() < ingestFeedBytes; i++ {
 		// rNNNNNN + padding to column 119, all under one SGR colour; the
 		// padding spaces carry the style, so nothing trims them and every
 		// row is genuinely full-width on the wire.
@@ -79,94 +73,46 @@ var budgetFeed = sync.OnceValue(func() []byte {
 	return []byte(b.String())
 })
 
-// budgetStream is the [RowStream] the benchmark and the budget test bind:
-// the helper row bridge's ENCODING half, minus the socket. OutputRows
-// splits each batch at pumpRowsPerFrame and encodes each frame exactly as
-// internal/helper/session/rows.go's deliverRowEmission does — EncodeRows,
-// then one json.Marshal of the rows document — counting the payload bytes
-// a sink would take and the frames it would send. The first encode error
-// is kept, never swallowed: a feed that could not be encoded measured
-// nothing and must fail its caller.
-type budgetStream struct {
-	payloadBytes int64
-	frames       int
-	err          error
+// ingestCounter is the [RowStream] the benchmark and the budget test bind:
+// a measurement seam at the exact boundary where the runtime hands departed
+// rows over, and nothing more. It counts what arrived (rows, losses,
+// batches) so the gate can tell the feed was captured whole, and allocates
+// nothing per batch — an encoding here would charge the ingest window for
+// work this window does not own (the pump's, gated separately).
+type ingestCounter struct {
+	mu    sync.Mutex
+	rows  uint64
+	lost  uint64
+	batch int
 }
 
-func (bs *budgetStream) OutputRows(from uint64, rows []emulator.Row, lost uint64) {
-	doc := proto.OutputRowsDoc{FromRow: from, LostRows: lost}
-	for start := 0; start <= len(rows); start += pumpRowsPerFrame {
-		stop := start + pumpRowsPerFrame
-		if stop > len(rows) {
-			stop = len(rows)
-		}
-		raw, err := EncodeRows(rows[start:stop])
-		if err != nil {
-			bs.err = fmt.Errorf("sessionruntime: encode rows: %w", err)
-			return
-		}
-		doc.Rows = raw
-		payload, err := json.Marshal(doc)
-		if err != nil {
-			bs.err = fmt.Errorf("sessionruntime: marshal rows document: %w", err)
-			return
-		}
-		bs.payloadBytes += int64(len(payload)) // #nosec G115 -- len is never negative
-		bs.frames++
-		if stop == len(rows) {
-			return
-		}
-		doc.FromRow += uint64(stop - start) // #nosec G115 -- slice arithmetic, never negative
-		// The gap LostRows states belongs to the first split frame alone,
-		// exactly as the pump's own split does it.
-		doc.LostRows = 0
-	}
+func (c *ingestCounter) OutputRows(from uint64, rows []emulator.Row, lost uint64) {
+	c.mu.Lock()
+	c.rows += uint64(len(rows)) //nolint:gosec // a row count
+	c.lost += lost
+	c.batch++
+	c.mu.Unlock()
 }
 
-func (bs *budgetStream) IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool) {
-	// encodedRowsOrNothing's shape: nil closing marshals as null, the
-	// contract's answer for a screen that could not be read.
-	var closingRaw json.RawMessage
-	if closing != nil {
-		raw, err := EncodeRows(closing)
-		if err != nil {
-			bs.err = fmt.Errorf("sessionruntime: encode closing rows: %w", err)
-			return
-		}
-		closingRaw = raw
-	}
-	payload, err := json.Marshal(proto.IntervalEndDoc{
-		Nonce:   hex.EncodeToString(nonce[:]),
-		EndRow:  endRow,
-		Closing: closingRaw,
-		NoFence: settledWithoutFence,
-	})
-	if err != nil {
-		bs.err = fmt.Errorf("sessionruntime: marshal interval end: %w", err)
-		return
-	}
-	bs.payloadBytes += int64(len(payload)) // #nosec G115 -- len is never negative
-	bs.frames++
+func (c *ingestCounter) IntervalEnd(nonce FenceNonce, endRow uint64, closing []emulator.Row, settledWithoutFence bool) {
 }
 
-func (bs *budgetStream) ClearBoundary() {
-	payload, err := json.Marshal(proto.ClearBoundaryDoc{Kind: "clear"})
-	if err != nil {
-		bs.err = fmt.Errorf("sessionruntime: marshal clear boundary: %w", err)
-		return
-	}
-	bs.payloadBytes += int64(len(payload)) // #nosec G115 -- len is never negative
-	bs.frames++
+func (c *ingestCounter) ClearBoundary() {}
+
+func (c *ingestCounter) snapshot() (rows, lost uint64, batch int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.rows, c.lost, c.batch
 }
 
-// newBudgetSession builds the real chain over a fresh emulator: the real
-// ghostty port at 120x40, the real runtime over it, and a budgetStream
-// bound as the row stream. The returned stop closes the emulator; the
-// harness terminal and the direct reply sink are this package's own test
-// instruments, and the feed asks the program nothing, so the reply sink is
-// never written.
-func newBudgetSession() (*Session, *budgetStream, func(), error) {
-	g := budgetGeometry()
+// newIngestWindowSession builds the real chain over a fresh emulator: the
+// real ghostty port at 120x40 and the real runtime over it, with the
+// counting stream bound as the row stream. The returned stop closes the
+// emulator; the harness terminal and the direct reply sink are this
+// package's own test instruments, and the feed asks the program nothing, so
+// the reply sink is never written.
+func newIngestWindowSession() (*Session, *ingestCounter, func(), error) {
+	g := ingestGeometry()
 	term := newHarnessTerminal(g)
 	screen, err := ghostty.New(g)
 	if err != nil {
@@ -184,15 +130,17 @@ func newBudgetSession() (*Session, *budgetStream, func(), error) {
 		screen.Close()
 		return nil, nil, nil, fmt.Errorf("sessionruntime: build the runtime: %w", err)
 	}
-	stream := &budgetStream{}
-	s.SetRowStream(stream)
-	return s, stream, screen.Close, nil
+	counter := &ingestCounter{}
+	s.SetRowStream(counter)
+	return s, counter, screen.Close, nil
 }
 
-// feedBudgetStream feeds the whole fixed feed through the session the way
-// the carrier hands bytes: chunks of at most MaxIngestBytes.
-func feedBudgetStream(s *Session) error {
-	feed := budgetFeed()
+// feedIngestWindow feeds the whole fixed feed through the session the way
+// the carrier hands bytes: chunks of at most MaxIngestBytes. The row stream
+// is handed every departed batch synchronously inside these calls, so the
+// caller's MemStats window contains the whole ingest-and-capture cost.
+func feedIngestWindow(s *Session) error {
+	feed := ingestFeed()
 	for len(feed) > 0 {
 		n := min(len(feed), MaxIngestBytes)
 		if err := s.Ingest(feed[:n]); err != nil {
@@ -203,28 +151,29 @@ func feedBudgetStream(s *Session) error {
 	return nil
 }
 
-// BenchmarkIngestToDepartedRows measures the whole path — ingest through
-// the real emulator, the departure drain, the row stream, the pump's
-// encoding — per four-MiB feed, and reports it per MiB of output fed:
-// ns/op (the framework's own), MiB/s, allocs/MiB and B/MiB.
+// BenchmarkIngestCapture measures the ingest window — the carrier's bytes
+// through the real emulator, the departure drain, the capture of the
+// departed rows and the hand-off to the row stream — per four-MiB feed, and
+// reports it per MiB of output fed: ns/op (the framework's own), MiB/s,
+// allocs/MiB and B/MiB.
 //
 // Throughput here is a REPORT, never a gate: this machine is not CI, and
 // AGENTS.md forbids a test that depends on timing. The gate lives in
-// TestIngestToRowStreamStaysWithinItsBudget, over the machine-independent
+// TestIngestCaptureStaysWithinItsBudget, over the machine-independent
 // numbers.
 //
 // Re-measuring a baseline (then re-deriving the budget constants below):
 //
-//	go test -tags gtk3 -run '^$' -bench BenchmarkIngestToDepartedRows \
+//	go test -tags gtk3 -run '^$' -bench BenchmarkIngestCapture \
 //		-benchtime 10x ./internal/sessionruntime
-func BenchmarkIngestToDepartedRows(b *testing.B) {
-	feed := budgetFeed()
+func BenchmarkIngestCapture(b *testing.B) {
+	feed := ingestFeed()
 	mibPerOp := float64(len(feed)) / (1 << 20)
 	var mallocs, bytesAlloc uint64
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		s, stream, stop, err := newBudgetSession()
+		s, counter, stop, err := newIngestWindowSession()
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -235,15 +184,15 @@ func BenchmarkIngestToDepartedRows(b *testing.B) {
 		var before, after runtime.MemStats
 		runtime.ReadMemStats(&before)
 		b.StartTimer()
-		feedErr := feedBudgetStream(s)
+		feedErr := feedIngestWindow(s)
 		b.StopTimer()
 		runtime.ReadMemStats(&after)
 		stop()
 		if feedErr != nil {
 			b.Fatal(feedErr)
 		}
-		if stream.err != nil {
-			b.Fatal(stream.err)
+		if _, _, batch := counter.snapshot(); batch == 0 {
+			b.Fatal("the feed captured no departed batches: the window measured nothing")
 		}
 		mallocs += after.Mallocs - before.Mallocs
 		bytesAlloc += after.TotalAlloc - before.TotalAlloc
@@ -255,51 +204,53 @@ func BenchmarkIngestToDepartedRows(b *testing.B) {
 	}
 }
 
-// The budget: the measured baseline on this tree plus a stated margin,
-// held by TestIngestToRowStreamStaysWithinItsBudget. Both numbers came off
-// THIS tree with BenchmarkIngestToDepartedRows on 2026-09-29, on the
-// x86-64 Linux box this worktree runs on (AMD Ryzen 5 8600G), with:
+// The budget: the measured baseline on this tree plus a stated margin, held
+// by TestIngestCaptureStaysWithinItsBudget. Both numbers came off THIS tree
+// with BenchmarkIngestCapture on 2026-09-29, on the x86-64 Linux box this
+// worktree runs on (AMD Ryzen 5 8600G), with:
 //
-//	go test -tags gtk3 -run '^$' -bench BenchmarkIngestToDepartedRows \
+//	go test -tags gtk3 -run '^$' -bench BenchmarkIngestCapture \
 //		-benchtime 10x ./internal/sessionruntime
 //
 // The margin is 25%, the brief's stated figure. A change that crosses
-// either number has put a new allocation on the ingest-to-departed-rows
-// path — the regression the budget exists to catch — and the fix is to
-// remove it, not to raise the budget: raising one re-measures the baseline
-// with the benchmark, says in a bead why the new shape is right, and dates
-// the new numbers the same way these are dated.
+// either number has put a new allocation on the ingest-and-capture path —
+// the regression the budget exists to catch — and the fix is to remove it,
+// not to raise the budget: raising one re-measures the baseline with the
+// benchmark, says in a bead why the new shape is right, and dates the new
+// numbers the same way these are dated.
 const (
-	// baseline 2026-09-29: 8,422,197 allocs/MiB and 225,399,763 B/MiB, so
-	// each gate is that number plus 25%, rounded up.
-	budgetAllocsPerMiB = 10_550_000 // baseline 8,422,197 allocs/MiB, +25%
-	budgetBytesPerMiB  = 282_000_000
+	// baseline 2026-09-29: 8,368,759 allocs/MiB and 219,635,855 B/MiB, so
+	// each gate is that number plus 25%, rounded up. Measured over the
+	// ingest window only — the real emulator's take-in and the capture of
+	// its departed rows, ending at the RowStream hand-off.
+	budgetAllocsPerMiB = 10_470_000 // baseline 8,368,759 allocs/MiB, +25%
+	budgetBytesPerMiB  = 275_000_000
 )
 
-// TestIngestToRowStreamStaysWithinItsBudget runs the same feed the
-// benchmark does, once, and FAILS when allocations or bytes allocated per
-// MiB fed exceed the budget above. The numbers are allocation counts, not
-// timings — they do not depend on this machine's speed, so the check is
-// legitimate everywhere the suite runs (the owner's decision of 2026-09-29,
-// run preflight point 5). Throughput is deliberately NOT asserted.
-func TestIngestToRowStreamStaysWithinItsBudget(t *testing.T) {
+// TestIngestCaptureStaysWithinItsBudget runs the same feed the benchmark
+// does, once, and FAILS when allocations or bytes allocated per MiB fed
+// exceed the budget above. The numbers are allocation counts, not timings —
+// they do not depend on this machine's speed, so the check is legitimate
+// everywhere the suite runs (the owner's decision of 2026-09-29, run
+// preflight point 5). Throughput is deliberately NOT asserted.
+func TestIngestCaptureStaysWithinItsBudget(t *testing.T) {
 	// One warm-up feed on its own session, so the measured feed pays only
 	// the path's own costs and not the process's one-time charges (the
 	// emulator library's init, the JSON encoder's type caches).
-	warm, warmStream, stopWarm, err := newBudgetSession()
+	warm, warmCounter, stopWarm, err := newIngestWindowSession()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if feedErr := feedBudgetStream(warm); feedErr != nil {
+	if feedErr := feedIngestWindow(warm); feedErr != nil {
 		stopWarm()
 		t.Fatal(feedErr)
 	}
 	stopWarm()
-	if warmStream.err != nil {
-		t.Fatal(warmStream.err)
+	if _, _, batch := warmCounter.snapshot(); batch == 0 {
+		t.Fatal("the warm-up feed captured no departed batches: the window measured nothing")
 	}
 
-	s, stream, stop, err := newBudgetSession()
+	s, counter, stop, err := newIngestWindowSession()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,31 +258,31 @@ func TestIngestToRowStreamStaysWithinItsBudget(t *testing.T) {
 
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
-	err = feedBudgetStream(s)
+	err = feedIngestWindow(s)
 	runtime.ReadMemStats(&after)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stream.err != nil {
-		t.Fatal(stream.err)
+	rows, lost, batch := counter.snapshot()
+	if batch == 0 {
+		t.Fatal("the feed captured no departed batches: the window measured nothing")
+	}
+	if lost != 0 {
+		t.Fatalf("the capture stated %d losses: the window measured a loss, not the path", lost)
 	}
 
-	mib := float64(len(budgetFeed())) / (1 << 20)
+	mib := float64(len(ingestFeed())) / (1 << 20)
 	allocsPerMiB := float64(after.Mallocs-before.Mallocs) / mib
 	bytesPerMiB := float64(after.TotalAlloc-before.TotalAlloc) / mib
-	streamed := stream.payloadBytes
-	t.Logf("fed %.2f MiB: %.0f allocs/MiB, %.0f B/MiB, %d encoded frames, %.1f MiB of payload",
-		mib, allocsPerMiB, bytesPerMiB, stream.frames, float64(streamed)/(1<<20))
+	t.Logf("fed %.2f MiB: %.0f allocs/MiB, %.0f B/MiB, %d batches, %d rows captured",
+		mib, allocsPerMiB, bytesPerMiB, batch, rows)
 
 	if allocsPerMiB > budgetAllocsPerMiB {
-		t.Fatalf("the ingest-to-departed-rows path spent %.0f allocs/MiB, over the budget of %d (+25%% over the %s baseline): a new allocation has landed on the path",
+		t.Fatalf("the ingest-and-capture path spent %.0f allocs/MiB, over the budget of %d (+25%% over the %s baseline): a new allocation has landed on the path",
 			allocsPerMiB, budgetAllocsPerMiB, "2026-09-29")
 	}
 	if bytesPerMiB > budgetBytesPerMiB {
-		t.Fatalf("the ingest-to-departed-rows path allocated %.0f B/MiB, over the budget of %d (+25%% over the %s baseline): a new copy has landed on the path",
+		t.Fatalf("the ingest-and-capture path allocated %.0f B/MiB, over the budget of %d (+25%% over the %s baseline): a new copy has landed on the path",
 			bytesPerMiB, budgetBytesPerMiB, "2026-09-29")
-	}
-	if streamed == 0 {
-		t.Fatal("the feed produced no encoded frames: the row stream measured nothing")
 	}
 }

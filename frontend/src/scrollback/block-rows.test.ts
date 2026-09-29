@@ -182,7 +182,15 @@ describe('stored block rows', () => {
     )
   })
 
-  it('names pruned-from-scrollback as its own cause, apart from the cap', () => {
+  it('names the loss cause by losses counted, never as rows, apart from the cap', () => {
+    // The store's lostRows sums what rode the wire's one loss field: the
+    // runtime's struck feeds count ONE per feed (a feed may have carried
+    // hundreds of rows — the emulator's ABI cannot count what a prune
+    // took), and any rows a helper drop states into the same field would
+    // be exact rows. No reader can tell which, so the card claims
+    // LOSSES, never a row count (nocx-zg3k3.5.9). The tail stays
+    // source-neutral: the same stored field is documented to carry exact
+    // helper-drop rows too, so no producer is named as the limitation.
     const block = document.createElement('article')
 
     paintStoredRows(
@@ -192,8 +200,26 @@ describe('stored block rows', () => {
     )
 
     expect(block.querySelector('[data-output-incomplete]')?.textContent).toBe(
-      "Output incomplete: 2 rows left the terminal's scrollback before they could be captured; that output is lost.",
+      'Output incomplete: output was lost 2 times before it could be captured; this count is not a row count.',
     )
+  })
+
+  it('does not render a one-feed loss as one row (nocx-zg3k3.5.9)', () => {
+    // One struck feed stores lostRows=1: a feed whose prune took any
+    // number of rows. The card must not read it as "1 row".
+    const block = document.createElement('article')
+
+    paintStoredRows(
+      block,
+      { ...stored, lostRows: 1, sealed: true },
+      { metric: null, palette: DEFAULT_SNAPSHOT },
+    )
+
+    const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
+    expect(text).toBe(
+      'Output incomplete: output was lost once before it could be captured; this count is not a row count.',
+    )
+    expect(text).not.toContain('1 row')
   })
 
   it('names the overflowed stream as its own cause', () => {
@@ -236,7 +262,7 @@ describe('stored block rows', () => {
     const text = block.querySelector('[data-output-incomplete]')?.textContent ?? ''
     expect(text).toContain('3 rows are missing')
     expect(text).toContain('the output passed the history output limit')
-    expect(text).toContain("2 rows left the terminal's scrollback")
+    expect(text).toContain('output was lost 2 times')
   })
 
   it('shows no missing-rows notice for a complete block (paired positive)', () => {
