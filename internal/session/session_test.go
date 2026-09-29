@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"io"
-	"sync"
 	"testing"
 	"time"
 
@@ -120,20 +119,15 @@ func TestRealRegistry_CloseRunsTheLifecycleDetachBeforeTheChannelCloses(t *testi
 		t.Fatalf("Open: %v", err)
 	}
 
-	var mu sync.Mutex
-	var order []string
-	// Both writers — the detach callback inside Close and the Done watcher
-	// goroutine — record through one mutex: the poll below reads the same
-	// slice from the test goroutine, and an unsynchronized append raced it
-	// under -race (nocx-zg3k3.5.10).
-	record := func(event string) {
-		mu.Lock()
-		defer mu.Unlock()
-		order = append(order, event)
-	}
+	// Both events arrive on one buffered channel: the channel's own
+	// synchronization is the race fix (nocx-zg3k3.5.10), the buffer
+	// preserves the order the events fired in, and the receives below
+	// wait on the events themselves — no shared slice, no poll, no
+	// sleep, no deadline.
+	events := make(chan string, 2)
 	armed := false
 	if d, ok := sess.(interface{ SetLifecycleDetach(func()) }); ok {
-		d.SetLifecycleDetach(func() { record("detach") })
+		d.SetLifecycleDetach(func() { events <- "detach" })
 		armed = true
 	}
 	if !armed {
@@ -143,30 +137,19 @@ func TestRealRegistry_CloseRunsTheLifecycleDetachBeforeTheChannelCloses(t *testi
 	// through Done, which Close is what fires.
 	go func() {
 		<-sess.Done()
-		record("channel")
+		events <- "channel"
 	}()
 
 	err = reg.Close(sess.ID())
 	if err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		mu.Lock()
-		done := len(order) == 2
-		mu.Unlock()
-		if done {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("close sequence = %v, want detach then channel", order)
-		}
-		time.Sleep(time.Millisecond)
-	}
-	mu.Lock()
-	defer mu.Unlock()
-	if order[0] != "detach" {
-		t.Fatalf("close sequence = %v, want the detach before the channel close", order)
+	// The detach runs inside Close and Done closes inside it, so both
+	// sends are already in flight when it returns; the receives block on
+	// the real events and answer in fire order.
+	e1, e2 := <-events, <-events
+	if e1 != "detach" || e2 != "channel" {
+		t.Fatalf("close sequence = [%s, %s], want detach then channel", e1, e2)
 	}
 
 	// The un-armed sibling: a session with no lifecycle leg closes plainly.
