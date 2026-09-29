@@ -73,6 +73,7 @@ jq -rs --arg root "$root" '
 		| ([$s] + $d | map(select($by[.].issue_type == "epic"
 			and $by[.].status != "closed" and (($kids[.] // []) | live | length) == 0))) as $bare
 		| ($d | map(select($by[.].status == "in_progress"))) as $doing
+		| ($d | map(select($by[.].status == "submitted" or $by[.].status == "implemented"))) as $waiting
 		| ([$d[] | . as $i | ($by[$i].dependencies // [])[]
 			| select(.type == "blocks") | .depends_on_id
 			| select($by[.] != null and $by[.].status != "closed"
@@ -84,7 +85,7 @@ jq -rs --arg root "$root" '
 			closed: ($tasks | map(select($by[.].status == "closed")) | length),
 			total: ($tasks | length),
 			done: ($by[$s].status == "closed"),
-			$bare, $doing, $blockers
+			$bare, $doing, $waiting, $blockers
 		}] as $rows
 	| "\($by[$root].title)  (\($root))",
 	  "stages done: \($rows | map(select(.done)) | length) of \($rows | length)"
@@ -93,11 +94,13 @@ jq -rs --arg root "$root" '
 	  "",
 	  ($rows[] |
 		(if .done then "done"
-		 elif .closed == 0 and (.doing | length) == 0 then "not started"
+		 elif .closed == 0 and (.doing | length) == 0 and (.waiting | length) == 0 then "not started"
 		 else "in progress" end) as $state
 		| "\(.id)  [\($state)]  \(.closed) of \(.total) tasks closed",
 		  "  \(.title)",
 		  (if (.doing | length) > 0 then "    in progress:", (.doing[] | line(.)) else empty end),
+		  (if (.waiting | length) > 0 then "    done, awaiting acceptance:",
+			(.waiting[] | "\(line(.))  [\($by[.].status)]") else empty end),
 		  (if (.bare | length) > 0 then "    not decomposed:", (.bare[] | line(.)) else empty end),
 		  (if (.blockers | length) > 0 then "    blocked by, outside this stage:", (.blockers[] | line(.)) else empty end),
 		  "")
