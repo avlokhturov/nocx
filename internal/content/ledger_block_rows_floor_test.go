@@ -160,3 +160,92 @@ func TestAMultiChunkPrependSurvivesTheCapAndEviction(t *testing.T) {
 		t.Fatalf("the cap took the middle and the close counted nothing: %+v", summary)
 	}
 }
+
+// The prepend writes the cap's own bound (nocx-zg3k3.5.10): a recovered
+// head is bytes like any other, and a prepend that lands past the cap must
+// evict by the cap's rule — the reservation keeps its start, the tail
+// keeps the newest rows, the middle goes — and the close must count what
+// it took. A prepend branch that commits without the walk leaves an
+// oversized sealed artifact and counts nothing.
+func TestAPrependThatPassesTheCapEvictsByTheCapsRuleAndCountsIt(t *testing.T) {
+	ctx := context.Background()
+	policy := content.NewPolicy()
+	policy.SetOutputCapBytes(4 << 10) // 4 KiB: the prepend alone dwarfs it
+	_, led := newLedgerWithPolicy(t, policy)
+	entryID := recordOne(t, led, "the head came back huge")
+	artifact := "00000000-0000-7000-8000-0000000000f3"
+	if _, err := led.OpenBlockOutput(ctx, content.OpenBlockOutput{
+		EntryID: entryID, ArtifactID: artifact,
+	}); err != nil {
+		t.Fatalf("OpenBlockOutput: %v", err)
+	}
+	// The stored span is [3000, 3002): the command's tail reached the
+	// store first; its head departed before the block opened.
+	tail := make([]emulator.Row, 0, 24)
+	for i := 3000; i < 3002; i++ {
+		tail = append(tail, aTextRow(strings.Repeat("y", 64)+fmt.Sprintf("R%d", i)))
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: artifact, FromRow: 3000, Rows: tail,
+	}); err != nil {
+		t.Fatalf("the first delivery: %v", err)
+	}
+	// The resend re-offers the head: [1000, 3000), two thousand rows —
+	// far more bytes than the cap holds. Contiguous with the floor, so
+	// the store must take it; the cap must then hold.
+	var head []emulator.Row
+	for i := 1000; i < 3000; i++ {
+		head = append(head, aTextRow(strings.Repeat("x", 64)+fmt.Sprintf("R%d", i)))
+	}
+	if err := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: entryID, ArtifactID: artifact, FromRow: 1000, Rows: head,
+	}); err != nil {
+		t.Fatalf("the head prepend: %v", err)
+	}
+
+	summary, err := led.CloseBlockRows(ctx, content.CloseBlockRows{EntryID: entryID, ArtifactID: artifact})
+	if err != nil {
+		t.Fatalf("CloseBlockRows: %v", err)
+	}
+	art := blockRowsArtifactOf(t, led, entryID)
+	if art == nil {
+		t.Fatal("the capped block stored no artifact")
+	}
+	// The bound: the ends the cap protects are chunk-scale (the head
+	// reservation and the reserve hold whole 16 KiB chunks against a
+	// 4 KiB cap, the same slack the cap suite itself allows), so the
+	// bound is the cap plus two chunks — and nothing like the ~200 KiB
+	// the head itself carries.
+	if art.ByteLen > int64(4<<10)+int64(2*16<<10) {
+		t.Fatalf("byte_len = %d after a prepended head over a %d cap: the prepend committed without the cap's walk",
+			art.ByteLen, 4<<10)
+	}
+	// The count: what the cap took is named, not lost.
+	if summary.DroppedRows == 0 {
+		t.Fatalf("the cap took the middle of a prepended block and the close counted nothing: %+v", summary)
+	}
+	// The ends, by the cap's own rule: the prepend's own start and the
+	// newest row survive; the read stays ascending through the hole.
+	lines := storedBlockRows(t, led, artifact)
+	if len(lines) == 0 {
+		t.Fatal("nothing survived the prepend's eviction")
+	}
+	if lines[0].From != 1000 || !strings.Contains(lines[0].Text, "R1000") {
+		t.Fatalf("the first surviving row is from=%d %q, want the prepend's own start R1000", lines[0].From, lines[0].Text)
+	}
+	if lines[len(lines)-1].From != 3001 || !strings.Contains(lines[len(lines)-1].Text, "R3001") {
+		t.Fatalf("the last surviving row is from=%d %q, want the newest row R3001", lines[len(lines)-1].From, lines[len(lines)-1].Text)
+	}
+	prev := lines[0].From
+	for _, l := range lines[1:] {
+		if l.From <= prev {
+			t.Fatalf("the artifact is not ascending after the prepend's eviction: %d after %d", l.From, prev)
+		}
+		prev = l.From
+	}
+	// The count and the chunks agree.
+	if dropped := uint64(3002-1000) - uint64(len(lines)); dropped != summary.DroppedRows { //nolint:gosec // a row count, not a byte count
+		t.Fatalf("the body holds %d of 2002 rows but the block records %d dropped — the count and the chunks disagree",
+			len(lines), summary.DroppedRows)
+	}
+}

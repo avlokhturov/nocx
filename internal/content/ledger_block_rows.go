@@ -284,6 +284,16 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			log.From(ctx).Debug("block rows prepend: the block's head joined below the floor",
 				"entry", in.EntryID, "artifact", in.ArtifactID, "from", in.FromRow,
 				"rows", len(in.Rows), "floor", state.payload.FirstRow)
+			// The cap binds the prepend like any other write: a recovered
+			// head is bytes, and a prepend that lands past the cap evicts
+			// by the walk's own rule — the reservation keeps the head's
+			// start, the reserve keeps the newest rows, the middle goes —
+			// so the close derives the drop from the survivors and the
+			// sealed artifact never outgrows the cap it was given
+			// (nocx-zg3k3.5.10).
+			if err := evictBlockRowsToCap(ctx, tx, in.ArtifactID, capBytes); err != nil {
+				return err
+			}
 			return tx.Commit()
 		}
 
