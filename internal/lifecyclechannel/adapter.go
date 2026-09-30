@@ -106,6 +106,23 @@ type Option func(*options)
 type options struct {
 	helloTimeout time.Duration
 	lossReporter LossReporter
+	frameApplied FrameApplied
+}
+
+// FrameApplied is told, after the kernel has returned from a frame, the
+// position in this adapter's carrier that frame ends at: every byte the
+// decoder has taken, the frame's own and any garbage skipped before it
+// (ADR-0077). It is called on the pump's goroutine, before the next frame is
+// read, so a sink that stores the position synchronously stores it after the
+// frame's effect and before any later frame's — the order the coordinator's
+// lifecycle cursor needs. A refused frame is reported too: the stream carried
+// it and this coordinator dealt with it, and resuming before it would only
+// offer it again.
+type FrameApplied func(consumed uint64)
+
+// WithFrameApplied registers the sink for each frame's end position.
+func WithFrameApplied(f FrameApplied) Option {
+	return func(o *options) { o.frameApplied = f }
 }
 
 // WithHelloTimeout bounds an adapter handshake and listener expectation:
@@ -145,11 +162,17 @@ type Adapter struct {
 	// hello-timeout is measured against.
 	openedAt time.Time
 	report   LossReporter
+	applied  FrameApplied
 
 	mu     sync.Mutex
 	closed bool
 	loss   sync.Once
-	timer  *time.Timer
+	// applying is held by the pump across one frame's application — the
+	// detached check, the kernel's Ingest and the applied report — so a
+	// Detach that takes it knows no frame is half-applied and none will
+	// start (ADR-0077).
+	applying sync.Mutex
+	timer    *time.Timer
 	// pumpDone is closed when the pump goroutine ends — the observable a
 	// test waits on to know the pump's own end-of-stream has run.
 	pumpDone chan struct{}
@@ -186,6 +209,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 		id:   lifecycle.TransportID("tpt-" + tptHex),
 		lane: lifecycle.LaneID("lane-" + laneHex),
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+		applied:  o.frameApplied,
 		openedAt: time.Now(),
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
@@ -275,6 +299,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		lane: adopt.Lane, domain: adopt.Domain, epoch: adopt.Epoch,
 		capability: capability, recovery: recovery,
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
+		applied: o.frameApplied,
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
 	if bindErr := k.BindTransport(a.id, a); bindErr != nil {
@@ -424,6 +449,22 @@ func (a *Adapter) Close() error {
 // lose, and a shell that says goodbye still reaches endOfStream's clean
 // branch. Shares lose's once, so whichever of detach, loss or disposal runs
 // first decides what this leg's end was.
+//
+// THE FRAME IN FLIGHT IS FINISHED, AND NONE AFTER IT IS STARTED (ADR-0077).
+// Detach returns only once no frame is being applied: a frame the kernel is applying
+// when the handover arrives completes — its effect and its reported cursor
+// both land — and a frame the decoder already buffered behind it is left for
+// the next coordinator, which resumes the stream at the cursor this one
+// stored. The caller's next act is to let the session's block stream go; a
+// frame applied after that would report its cursor with only half its effect
+// stored (a start whose ledger entry is written and whose block never opens),
+// and the next coordinator, resuming past it, would never open that block.
+// The wait is for the frame, not for the pump's exit: a carrier whose blocked
+// read a Close does not interrupt (a socketpair descriptor) would otherwise
+// hold the handover until the shell spoke again. It is outside the once,
+// because the pump's own end may run lose, which shares it. Never call Detach
+// from the pump's own goroutine — nothing does: the callers are the
+// registry's Close and the re-adopt's lease refusal.
 func (a *Adapter) Detach() error {
 	a.loss.Do(func() {
 		a.log.Info("lifecycle channel detached for handover",
@@ -434,7 +475,18 @@ func (a *Adapter) Detach() error {
 		a.mu.Unlock()
 		_ = a.conn.Close()
 	})
+	a.applying.Lock()
+	//nolint:staticcheck // an empty critical section: the wait for the frame in flight IS the point
+	a.applying.Unlock()
 	return nil
+}
+
+// detached reports whether the leg has been handed over (or otherwise ended):
+// the pump applies no frame once it is.
+func (a *Adapter) detached() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.closed
 }
 
 // lose is the single loss path, executed once: say which caller fired,
@@ -498,7 +550,17 @@ func (a *Adapter) pump() {
 	for {
 		env, err := a.dec.ReadFrame()
 		if err == nil {
-			if ierr := a.kernel.Ingest(a.id, env); ierr != nil {
+			a.applying.Lock()
+			if a.detached() {
+				// Handed over: this frame, even one the decoder already
+				// holds, is the next coordinator's to apply (see Detach).
+				a.applying.Unlock()
+				return
+			}
+			ierr := a.kernel.Ingest(a.id, env)
+			a.reportApplied()
+			a.applying.Unlock()
+			if ierr != nil {
 				// Quarantine (a Desynchronized domain), a rejected
 				// candidate, an illegal event: the kernel mutates nothing
 				// and this adapter records nothing but the fact.
@@ -539,11 +601,24 @@ func (a *Adapter) pump() {
 			a.endOfStream()
 			return
 		default:
+			if a.detached() {
+				// The handover closed the carrier under the read: its echo,
+				// not a transport that broke.
+				return
+			}
 			// A read error: the transport broke.
 			a.log.Warn("lifecycle transport read error", "error", err)
 			a.lose(LossReadError)
 			return
 		}
+	}
+}
+
+// reportApplied tells the sink where the frame the kernel just returned from
+// ends (ADR-0077).
+func (a *Adapter) reportApplied() {
+	if a.applied != nil {
+		a.applied(a.dec.Consumed())
 	}
 }
 
