@@ -516,6 +516,14 @@ type pendingEnd struct {
 	// incomplete seals the block as a gap: its boundary was settled without
 	// its fence, or its delivery was lost (nocx-2v80t.3.29).
 	incomplete bool
+	// waiting marks an end parked by publishFence's resolution or the
+	// still-owed guard (nocx-zg3k3.5.11 Round 9): the artifact's cursor is
+	// short of the boundary while the rows source is attached, and the end
+	// waits for the deliveries that will advance it. A waiting park spends
+	// no attempt — waiting is not failing — and a delivery must not be
+	// held behind it: the delivery is what advances the cursor the wait
+	// is on.
+	waiting bool
 }
 
 // parkedBoundary is the boundary an interval end marker has already stated
@@ -1262,7 +1270,21 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		bs.mu.Unlock()
 		bs.drainPendingCloses(s, sid)
 		bs.mu.Lock()
-		if len(bs.pendingCloses[sid]) > 0 {
+		// A delivery is held only behind a close that may SEAL. A WAITING
+		// end (nocx-zg3k3.5.11 Round 9: parked by publishFence's resolution
+		// or the still-owed guard, no attempt spent) must not hold it — the
+		// delivery is what advances the cursor the wait is on, and holding
+		// it here would strand the tail behind a wait that only the
+		// delivery can end. Recursing instead overflowed the stack: every
+		// level re-parked the same end before its delivery could land.
+		held := false
+		for _, e := range bs.pendingCloses[sid] {
+			if !e.waiting {
+				held = true
+				break
+			}
+		}
+		if held {
 			if !s.holdLocked(sid, fromRow, rows) {
 				bs.mu.Unlock()
 				return 0, false
@@ -1273,8 +1295,9 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			bs.mu.Unlock()
 			return 0, false
 		}
-		bs.mu.Unlock()
-		return s.BlockRowsArrived(sid, fromRow, lost, rows, lostCause)
+		// ALL remaining ends are WAITING: fall through under the
+		// still-held lock — the direct arm below advances the cursor they
+		// wait on, and its own completion tail re-drives them.
 	}
 	if sourced && pending && !flushing && !closing && block != nil && bs.queued[sid] == "" {
 		bs.pending[sid] = append(bs.pending[sid], pendingRows{
@@ -1915,7 +1938,7 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 		}
 		bs.closing[sid] = true
 		bs.mu.Unlock()
-		s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete)
+		s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete, false)
 		return
 	}
 	if bs.flushing[sid] || bs.closing[sid] || len(bs.pending[sid]) > 0 {
@@ -1932,10 +1955,10 @@ func (s *WSServer) closeBlockRows(sid session.ID, attempt string, endRow uint64,
 	}
 	bs.closing[sid] = true
 	bs.mu.Unlock()
-	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete)
+	s.closeBlockRowsNow(sid, attempt, endRow, closing, hexNonce, incomplete, false)
 }
 
-func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string, incomplete bool) bool {
+func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint64, closing []emulator.Row, hexNonce string, incomplete bool, fromWaiting bool) bool {
 	bs := s.blockStream
 	bs.mu.Lock()
 	block := bs.open[sid][attempt]
@@ -2187,6 +2210,37 @@ func (s *WSServer) closeBlockRowsNow(sid session.ID, attempt string, endRow uint
 		if !fail() {
 			abandon()
 		}
+		return false
+	}
+	// ROWS OF THE INTERVAL ARE STILL OWED ON THE ORDERED CHANNEL, but ONLY
+	// for a WAITING close (nocx-zg3k3.5.11 Round 9): the fence resolved this
+	// end while the walk's remaining batches were still in the FIFO, and
+	// sealing now would drop [cursor, endRow) against a settled block
+	// (measured: sealed at 196/200 of 277, every absent row sent by the
+	// helper and dropped unconfirmed). A WAITING close re-parks here —
+	// without spending the attempt bound — until the deliveries advance the
+	// cursor to the boundary; a detach (sources gone) or the FIFO reaching
+	// the boundary ends the wait. A marker-driven close (fromWaiting false)
+	// keeps the designed terminal: the read loop reached the end marker, so
+	// every row ahead of it was already delivered or stated, and a short
+	// cursor is the honest nocx-2v80t.3.9 seal. The cursor is RE-READ here:
+	// the snapshot at the head of this function predates the store work and
+	// may be behind an append that committed while it ran.
+	bs.mu.Lock()
+	live := block.rows
+	_, attached := bs.sources[sid]
+	bs.mu.Unlock()
+	if fromWaiting && live < endRow && attached {
+		end := pendingEnd{
+			attempt: attempt, nonce: hexNonce, endRow: endRow,
+			closing: append([]emulator.Row(nil), closing...), incomplete: incomplete,
+			waiting: true,
+		}
+		bs.mu.Lock()
+		s.holdEndLocked(sid, &end)
+		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
+		delete(bs.closing, sid)
+		bs.mu.Unlock()
 		return false
 	}
 	// The closing screen's placement, decided from the artifact's own cursor
@@ -2800,6 +2854,16 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 		bs.mu.Unlock()
 		for _, end := range closes {
 			bs.mu.Lock()
+			if end.waiting {
+				if _, open := bs.open[sid][end.attempt]; !open {
+					// A WAITING end whose block is gone was already sealed
+					// by its end frame's own close (or a detach): the wait
+					// is done, and a second close would re-notify a settled
+					// block.
+					bs.mu.Unlock()
+					continue
+				}
+			}
 			current := bs.current[sid]
 			queued := bs.queued[sid]
 			if queued == end.attempt && current != nil && current.attempt != end.attempt {
@@ -2809,7 +2873,7 @@ func (bs *blockStream) drainPendingCloses(s *WSServer, sid session.ID) {
 				continue
 			}
 			bs.mu.Unlock()
-			if !s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete) {
+			if !s.closeBlockRowsNow(sid, end.attempt, end.endRow, end.closing, end.nonce, end.incomplete, end.waiting) {
 				return
 			}
 		}
@@ -2859,9 +2923,18 @@ func (bs *blockStream) publishFence(s *WSServer, sid session.ID, hexNonce, attem
 	}
 	bs.fences[sid][hexNonce] = attempt
 	var parked []pendingEnd
+	var resolved *pendingEnd
 	for i, e := range bs.ends[sid] {
 		if e.nonce == hexNonce {
-			parked = append(parked, e)
+			// An INCOMPLETE boundary is a designed terminal (nocx-2v80t.3.29
+			// / .3.36): its rows are gone by definition, so it settles now —
+			// only a normal end marker waits behind the FIFO's remaining
+			// batches (nocx-zg3k3.5.11 Round 9).
+			if e.incomplete {
+				parked = append(parked, e)
+			} else {
+				resolved = &e
+			}
 			bs.ends[sid] = append(bs.ends[sid][:i], bs.ends[sid][i+1:]...)
 			break
 		}
@@ -2887,6 +2960,27 @@ func (bs *blockStream) publishFence(s *WSServer, sid session.ID, hexNonce, attem
 	bs.mu.Unlock()
 	for _, e := range parked {
 		s.closeBlockRows(sid, attempt, e.endRow, e.closing, e.nonce, e.incomplete)
+	}
+	if resolved != nil {
+		// THE EITHER-ORDER END MARKER (nocx-zg3k3.5.11 Round 9): this end's
+		// own frame was processed before its fence was published — the
+		// walk's remaining batches are still in the FIFO behind it, and a
+		// close run NOW would seal at the short cursor and drop them
+		// (measured: sealed at 196/200 of 277, every absent row sent by
+		// the helper and dropped unconfirmed). Park it as a WAITING
+		// pendingClose instead: the deliveries re-drive it at the truer
+		// cursor, and when the FIFO reaches the end's height the close
+		// seals at full height. A WAITING park spends no attempt.
+		end := pendingEnd{
+			attempt: attempt, nonce: resolved.nonce, endRow: resolved.endRow,
+			closing: append([]emulator.Row(nil), resolved.closing...), incomplete: resolved.incomplete,
+			waiting: true,
+		}
+		bs.mu.Lock()
+		s.holdEndLocked(sid, &end)
+		bs.pendingCloses[sid] = append(bs.pendingCloses[sid], end)
+		bs.mu.Unlock()
+		bs.drainPendingCloses(s, sid)
 	}
 }
 
