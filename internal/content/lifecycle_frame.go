@@ -153,6 +153,12 @@ func (a *frameAnswer[T]) settle(got T) error {
 	return nil
 }
 
+// ErrFrameAbandoned is what a frame's apply returns to store nothing of it
+// and try no further attempt: the caller decided the frame is not its to
+// apply after all (the coordinator began stopping while it ran, ADR-0077
+// decision 11). ApplyLifecycleFrame answers a FrameFailedError wrapping it.
+var ErrFrameAbandoned = errors.New("content: the lifecycle frame was abandoned by its caller")
+
 // ErrLifecycleCursorMissing is a frame whose cursor lands on no binding: the
 // session's row is gone, or it records no cursor. The frame cannot be marked
 // applied, so it fails rather than commit rows the cursor does not cover.
@@ -609,7 +615,12 @@ func (s *sqliteContent) ApplyLifecycleFrame(ctx context.Context, sessionID strin
 	fctx, effects := lifecyclecommit.Begin(context.WithValue(ctx, lifecycleFrameKey{}, f))
 	f.effects = effects
 	if err := apply(fctx); err != nil {
-		f.fail(err)
+		if errors.Is(err, ErrFrameAbandoned) {
+			f.mu.Lock()
+			_ = f.dieLocked(err)
+		} else {
+			f.fail(err)
+		}
 	}
 	return f.commit(fctx, sessionID, offset)
 }

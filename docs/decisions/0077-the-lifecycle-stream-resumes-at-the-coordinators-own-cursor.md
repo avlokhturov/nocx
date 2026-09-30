@@ -200,8 +200,12 @@ length — what this machine stored — and never from anything the helper guess
     `lifecyclechannel.ErrFrameLeftForNext`). Stopping closes the sessions a frame's projection
     records against, so what it would store is not what the frame says (a start whose entry is not
     recorded and whose block open fails on the missing entry was measured doing exactly that). A
-    frame already in hand when stopping began, and failing because of it, is left the same way. That
-    is a handover: no error line, no halt, nothing reported to the pane; the next coordinator applies
+    frame already in hand when stopping began is left the same way whatever its writes answered: once
+    its projection has run, a coordinator that is now stopping abandons it (`content.ErrFrameAbandoned`)
+    and nothing of it is committed. Its writes need not fail for it to be wrong — measured on the
+    loaded bar, the start's projection found the session closing, recorded no entry, the block's open
+    was answered (no such entry) rather than failed, and a frame that merely answered committed its
+    cursor, so the next coordinator never saw the command begin. That is a handover: no error line, no halt, nothing reported to the pane; the next coordinator applies
     the frame from the cursor.
 
 12. **What a frame tells anyone outside the process waits for the frame's commit, in one ordered

@@ -147,9 +147,18 @@ func (c *lifecycleCursor) applyFrame(consumed uint64, kind lifecycle.EventKind, 
 	if store != nil && sid != "" {
 		err := store.ApplyLifecycleFrame(c.ctx, sid, offset, func(ctx context.Context) error {
 			apply(ctx)
+			// Stopping began while the frame's projection ran: what it wrote
+			// — or answered, finding the sessions closing — is not what the
+			// frame says, however cleanly the store took it. Nothing of it is
+			// committed, whatever its writes answered (nocx-zg3k3.5.11: a
+			// start whose entry was never recorded committed its cursor, and
+			// the next coordinator never saw the command begin).
+			if c.isStopping() {
+				return content.ErrFrameAbandoned
+			}
 			return nil
 		})
-		if err != nil && c.isStopping() {
+		if err != nil && (errors.Is(err, content.ErrFrameAbandoned) || c.isStopping()) {
 			return lifecyclechannel.ErrFrameLeftForNext
 		}
 		if err != nil {

@@ -3,9 +3,11 @@ package app
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/waittest"
@@ -118,5 +120,60 @@ func TestACompletionDeliveredDuringShutdownIsAppliedOnceByTheNextCoordinator(t *
 	runBarrier(t, shell, second, "echo after")
 	if done := completedCommands(second.emitter.completed()); len(done) != 2 || done[0] != "" && done[0] != "make build" || done[1] != "echo after" {
 		t.Fatalf("the next coordinator completed %q, want the command that ended during shutdown, once, then the barrier", done)
+	}
+}
+
+// A FRAME IN HAND WHEN STOPPING BEGAN IS NOT COMMITTED, WHATEVER ITS WRITES
+// ANSWERED (nocx-zg3k3.5.11, the loaded bar after the review round:
+// "the command's block never closed: entries = []"). Stopping began while
+// the start frame was in the store's hands; its projection then found the
+// session closing, recorded no entry, and the block's open was ANSWERED —
+// no such entry — rather than failed. Nothing failed, so the frame
+// committed, the cursor moved past the start, and the next coordinator,
+// resuming there, never saw the command begin. The rule is the frame's, not
+// its writes': a frame whose projection ran while stopping stores nothing,
+// and the cursor stays before it.
+func TestAFrameInHandWhenStoppingBeganIsNotCommitted(t *testing.T) {
+	ctx := context.Background()
+	db, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(t.TempDir(), "content.db"),
+		Key:    make([]byte, 32),
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	const sid = "0123456789abcdef0123456789abcdef"
+	zero := uint64(0)
+	if cerr := db.Ledger().CreateSession(ctx, content.Session{ID: sid, WorkspaceID: content.DefaultWorkspaceID, LifecycleApplied: &zero}); cerr != nil {
+		t.Fatalf("CreateSession: %v", cerr)
+	}
+	stopping := &atomic.Bool{}
+	cursor := newLifecycleCursor(ctx, db.Ledger(), stopping)
+	cursor.bind(sid, 0)
+	cursor.relayed(40, 40)
+	err = cursor.applyFrame(40, lifecycle.KindStart, func(fctx context.Context) {
+		// The projection writes what it can, and answers what it cannot,
+		// with no store failure anywhere — and stopping begins meanwhile.
+		if werr := db.Ledger().EnsureEnvironment(fctx, content.Environment{ID: "local", Kind: content.EnvLocal}); werr != nil {
+			t.Errorf("EnsureEnvironment: %v", werr)
+		}
+		stopping.Store(true)
+	})
+	if !errors.Is(err, lifecyclechannel.ErrFrameLeftForNext) {
+		t.Fatalf("applyFrame = %v, want ErrFrameLeftForNext", err)
+	}
+	pending, err := db.Reconcile().Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	for _, p := range pending {
+		if p.SessionID == sid && (p.LifecycleApplied == nil || *p.LifecycleApplied != 0) {
+			t.Fatalf("the stored cursor is %v, want 0: it moved past a frame left for the next coordinator", p.LifecycleApplied)
+		}
+	}
+	if cursor.applied != 0 {
+		t.Fatalf("the cursor moved to %d in memory", cursor.applied)
 	}
 }
