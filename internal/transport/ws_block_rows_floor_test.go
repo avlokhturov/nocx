@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -231,5 +232,115 @@ func TestAResentHeadHeldUntilItReachesTheFloor(t *testing.T) {
 	}
 	if !strings.Contains(got[0], "R1") {
 		t.Fatalf("the artifact's first row is %q, want the held head's R1", got[0])
+	}
+}
+
+// THE BATCH THAT COMPLETES THE HEAD MAY ALSO CARRY THE TAIL (nocx-zg3k3.5.11,
+// ci-linux with-secret-service on PR #255: sealed at 39 rows of 300). The
+// helper's resend walks in 32-row batches, and nothing aligns them with the
+// block's floor or its cursor: on that run the floor was 161 and the cursor
+// 177, so the batch [160,192) held the head's last row, sixteen rows the
+// artifact already had, and fifteen it did not. That batch completed the
+// chain and was still dropped — "the chain is still short of the floor" —
+// so the head never joined, [177,192) was never stored or confirmed and never
+// offered again, and every batch after it met the store at 177 and was
+// refused. The batch joins the head AND appends its new tail, and the next
+// batch continues the block.
+func TestAResendBatchThatCompletesTheHeadAlsoAppendsItsTail(t *testing.T) {
+	ctx := context.Background()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	db, err := content.Open(ctx, content.Config{
+		Path:   filepath.Join(t.TempDir(), "content.db"),
+		Key:    key,
+		Budget: content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	led := db.Ledger()
+	if envErr := led.EnsureEnvironment(ctx, content.Environment{ID: "local", Kind: content.EnvLocal}); envErr != nil {
+		t.Fatalf("EnsureEnvironment: %v", envErr)
+	}
+	if _, obsErr := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: "local", Confidence: "{}", Criticality: content.CriticalityRoutine, Payload: "{}",
+	}); obsErr != nil {
+		t.Fatalf("RecordObservation: %v", obsErr)
+	}
+	sid := "sess-floor-3"
+	colour := "#000000"
+	if _, wsErr := db.Layout().CreateWorkspace(ctx, content.Workspace{ID: "ws-floor3", Name: "floor3", Colour: &colour, Position: 0},
+		content.Tab{ID: "tab-floor3", WorkspaceID: "ws-floor3", Position: 0, Layout: "column"},
+		content.Pane{ID: "pane-floor3", TabID: "tab-floor3", Kind: "local", SizeShare: 1, Cwd: "/repo"}); wsErr != nil {
+		t.Fatalf("CreateWorkspace: %v", wsErr)
+	}
+	if sessErr := led.CreateSession(ctx, content.Session{ID: sid, WorkspaceID: "ws-floor3"}); sessErr != nil {
+		t.Fatalf("CreateSession: %v", sessErr)
+	}
+	const attempt = "att-floor-3"
+	if _, submitErr := led.Submit(ctx, content.SubmitEntry{
+		ID: attempt, Client: "c1", EnvironmentID: "local", Kind: content.EntryShell,
+		SessionID: &sid, Cwd: "/repo", Intent: "the batch straddles the floor and the cursor",
+	}); submitErr != nil {
+		t.Fatalf("Submit: %v", submitErr)
+	}
+	if _, startErr := led.StartExecution(ctx, content.StartExecution{EntryID: attempt}); startErr != nil {
+		t.Fatalf("StartExecution: %v", startErr)
+	}
+	artifact := "00000000-0000-7000-8000-0000000000cc"
+	if _, openErr := led.OpenBlockOutput(ctx, content.OpenBlockOutput{EntryID: attempt, ArtifactID: artifact}); openErr != nil {
+		t.Fatalf("OpenBlockOutput: %v", openErr)
+	}
+	row := func(i int) emulator.Row { return aStreamRow("R" + strconv.Itoa(i)) }
+	span := func(from, to int) []emulator.Row {
+		var out []emulator.Row
+		for i := from; i < to; i++ {
+			out = append(out, row(i))
+		}
+		return out
+	}
+	// The previous coordinator stored [6,10): its head departed before the
+	// block opened, and it went away before the rest.
+	if appendErr := led.AppendBlockRows(ctx, content.AppendBlockRows{
+		EntryID: attempt, ArtifactID: artifact, FromRow: 6, Rows: span(6, 10),
+	}); appendErr != nil {
+		t.Fatalf("the first delivery: %v", appendErr)
+	}
+
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), WithContentDB(db))
+	ws.AttachBlockRows(session.ID(sid))
+
+	// The resend, in batches that align with neither the floor nor the
+	// cursor: [0,4) short of the floor; [4,13) completes the head, repeats
+	// [6,10), and carries [10,13) the artifact lacks; then [13,16).
+	if _, confirm := ws.BlockRowsArrived(session.ID(sid), 0, 0, span(0, 4), ""); confirm {
+		t.Fatal("the batch short of the floor was confirmed")
+	}
+	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 4, 0, span(4, 13), ""); !confirm || written != 13 {
+		t.Fatalf("the batch that completes the head and carries the tail = (%d, %v), want (13, true)", written, confirm)
+	}
+	if written, confirm := ws.BlockRowsArrived(session.ID(sid), 13, 0, span(13, 16), ""); !confirm || written != 16 {
+		t.Fatalf("the next batch = (%d, %v), want it to continue the block to 16", written, confirm)
+	}
+	art, artErr := led.Artifact(ctx, artifact)
+	if artErr != nil {
+		t.Fatalf("Artifact: %v", artErr)
+	}
+	var body []byte
+	for _, c := range art.Chunks {
+		body = append(body, c...)
+	}
+	got := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(got) != 16 {
+		t.Fatalf("the artifact holds %d rows, want [0,16) whole", len(got))
+	}
+	for i, line := range got {
+		if !strings.Contains(line, `"R`+strconv.Itoa(i)+`"`) && !strings.Contains(line, "R"+strconv.Itoa(i)) {
+			t.Fatalf("row %d is %s, want R%d", i, line, i)
+		}
 	}
 }

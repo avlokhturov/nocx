@@ -1334,11 +1334,24 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			return block.rows, true
 		}
 		if len(head) > 0 {
-			// the chain is still short of the floor: the held rows are
-			// not confirmable, and neither is anything behind them in
-			// this delivery.
+			// THIS BATCH COMPLETED THE HEAD AND CARRIES ROWS PAST THE
+			// CURSOR (nocx-zg3k3.5.11: sealed at 39 rows of 300 on CI). The
+			// resend's batches align with neither the floor nor the cursor,
+			// so one batch can hold the chain's last rows, rows the artifact
+			// already has, and rows it lacks. head is set only once the
+			// chain reaches the floor, so it joins now, in one prepend, and
+			// the tail goes on below like any delivery: returning here
+			// stored neither, confirmed neither, and the resend never offers
+			// a delivered batch again — every later batch then met the store
+			// at the old cursor and was refused.
 			bs.mu.Unlock()
-			return 0, false
+			if !s.prependBlockHead(sid, block.entry, block.artifactID, headFrom, head) {
+				return 0, false
+			}
+			bs.mu.Lock()
+			block.floor = headFrom
+			block.held = nil
+			head = nil
 		}
 		// The interval's end marker may have arrived without the completion
 		// that names its fence. Its EndRow is the boundary either way, and
