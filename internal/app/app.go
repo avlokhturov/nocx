@@ -2084,6 +2084,11 @@ func New(opts ...Option) (*App, error) {
 		// asked of the helper that holds the pane through the same lookup
 		// every screen read takes, and delivered by that pane's own drain.
 		transport.WithScreenResender(screenSource),
+		// The live history a scroll-up reads (nocx-zg3k3.10.3): asked of the
+		// helper that holds the pane through the same owner lookup every
+		// screen read takes, and delivered on the screen carrier the frame
+		// itself rides.
+		transport.WithHistoryPager(newHistoryPageSource(screenSource)),
 		transport.WithPaneObserver(paneWatch), transport.WithAgentRules(paneDrivers),
 		// How often the watcher above is swept (nocx-luqz9.2). Stated rather
 		// than left to the zero value: a second is both the coalescing this
