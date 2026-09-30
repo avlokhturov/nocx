@@ -128,6 +128,35 @@ func (e *FrameExpiredError) Error() string {
 // the one its caller decided on. The frame fails rather than store it.
 var ErrFrameReplayDiverged = errors.New("content: a lifecycle frame's replayed write answered differently from its first attempt")
 
+// frameAnswer keeps the first answer a store write gave, for the replay of
+// that write inside a lifecycle frame (recover). The frame runs a write's
+// closure again when its transaction had to be begun again, and the closure
+// settles its answer here each time: an answer that differs from the first
+// is ErrFrameReplayDiverged, because the frame's caller already acted on the
+// first — minted an entry or did not, holds this execution id, installed that
+// artifact. What goes into T is every field of the answer that reflects a
+// decision the store made; a value the store merely stamps afresh on every
+// run (a wall-clock time, the next ingest sequence number, which other
+// writers may have taken during the pause) is not a decision, no caller
+// inside a frame reads it, and comparing it would fail every retried frame.
+type frameAnswer[T comparable] struct {
+	set bool
+	v   T
+}
+
+func (a *frameAnswer[T]) settle(got T) error {
+	if a.set && a.v != got {
+		return ErrFrameReplayDiverged
+	}
+	a.set, a.v = true, got
+	return nil
+}
+
+// ErrLifecycleCursorMissing is a frame whose cursor lands on no binding: the
+// session's row is gone, or it records no cursor. The frame cannot be marked
+// applied, so it fails rather than commit rows the cursor does not cover.
+var ErrLifecycleCursorMissing = errors.New("content: the session's binding is gone or records no lifecycle cursor")
+
 // lifecycleFrameKey carries the frame in a context.
 type lifecycleFrameKey struct{}
 
@@ -158,6 +187,9 @@ type lifecycleFrame struct {
 	// disarms its bound.
 	began time.Time
 	stop  func() bool
+	// fired closes when the current transaction's bound callback has run;
+	// commit waits for it whenever disarming the bound loses the race.
+	fired chan struct{}
 	held  time.Duration
 	ended bool
 	// depth is how many writes are running now (a store method's write may
@@ -424,9 +456,13 @@ func (f *lifecycleFrame) recover(ctx context.Context) error {
 		// Armed outside the lock: a bound that fires at once rolls back a
 		// transaction nothing has written to yet, and the replay below fails
 		// on it like on any other.
-		stop := f.s.cfg.FrameTimer(LifecycleFrameMaxHold, func() { f.expire(attempt) })
+		fired := make(chan struct{})
+		stop := f.s.cfg.FrameTimer(LifecycleFrameMaxHold, func() {
+			defer close(fired)
+			f.expire(attempt)
+		})
 		f.mu.Lock()
-		f.stop = stop
+		f.stop, f.fired = stop, fired
 		f.mu.Unlock()
 		var replayErr error
 		for _, w := range writes {
@@ -648,11 +684,27 @@ func (f *lifecycleFrame) commit(ctx context.Context, sessionID string, offset ui
 			_ = f.recover(ctx)
 			continue
 		}
-		tx, stop := f.tx, f.stop
+		tx, stop, fired := f.tx, f.stop, f.fired
 		f.stop = nil
 		f.mu.Unlock()
-		if stop != nil {
-			stop()
+		// THE BOUND DECIDES UP TO THE COMMIT, AND THE COMMIT GOES BY WHAT IT
+		// DECIDED. Disarming it here fails once its callback has started —
+		// the callback may be waiting for f.mu this very moment — and then
+		// the commit waits for the callback to finish and looks again: the
+		// transaction it rolled back is begun again, never committed. Once
+		// disarmed, the bound no longer applies: SQLite's COMMIT cannot be
+		// interrupted, and a rollback racing it would only lose the race
+		// (database/sql ends a transaction once), so the commit itself —
+		// measured at up to 11 ms (ADR-0077 decision 9) — is the one part of
+		// a hold the bound does not cut short.
+		if stop != nil && !stop() {
+			<-fired
+			f.mu.Lock()
+			if f.failed == nil {
+				f.failed = &FrameExpiredError{Held: time.Since(f.began)}
+			}
+			f.mu.Unlock()
+			continue
 		}
 		if err := tx.Commit(); err != nil {
 			f.mu.Lock()

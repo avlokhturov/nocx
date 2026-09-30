@@ -103,24 +103,42 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 // (ADR-0077), as the last statement of the frame's own transaction
 // (ApplyLifecycleFrame). The cursor lives in the binding's payload beside the
 // route back it completes — the same row a re-adopt reads — and the statement
-// only ever raises it: a write for an offset at or behind the stored one
-// matches no row. A binding that recorded no cursor at all is not given one
-// here: the cursor is born with the binding (CreateSession), and a row that
-// lacks it is a session whose lifecycle leg this coordinator never attached
-// from the start.
+// only ever raises it. Two outcomes are success: the cursor moved, or it was
+// already at or past this frame's end (a frame the helper offered again).
+// Anything else is ErrLifecycleCursorMissing and fails the frame: the binding
+// is gone (reconciliation swept it), or it records no cursor — every binding a
+// lifecycle leg is bound to is born with one (recordHostedBinding writes it at
+// 0) — so a frame there would commit rows no cursor covers.
 func (s *sqliteContent) recordLifecycleApplied(ctx context.Context, sessionID string, offset uint64) error {
-	{
-		_, err := s.conn(ctx).ExecContext(ctx,
-			`UPDATE sessions SET payload = json_set(payload, '$.lifecycleApplied', ?)
-			  WHERE id = ?
-			    AND json_type(payload, '$.lifecycleApplied') = 'integer'
-			    AND json_extract(payload, '$.lifecycleApplied') < ?`,
-			int64(offset), sessionID, int64(offset)) //nolint:gosec // a stream offset, far below 2^63
-		if err != nil {
-			return fmt.Errorf("content: record the lifecycle cursor: %w", err)
-		}
+	res, err := s.conn(ctx).ExecContext(ctx,
+		`UPDATE sessions SET payload = json_set(payload, '$.lifecycleApplied', ?)
+		  WHERE id = ?
+		    AND json_type(payload, '$.lifecycleApplied') = 'integer'
+		    AND json_extract(payload, '$.lifecycleApplied') < ?`,
+		int64(offset), sessionID, int64(offset)) //nolint:gosec // a stream offset, far below 2^63
+	if err != nil {
+		return fmt.Errorf("content: record the lifecycle cursor: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("content: record the lifecycle cursor: %w", err)
+	}
+	if n == 1 {
 		return nil
 	}
+	var kind sql.NullString
+	err = s.conn(ctx).QueryRowContext(ctx,
+		`SELECT json_type(payload, '$.lifecycleApplied') FROM sessions WHERE id = ?`, sessionID).Scan(&kind)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return fmt.Errorf("%w: no binding for session %s", ErrLifecycleCursorMissing, sessionID)
+	case err != nil:
+		return fmt.Errorf("content: record the lifecycle cursor: %w", err)
+	case kind.String != "integer":
+		return fmt.Errorf("%w: the binding for session %s records none", ErrLifecycleCursorMissing, sessionID)
+	}
+	// At or past this frame already: the legitimate no-op.
+	return nil
 }
 
 // DeleteSession removes a restore key. Entries keep their rows: the ON
@@ -216,6 +234,13 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 	}
 	digest := entryDigest(in)
 	var out SubmitResult
+	// The decision a replay may not change: whether a row was minted, and
+	// whether it was this call's or one already there (frameAnswer).
+	type submitAnswer struct {
+		id       string
+		replayed bool
+	}
+	var answer frameAnswer[submitAnswer]
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE (the ncruces driver maps LevelSerializable to it):
 		// the write lock is taken at BEGIN, not at the first write. With a
@@ -242,6 +267,9 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 				return ErrIDConflict
 			}
 			out = SubmitResult{ID: in.ID, IngestSeq: seq, SubmittedAt: submittedAt, Replayed: true}
+			if settleErr := answer.settle(submitAnswer{out.ID, out.Replayed}); settleErr != nil {
+				return settleErr
+			}
 			return txEnd.commit()
 		case !errors.Is(err, sql.ErrNoRows):
 			return err
@@ -266,7 +294,7 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 		// it does not un-record one.
 		if in.Kind == EntryShell && !s.policy.Enabled() {
 			out = SubmitResult{}
-			return nil
+			return answer.settle(submitAnswer{})
 		}
 
 		var next int64
@@ -333,6 +361,9 @@ func (s *sqliteContent) Submit(ctx context.Context, in SubmitEntry) (SubmitResul
 			string(in.Sensitivity), in.Payload,
 		); err != nil {
 			return err
+		}
+		if settleErr := answer.settle(submitAnswer{in.ID, false}); settleErr != nil {
+			return settleErr
 		}
 		if err := txEnd.commit(); err != nil {
 			return err
@@ -921,6 +952,7 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 		in.Attempt = 1
 	}
 	var id int64
+	var answer frameAnswer[int64]
 	err := s.run(ctx, func(ctx context.Context) error {
 		tx, txEnd, err := s.beginTx(ctx, nil)
 		if err != nil {
@@ -979,8 +1011,8 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 		// when its first one failed (lifecycle_frame.go), and its caller
 		// already holds the id the first run answered: a different one is
 		// not the execution the caller goes on to finish.
-		if id != 0 && got != id {
-			return ErrFrameReplayDiverged
+		if settleErr := answer.settle(got); settleErr != nil {
+			return settleErr
 		}
 		id = got
 		if in.Grant != nil {

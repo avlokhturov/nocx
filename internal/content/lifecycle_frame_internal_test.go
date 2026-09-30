@@ -435,3 +435,162 @@ func TestAReplayTheStoreAnswersDifferentlyFailsTheFrame(t *testing.T) {
 		}
 	}
 }
+
+// A TRANSACTION WHOSE BOUND FIRED IS NEVER COMMITTED (codex review of the
+// run, finding 1). The bound's callback is released exactly as the commit
+// begins: disarming it then fails, as time.AfterFunc's Stop does once its
+// function has started, and the callback's rollback races the commit. The
+// commit must wait for the callback and go by what it did: the expired
+// transaction is rolled back, and the frame commits on its second one.
+func TestATransactionWhoseBoundFiredAsTheCommitBeganIsNotCommitted(t *testing.T) {
+	var mu sync.Mutex
+	var pauses []time.Duration
+	armed := 0
+	timer := func(d time.Duration, fire func()) func() bool {
+		if d != LifecycleFrameMaxHold {
+			mu.Lock()
+			pauses = append(pauses, d)
+			mu.Unlock()
+			go fire()
+			return func() bool { return false }
+		}
+		mu.Lock()
+		armed++
+		first := armed == 1
+		mu.Unlock()
+		if !first {
+			return func() bool { return true }
+		}
+		// The first transaction's bound fires the moment its commit
+		// begins disarming it: Stop loses, and the callback is running.
+		return func() bool {
+			go fire()
+			return false
+		}
+	}
+	db, err := Open(context.Background(), Config{
+		Path: filepath.Join(t.TempDir(), "content.db"), Key: testKeyInternal(), Budget: testBudgetInternal(),
+		Logger: log.NewSlogAdapter(nil), FrameTimer: timer,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	s, ok := db.(*sqliteContent)
+	if !ok {
+		t.Fatalf("Open returned %T, want the sqlite store", db)
+	}
+	ctx := context.Background()
+	if _, err := s.Layout().CreateWorkspace(ctx,
+		Workspace{ID: "ws-frame", Name: "frame"},
+		Tab{ID: "tab-frame", WorkspaceID: "ws-frame", Layout: LayoutRow},
+		Pane{ID: "pane-frame", TabID: "tab-frame", Cwd: "/", Kind: PaneLocal, SizeShare: 1},
+	); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	zero := uint64(0)
+	if err := s.Ledger().CreateSession(ctx, Session{ID: frameSession, WorkspaceID: "ws-frame", LifecycleApplied: &zero}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, startFrame(s, "s-dom-frame-0")); err != nil {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame applied on its second transaction", err)
+	}
+	mu.Lock()
+	got := append([]time.Duration(nil), pauses...)
+	mu.Unlock()
+	if len(got) != 1 || got[0] != 50*time.Millisecond {
+		t.Fatalf("pauses %v: the transaction whose bound fired as its commit began was committed — want it rolled back and the frame committed after one 50ms pause", got)
+	}
+	if executions, cursor := storedFrame(t, s, "s-dom-frame-0"); executions != 1 || cursor != 120 {
+		t.Fatalf("after the frame: %d executions, cursor %d — want 1 and 120", executions, cursor)
+	}
+}
+
+// A CURSOR THAT CANNOT BE WRITTEN FAILS THE FRAME; ONE ALREADY PAST IT IS A
+// NO-OP (codex review of the run, finding 2). The cursor is the frame's
+// proof that it was applied, so a write that lands on no binding — the row
+// is gone, or it records no cursor — may not read as success. A binding
+// whose cursor is already at or past the frame is the legitimate no-op.
+func TestACursorWriteThatLandsNowhereFailsTheFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, s *sqliteContent, raw *sql.DB)
+	}{
+		{"the binding is gone", func(t *testing.T, s *sqliteContent, raw *sql.DB) {
+			if _, err := raw.ExecContext(context.Background(), `DELETE FROM sessions WHERE id = ?`, frameSession); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"the binding records no cursor", func(t *testing.T, s *sqliteContent, raw *sql.DB) {
+			if _, err := raw.ExecContext(context.Background(),
+				`UPDATE sessions SET payload = json_remove(payload, '$.lifecycleApplied') WHERE id = ?`, frameSession); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, raw := openFrameStore(t)
+			tc.setup(t, s, raw)
+			err := s.ApplyLifecycleFrame(context.Background(), frameSession, 120, startFrame(s, "s-dom-frame-0"))
+			if !errors.Is(err, ErrLifecycleFrameFailed) || !errors.Is(err, ErrLifecycleCursorMissing) {
+				t.Fatalf("ApplyLifecycleFrame = %v, want the frame failed with ErrLifecycleCursorMissing", err)
+			}
+			if row, rerr := s.Ledger().Entry(context.Background(), "s-dom-frame-0"); rerr != nil || row != nil {
+				t.Fatalf("the failed frame stored its entry: %+v, %v", row, rerr)
+			}
+		})
+	}
+	t.Run("the cursor is already past the frame", func(t *testing.T) {
+		s, _ := openFrameStore(t)
+		ctx := context.Background()
+		if err := s.ApplyLifecycleFrame(ctx, frameSession, 500, func(context.Context) error { return nil }); err != nil {
+			t.Fatalf("moving the cursor to 500: %v", err)
+		}
+		if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, startFrame(s, "s-dom-frame-0")); err != nil {
+			t.Fatalf("a frame behind the cursor = %v, want a no-op success", err)
+		}
+		if _, cursor := storedFrame(t, s, "s-dom-frame-0"); cursor != 500 {
+			t.Fatalf("the cursor moved back to %d", cursor)
+		}
+	})
+}
+
+// A REPLAYED SUBMIT THAT WOULD MINT WHAT THE FIRST DID NOT FAILS THE FRAME
+// (codex review of the run, finding 3). History is off on the frame's first
+// transaction, so its submit answers the zero result — no entry, and the
+// frame's caller goes on believing there is none. History is turned on while
+// the frame pauses; replayed, the same submit would mint the entry nobody
+// decided on. The replay's answer differs, so the frame fails.
+func TestAReplayedSubmitThatWouldMintAnEntryFailsTheFrame(t *testing.T) {
+	s, _, timers := openFrameStoreTimed(t)
+	ctx := context.Background()
+	s.cfg.Policy.SetEnabled(false)
+	timers.onPause = func() { s.cfg.Policy.SetEnabled(true) }
+	sessionID := frameSession
+	var first SubmitResult
+	err := s.ApplyLifecycleFrame(ctx, frameSession, 120, func(fctx context.Context) error {
+		led := s.Ledger()
+		if err := led.EnsureEnvironment(fctx, Environment{ID: "local", Kind: EnvLocal}); err != nil {
+			return err
+		}
+		var err error
+		first, err = led.Submit(fctx, SubmitEntry{
+			ID: "s-dom-frame-0", Client: "lifecycle-shell", EnvironmentID: "local", Cwd: "/", Intent: "make build",
+			Kind: EntryShell, Source: SourceUser, SessionID: &sessionID,
+		})
+		if err != nil {
+			return err
+		}
+		(<-timers.armed).fireNow()
+		return nil
+	})
+	if first.ID != "" {
+		t.Fatalf("history off answered %+v, want the zero result", first)
+	}
+	if !errors.Is(err, ErrFrameReplayDiverged) {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame failed on its diverged replay", err)
+	}
+	if row, rerr := s.Ledger().Entry(ctx, "s-dom-frame-0"); rerr != nil || row != nil {
+		t.Fatalf("the replay minted the entry: %+v, %v", row, rerr)
+	}
+}

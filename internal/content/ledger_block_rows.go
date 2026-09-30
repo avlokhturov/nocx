@@ -92,9 +92,10 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 	// replays this write into a fresh transaction when its first one failed
 	// (lifecycle_frame.go), and its caller already holds the first answer:
 	// a different artifact is not the block the caller installed.
+	var first frameAnswer[string]
 	answer := func(id string) error {
-		if opened != "" && id != opened {
-			return ErrFrameReplayDiverged
+		if err := first.settle(id); err != nil {
+			return err
 		}
 		opened = id
 		return nil
@@ -117,7 +118,7 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			return err
 		}
 		if Sensitivity(sensitivity) == SensitivitySensitive {
-			return nil
+			return answer("")
 		}
 
 		// The entry's own execution — the run the authenticated start
@@ -139,7 +140,7 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			return err
 		}
 		if Criticality(criticality) == CriticalityCritical {
-			return nil
+			return answer("")
 		}
 		openedExec = execID
 
@@ -446,6 +447,9 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		return BlockRowsSummary{}, errors.New("content: block rows: entry id and artifact id are required")
 	}
 	var summary BlockRowsSummary
+	// The seal's summary is its answer: a replay that would seal another
+	// span is not the seal the caller decided on (frameAnswer).
+	var answer frameAnswer[BlockRowsSummary]
 	err := s.run(ctx, func(ctx context.Context) error {
 		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
@@ -459,6 +463,9 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		}
 		if state.sealed {
 			summary = state.summary
+			if settleErr := answer.settle(summary); settleErr != nil {
+				return settleErr
+			}
 			return txEnd.commit()
 		}
 
@@ -473,6 +480,9 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 			return err
 		}
 		summary = BlockRowsSummary{DroppedRows: dropped, LostRows: state.payload.LostRows, UnavailableRows: state.payload.UnavailableRows}
+		if settleErr := answer.settle(summary); settleErr != nil {
+			return settleErr
+		}
 		// Probe (nocx-zg3k3.5.3 round 7): which artifact the seal landed on
 		// and at what cursor — the close sealing the OTHER artifact is one
 		// of the two ways confirmed rows go missing from a read.
