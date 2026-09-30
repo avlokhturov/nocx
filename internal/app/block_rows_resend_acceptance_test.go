@@ -206,10 +206,11 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	// block that sealed short of the command's whole output.
 	deadline = time.Now().Add(30 * time.Second)
 	for {
-		read, readErr := a2.Transport.ReadSessionItem(ctx, string(p.sess.ID()), itemID, 0, 400)
-		if readErr != nil {
-			t.Fatalf("ReadSessionItem after the restart: %v", readErr)
-		}
+		// The seal is read FIRST and the rows after it: the seal commits
+		// after the block's last append, so rows read once the seal is seen
+		// are the whole stored body. Read the other way round, the rows can
+		// be a snapshot taken before the last append and the seal one taken
+		// after it, and a complete block reads as one sealed short.
 		got := callAppWS(t, conn2, "ledger.get", map[string]any{"id": itemID}, 8)
 		if got.Error != nil {
 			t.Fatalf("ledger.get: %+v", got.Error)
@@ -228,6 +229,10 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 			if art.MediaType == string(content.MediaBlockRows) && art.State == "sealed" {
 				sealed = true
 			}
+		}
+		read, readErr := a2.Transport.ReadSessionItem(ctx, string(p.sess.ID()), itemID, 0, 400)
+		if readErr != nil {
+			t.Fatalf("ReadSessionItem after the restart: %v", readErr)
 		}
 		if read.Total >= 300 && sealed {
 			break
