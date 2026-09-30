@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/log"
 
 	"github.com/shady2k/nocx/internal/waittest"
@@ -230,6 +231,49 @@ func TestAFaultInsideALifecycleFrameLeavesNeitherItsRowsNorTheCursor(t *testing.
 				t.Fatalf("after the frame applied again: %d executions, cursor %d — want 1 and 120", executions, cursor)
 			}
 		})
+	}
+}
+
+// telling applies the frame and queues one effect that tells somebody of it,
+// as the publisher's ACCEPT and the renderer's block notification do; told
+// records what the effect was run with.
+func telling(apply func(context.Context) error, told *[]bool) func(context.Context) error {
+	return func(ctx context.Context) error {
+		lifecyclecommit.After(ctx, nil, func(committed bool) { *told = append(*told, committed) })
+		return apply(ctx)
+	}
+}
+
+// A frame that fails every attempt tells nobody it happened, and a frame that
+// commits tells once (ADR-0077 decision 12). The queue's own tests prove it
+// runs or drops what it is given; this proves the store ENDS it with the
+// frame's real outcome — without it the shell would be sent an ACCEPT for a
+// frame the store never holds, and the next coordinator would send it again.
+func TestAFrameThatFailsEveryAttemptTellsNobodyAndACommittedOneTellsOnce(t *testing.T) {
+	s, raw := openFrameStore(t)
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, `CREATE TEMP TRIGGER fault BEFORE INSERT ON executions BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatalf("injecting the fault: %v", err)
+	}
+	var told []bool
+	if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, telling(startFrame(s, "s-dom-frame-0"), &told)); !errors.Is(err, ErrLifecycleFrameFailed) {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame to fail every attempt", err)
+	}
+	for _, committed := range told {
+		if committed {
+			t.Fatalf("a frame that failed every attempt ran its effects as committed: %v", told)
+		}
+	}
+
+	if _, err := raw.ExecContext(ctx, `DROP TRIGGER fault`); err != nil {
+		t.Fatalf("clearing the fault: %v", err)
+	}
+	told = nil
+	if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, telling(startFrame(s, "s-dom-frame-0"), &told)); err != nil {
+		t.Fatalf("the frame applied again: %v", err)
+	}
+	if len(told) != 1 || !told[0] {
+		t.Fatalf("a committed frame ran its effect %v, want once, as committed", told)
 	}
 }
 
