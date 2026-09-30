@@ -313,9 +313,15 @@ func (a *stubAdopter) ReadoptHostedSession(ctx context.Context, sid session.ID, 
 
 // HoldSessionEndFor records the arm; no stub test waits an end hold, but the
 // pass calls it whenever the helper retained a lifecycle window, and the
-// arm's presence is observable for the test that wants it.
+// arm's presence is observable for the test that wants it. The map is
+// minted here: the stub is constructed as a literal all over this package,
+// and a nil-map write under a.mu would leave the mutex locked behind the
+// panic — a hung cleanup instead of a red test (measured).
 func (a *stubAdopter) HoldSessionEndFor(sid session.ID, drained <-chan struct{}) {
 	a.mu.Lock()
+	if a.holds == nil {
+		a.holds = make(map[session.ID]<-chan struct{})
+	}
 	a.holds[sid] = drained
 	a.mu.Unlock()
 }
