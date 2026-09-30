@@ -223,6 +223,10 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// already use. A shell still sourcing 53 sends a frame kind the
 		// backend no longer knows.
 		"54": "9137cedf810cb053042eabc6d7b6ed299e78d4fe4d4d37c0c85865e8698c5cb0",
+		// 55: both shells name every completion with the attempt id they
+		// minted at start (ADR-0077) — the block's identity across
+		// coordinators, so a completion delivered twice closes one block.
+		"55": "8dd3b40e95050d52a6d345253db29559e07517847f94b79daa2472c19558b1f1",
 	}
 
 	h := sha256.New()

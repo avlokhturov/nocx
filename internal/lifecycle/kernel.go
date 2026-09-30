@@ -713,8 +713,17 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	}
 	att := k.openAttemptFor(d.ID)
 	if c.AttemptID != nil {
-		named, ok := k.attempts[*c.AttemptID]
-		if !ok {
+		// The id the shell names is its own: the attempt's key for a
+		// shell-originated command, the alias the start recorded for one
+		// submitted from the app. Resolved exactly as a snapshot's
+		// last_completed is (resolveAttempt), so both shipped shells can
+		// name every completion with the id they minted at start — the
+		// block's identity across coordinators (nocx-zg3k3.5.11).
+		// A found id of another domain is refused below
+		// (ErrAttemptDomainMismatch), so resolveAttempt's ownership bool is
+		// not needed here.
+		named, _ := k.resolveAttempt(d, *c.AttemptID)
+		if named == nil {
 			// A completion naming an attempt this kernel never saw is the
 			// retained window's replay of a command that ran for the
 			// coordinator BEFORE this one: the shell is the only witness

@@ -1273,3 +1273,15 @@ func (s *sqliteContent) Close() error {
 	})
 	return err
 }
+
+// querier is the statement surface *sql.DB and *sql.Tx share.
+type querier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// conn is what a statement under ctx runs on.
+func (s *sqliteContent) conn(ctx context.Context) querier {
+	return s.db
+}

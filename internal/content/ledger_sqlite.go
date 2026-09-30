@@ -882,6 +882,35 @@ func (s *sqliteContent) DeleteEntry(ctx context.Context, id string) error {
 // Grant, when non-nil, is recorded on the run: versioned, expiring,
 // immutable once execution starts (no update path exists). The workspace
 // minted it; this table is the receipt, not the enforcement object.
+// executionPayload is what an execution's payload column carries for a
+// shell-run command: the shell's own id for it, when that is not the entry's.
+type executionPayload struct {
+	ShellAttempt string `json:"shellAttempt,omitempty"`
+}
+
+// EntryForShellAttempt implements LedgerRepository.
+func (s *sqliteContent) EntryForShellAttempt(ctx context.Context, paneID, shellAttempt string) (string, error) {
+	if shellAttempt == "" {
+		return "", nil
+	}
+	var id string
+	err := s.conn(ctx).QueryRowContext(ctx, `SELECT id FROM entries WHERE id = ?`, shellAttempt).Scan(&id)
+	if err == nil {
+		return id, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	err = s.conn(ctx).QueryRowContext(ctx,
+		`SELECT x.entry_id FROM executions x JOIN entries e ON e.id = x.entry_id
+		 WHERE e.pane_id = ? AND json_extract(x.payload, '$.shellAttempt') = ?
+		 ORDER BY x.id LIMIT 1`, paneID, shellAttempt).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return id, err
+}
+
 func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (int64, error) {
 	if in.Interactivity == "" {
 		in.Interactivity = InteractivityNone
@@ -917,12 +946,20 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 			return err
 		}
 
+		payload := "{}"
+		if in.ShellAttempt != "" && in.ShellAttempt != in.EntryID {
+			raw, merr := json.Marshal(executionPayload{ShellAttempt: in.ShellAttempt})
+			if merr != nil {
+				return merr
+			}
+			payload = string(raw)
+		}
 		res, err := tx.ExecContext(ctx, `INSERT INTO executions
 			(entry_id, lane, attempt, environment_obs_id, lease_deadline, inactivity_deadline,
-			 interactivity, process_group, started_at, executor)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 interactivity, process_group, started_at, executor, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			in.EntryID, in.Lane, in.Attempt, obsID, in.LeaseDeadline, in.InactivityDeadline,
-			string(in.Interactivity), in.ProcessGroup, time.Now().UnixMilli(), in.Executor)
+			string(in.Interactivity), in.ProcessGroup, time.Now().UnixMilli(), in.Executor, payload)
 		if err != nil {
 			return err
 		}

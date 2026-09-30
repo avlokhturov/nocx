@@ -341,6 +341,11 @@ func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
 	return RetentionWatermark{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) EntryForShellAttempt(_ context.Context, paneID, shellAttempt string) (string, error) {
+	s.log.Info("content stub: LedgerRepository.EntryForShellAttempt", "pane", paneID, "shellAttempt", shellAttempt)
+	return "", nil
+}
+
 func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {
 	s.log.Info("content stub: LedgerRepository.StartExecution", "entry", in.EntryID)
 	return 0, ErrNotImplemented

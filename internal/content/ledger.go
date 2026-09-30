@@ -533,7 +533,13 @@ type SubmitResult struct {
 // immutable once execution starts (the workspace minted it; it is not the
 // enforcement object).
 type StartExecution struct {
-	EntryID            string
+	EntryID string
+	// ShellAttempt is the id the shell minted for this run's command when it
+	// differs from EntryID — a command the app submitted, whose entry is
+	// keyed by the app's id while every frame the shell sends names its own
+	// (ADR-0077). Recorded on the execution, and what EntryForShellAttempt
+	// answers from. Empty when the two are one id.
+	ShellAttempt       string
 	Lane               *string
 	Attempt            int
 	LeaseDeadline      *int64
@@ -1995,6 +2001,14 @@ type LedgerRepository interface {
 	// is nothing to pin, and an unpinned execution would be
 	// reinterpreted later with today's facts.
 	StartExecution(ctx context.Context, in StartExecution) (int64, error)
+	// EntryForShellAttempt answers which entry of the pane a shell's own
+	// attempt id names: the entry keyed by that id, or the one whose
+	// execution recorded it as its ShellAttempt. "" when neither exists.
+	// It is how a frame delivered again to a coordinator that never saw the
+	// attempt finds the block it belongs to by identity (ADR-0077). Scoped
+	// by the pane — the anchor every entry a session records carries, where
+	// a command submitted from the editor names no session.
+	EntryForShellAttempt(ctx context.Context, paneID, shellAttempt string) (string, error)
 	// FinishExecution closes the run with its termination reason and
 	// closes the entry with its final status.
 	FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error
