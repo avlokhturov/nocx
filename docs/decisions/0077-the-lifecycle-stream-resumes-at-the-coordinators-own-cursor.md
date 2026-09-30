@@ -16,7 +16,10 @@
   the same coordinator up to three more times (pauses of 50, 100 and 200 ms), and only then does the
   leg halt, visibly; the deadlock the frame's context guards against is detected in tests by a
   goroutine-identity check behind a build tag and in production by the bound alone; and a frame that
-  arrives while the coordinator is stopping is left for the next one.
+  arrives while the coordinator is stopping is left for the next one. And, on the retry: a failed
+  attempt changes no block state — ADR-0076 decision 2, a store write failing is not something the
+  helper reported — so no projection code branches on it, and in-memory block state agrees with the
+  store after every frame.
 - **Supersedes:**
   - [ADR-0024](0024-authenticated-shell-integration-channel.md), the 2026-09-02 amendment's bullet
     "The re-attachment resumes at the lifecycle window's HEAD, not its base." The re-attachment now
@@ -106,20 +109,50 @@ length — what this machine stored — and never from anything the helper guess
    writes the store; were a frame to hold the store's connection and then wait for the turn, the two
    would wait on each other.
 
-9. **A frame's hold is bounded, a failed frame is tried again, and the halt is the last resort.**
-   A frame may hold the store's one connection for `content.LifecycleFrameMaxHold` = **250 ms**,
-   counted from its first write; past it the attempt is rolled back where it stands, the connection
-   free again at once, exactly as an attempt whose write failed. Either way the SAME coordinator
-   applies the frame again, up to three more times, pausing 50, 100 and 200 ms before each, and the
-   leg's next frame waits for it, so the order the shell spoke in holds. A further attempt does not
-   run the kernel or the projection again — they already hold the frame — but replays, in order, in
-   a fresh transaction, the store writes the first attempt's projection made, with the cursor as its
-   last statement; that is safe because every such write is a no-op on a repeat (decision 7). Only
-   when the fourth attempt fails does the leg halt: it applies nothing more, the domain is not marked
-   lost (the shell's channel did not fail), and the loss reaches the pane's integration axis as
-   `store-refused` through the adapter's loss report — `lost` / channel-lost once the pane had
-   integrated, channel-unavailable before — with one error line naming the frame's kind, the
-   session, the attempts and the hold. The next coordinator applies the frame once, from the cursor.
+9. **A frame's hold is bounded, a failed attempt changes no block state and is tried again, and the
+   halt is the last resort.** A frame's transaction may hold the store's one connection for
+   `content.LifecycleFrameMaxHold` = **250 ms**, counted from its first write; past it the
+   transaction is rolled back where it stands and the connection is free again at once, exactly as a
+   transaction whose write failed. Either way the frame is not over: at its next store call — the
+   failed write itself, or whatever the frame does next — the SAME frame pauses (50, 100, then
+   200 ms), begins a fresh transaction, replays in order the writes it had already made, and carries
+   on, up to three more times; the leg's next frame waits, so the order the shell spoke in holds.
+   The cursor is the frame's last write, so a commit that fails is replayed the same way.
+
+   A FAILED ATTEMPT CHANGES NO BLOCK STATE. [ADR-0076](0076-the-coordinator-going-away-changes-no-block.md)
+   decision 2 holds here as everywhere: a block's state changes only on something the helper
+   reports, and a store write failing is not something the helper reported. So no projection code
+   branches on a failed write: the retry happens underneath the write, and the write the projection
+   made answers it as a write that never failed would. The block stream's own failure branches — an
+   open left pending a retry, a close parked or abandoned, a seal refused into an orphan, rows
+   requeued — are never reached by a failure the frame recovers from. That is what makes replaying
+   the recorded writes correct, and it is the whole of the argument: because the projection never
+   saw the failure, the writes it made are exactly the writes a frame that never failed makes, and
+   the in-memory block state it built from their answers is exactly what those writes store once
+   they commit. Memory and store agree by construction, with nothing re-read. The replay is not
+   trusted blindly either: the store changed under the frame while it paused only if a replayed
+   write answers differently from its first run — refused where it was accepted, or naming another
+   execution or artifact than the one the projection holds — and then the frame fails rather than
+   commit a frame nobody decided (`content.ErrFrameReplayDiverged`).
+
+   A WRITE THE STORE REFUSES IS ITS ANSWER, NOT A FAILURE: a missing entry, a discontinuous append, an
+   id already used. Its savepoint is rolled back, the frame goes on, and the projection branches on
+   the answer as it always has. A failure is the database's own error, a transaction that ended
+   under the write, or a closed store.
+
+   Only when the fourth attempt fails does the frame fail. Every store call it still makes then
+   answers `content.ErrLifecycleFrameFailed`, and every block-stream branch that decides on a store
+   error returns on that at once — it is no answer about any block. Nothing of the frame is stored,
+   what would tell someone else it was (the helper's row confirmations, the history receipt, the
+   finished notification) waits for a commit that never comes, and when the frame ends the session's
+   block state is read again from the store exactly as a coordinator that went away and came back
+   reads it (`content.AfterLifecycleFrame`; the transport's `rebindBlockRowsFromStore`), so whatever
+   the frame's projection did in memory before its last attempt failed is gone with the rows it
+   wrote. The leg then halts: it applies nothing more, the domain is not marked lost (the shell's
+   channel did not fail), and the loss reaches the pane's integration axis as `store-refused` through
+   the adapter's loss report — `lost` / channel-lost once the pane had integrated,
+   channel-unavailable before — with one error line naming the frame's kind, the session, the
+   attempts and the hold. The next coordinator applies the frame once, from the cursor.
 
    THE BASIS FOR 250 MS, measured on the restart and shell-exit acceptances with the hold timed from
    the frame's first write to the end of its commit: a plain run (119 frames) p50 0.70 ms, p99
@@ -178,6 +211,15 @@ effects live — the coordinator's store.
   `TestAFrameFailedAtTheCursorIsAppliedOnceOnItsNextAttempt` and
   `TestAFrameTheStoreRefusesOnEveryAttemptHaltsTheLegAndIsAppliedOnceByTheNext` (the process
   restarts on the stored cursor and applies the frame once).
+- **A failed attempt changes no block state** (decision 9), measured through the real projection:
+  `TestAWriteThatFailsOnceLeavesTheBlockAsIfItHadNotAndItSealsNormally` (the block's open fails on
+  the frame's first transaction; afterwards memory and store hold the same open block at the same
+  row cursor, and it takes its rows and seals on the helper's end) and
+  `TestAFrameThatFailsEveryAttemptChangesNoBlockAndTheNextCoordinatorAppliesItOnce` (with the end
+  marker before and after the frame: memory, store and ledger exactly as before it; the next
+  coordinator applies it once). In the store: `TestAWriteThatFailsOnceAnswersItsFrameAsIfItHadNot`,
+  `TestAWriteTheStoreRefusesIsItsAnswerAndTheFrameCommits` and
+  `TestAReplayTheStoreAnswersDifferentlyFailsTheFrame`.
 - **What this asks of every caller inside a frame:** each store call it makes carries the context the
   frame handed it. The store holds its one connection (`maxOpenConns` is one) from the frame's first
   write to its end, so a call on the frame's goroutine with any other context waits for a connection
@@ -191,8 +233,12 @@ effects live — the coordinator's store.
   an Accept waiting for room inside a frame is never waiting on that report's write.
 - A frame that fails every attempt ends the leg for this coordinator, and the pane shows it. That is
   the price of never storing a later frame past one the store does not hold; the next coordinator
-  resumes before it. A frame that fails and then succeeds costs its lane at most 350 ms of pauses,
-  during which the lane's later frames wait.
+  resumes before it. The session's block stream is read again from the store at that moment, which
+  forgets what it held in memory beside it — rows not yet stored and not confirmed, which the helper
+  still holds, and ends waiting for a fence the halted leg will never publish — as a coordinator
+  restart does. A frame that fails and then succeeds costs its lane at most 350 ms of pauses,
+  during which the lane's later frames wait and the connection is free for everyone else; a write
+  outside the frame that lands in a pause sees the store without the frame's rolled-back writes.
 - A coordinator's orderly shutdown waits for the frame it is applying, however long that frame's
   effect takes.
 - Round 1's seam test that pinned the base resume is replaced by one that pins the stored cursor

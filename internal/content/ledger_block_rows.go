@@ -88,6 +88,17 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 		return "", nil
 	}
 	opened, openedExec := "", int64(-1) // the execution the open resolved to; probe context (nocx-zg3k3.5.3 round 7)
+	// answer settles the artifact the open resolved to. A lifecycle frame
+	// replays this write into a fresh transaction when its first one failed
+	// (lifecycle_frame.go), and its caller already holds the first answer:
+	// a different artifact is not the block the caller installed.
+	answer := func(id string) error {
+		if opened != "" && id != opened {
+			return ErrFrameReplayDiverged
+		}
+		opened = id
+		return nil
+	}
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE for the reason Submit and CaptureOutput state:
 		// the write lock is taken at BEGIN rather than at the first write.
@@ -146,7 +157,9 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 				return fmt.Errorf("content: block rows: artifact %s belongs to entry %s: %w",
 					in.ArtifactID, heldEntry, ErrIDConflict)
 			}
-			opened = heldID
+			if err := answer(heldID); err != nil {
+				return err
+			}
 			return txEnd.commit()
 		case !errors.Is(byIDErr, sql.ErrNoRows):
 			return byIDErr
@@ -171,11 +184,15 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			}); insertErr != nil {
 				return insertErr
 			}
-			opened = in.ArtifactID
+			if err := answer(in.ArtifactID); err != nil {
+				return err
+			}
 		case lookupErr != nil:
 			return lookupErr
 		default:
-			opened = existingID
+			if err := answer(existingID); err != nil {
+				return err
+			}
 		}
 		return txEnd.commit()
 	})

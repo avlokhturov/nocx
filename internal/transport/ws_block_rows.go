@@ -775,6 +775,66 @@ func (bs *blockStream) adoptOpenBlock(sid session.ID, found content.OpenBlockRow
 	}
 }
 
+// A LIFECYCLE FRAME THAT FAILS CHANGES NO BLOCK (ADR-0077 decision 9, from
+// ADR-0076 decision 2: a block's state changes only on something the helper
+// reports, and a store write failing is not that). A transaction that fails
+// under a frame is begun again by the store where it failed, so this stream
+// never sees that failure: what it decides is what a frame that never failed
+// decides, and the store commits exactly that. What reaches this stream is a
+// frame that failed every attempt — every store call it still makes answers
+// content.ErrLifecycleFrameFailed — and that is no answer about any block:
+// the branches that decide on a store error return on it at once
+// (frameFailed), and when the frame ends the session's block state is read
+// again from the store (rebindIfFrameFails), so whatever the frame's
+// projection did in memory before its last attempt failed is gone with the
+// rows it wrote.
+
+// frameFailed is a store error that is a lifecycle frame's failure for good.
+func frameFailed(err error) bool {
+	return errors.Is(err, content.ErrLifecycleFrameFailed)
+}
+
+// frameRebind keys one session's re-read in one frame.
+type frameRebind struct {
+	s   *WSServer
+	sid session.ID
+}
+
+// rebindIfFrameFails arranges that, when the lifecycle frame ctx carries ends
+// without committing, the session's block state is read again from the store
+// — once per frame, whichever of its facts touched the session first.
+// Outside a frame it does nothing.
+func (s *WSServer) rebindIfFrameFails(ctx context.Context, sid session.ID) {
+	content.AfterLifecycleFrame(ctx, frameRebind{s: s, sid: sid}, func(committed bool) {
+		if !committed {
+			s.rebindBlockRowsFromStore(sid)
+		}
+	})
+}
+
+// rebindBlockRowsFromStore re-reads a session's block state from the store,
+// the way a coordinator that went away and came back does (ADR-0076): the
+// stream forgets what it held for the session and changes no block
+// (detachCoordinator), and the open block the store holds is installed again
+// at the store's own cursor (adoptOpenBlock). The attachment — its source,
+// its helper confirmation, its buffer — is kept.
+func (s *WSServer) rebindBlockRowsFromStore(sid session.ID) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	_, sourced := bs.sources[sid]
+	confirm, budget := bs.confirmers[sid], bs.budgets[sid]
+	bs.mu.Unlock()
+	if !sourced {
+		return
+	}
+	found := s.adoptableOpenBlock(sid)
+	bs.detachCoordinator(sid)
+	bs.attach(sid, confirm, budget)
+	bs.adoptOpenBlock(sid, found)
+	s.log.Warn("block rows: a lifecycle frame failed every attempt; the session's block state is read again from the store",
+		"session", sid, "entry", found.EntryID, "artifact", found.ArtifactID, "cursor", found.NextRow)
+}
+
 // blockRowsBuffer is the buffer a session attached now gets.
 func (s *WSServer) blockRowsBuffer() int64 {
 	n := s.blockRowsBufferBytes.Load()
@@ -1606,6 +1666,7 @@ func (s *WSServer) BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uin
 func (s *WSServer) BlockBoundaryLost(ctx context.Context, sid session.ID, nonce [32]byte) {
 	hexNonce := hex.EncodeToString(nonce[:])
 	bs := s.blockStream
+	s.rebindIfFrameFails(ctx, sid)
 	bs.mu.Lock()
 	if _, sourced := bs.sources[sid]; !sourced {
 		bs.mu.Unlock()
@@ -1737,10 +1798,14 @@ func (bs *blockStream) retryOrphanSeals(ctx context.Context, store blockOutputSt
 		return
 	}
 	var remaining []*orphanSeal
-	for _, o := range pending {
+	for i, o := range pending {
 		if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 			EntryID: o.entry, ArtifactID: o.artifactID,
-		}); err != nil {
+		}); frameFailed(err) {
+			// Not a try: the frame stored nothing, and the seals stay owed.
+			remaining = append(remaining, pending[i:]...)
+			break
+		} else if err != nil {
 			o.tries++
 			if !final && o.tries < maxCloseAttempts {
 				remaining = append(remaining, o)
@@ -2216,6 +2281,9 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 				EntryID: block.entry, ArtifactID: block.artifactID, Incomplete: incomplete,
 			})
 			attached := endSeal()
+			if frameFailed(err) && attached {
+				return
+			}
 			if !attached {
 				detachedSettle(err == nil, true)
 				return
@@ -2346,7 +2414,12 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 		if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 			EntryID: block.entry, ArtifactID: block.artifactID,
 			FromRow: cursor, Rows: closing,
-		}); err != nil {
+		}); frameFailed(err) {
+			bs.mu.Lock()
+			delete(bs.closing, sid)
+			bs.mu.Unlock()
+			return false
+		} else if err != nil {
 			s.log.Warn("block closing rows failed", "session", sid, "entry", block.entry,
 				"fromRow", cursor, "endRow", endRow, "error", err)
 			if !fail() {
@@ -2374,6 +2447,12 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 		// detach left the block to it, and this is the one seal it gets.
 		detachedSettle(err == nil, true)
 		return true
+	}
+	if frameFailed(err) {
+		bs.mu.Lock()
+		delete(bs.closing, sid)
+		bs.mu.Unlock()
+		return false
 	}
 	if err != nil {
 		s.log.Warn("block rows close failed", "session", sid, "entry", block.entry, "error", err)
@@ -2459,6 +2538,7 @@ func (bs *blockStream) attemptFact(ctx context.Context, s *WSServer, f lifecycle
 		return
 	}
 	bs.mu.Unlock()
+	s.rebindIfFrameFails(ctx, sid)
 
 	switch f.Attempt.State {
 	case lifecyclepub.AttemptOpen:
@@ -2669,6 +2749,12 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		opened, err := store.OpenBlockOutput(ctx, content.OpenBlockOutput{
 			EntryID: attempt, ArtifactID: v7.String(),
 		})
+		if frameFailed(err) {
+			// The frame failed for good: no answer about this block, and
+			// nothing to decide from — the frame's end re-reads the
+			// session's block state from the store (rebindIfFrameFails).
+			return
+		}
 		if err != nil {
 			if !errors.Is(err, content.ErrNoSuchEntry) {
 				s.log.Warn("block rows open failed", "session", sid, "entry", attempt, "error", err)
@@ -2725,7 +2811,7 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		next, kind, nextGen := bs.dequeueNextOpenLocked(sid, attempt)
 		bs.mu.Unlock()
 		for _, d := range pending {
-			confirmPendingRows(confirm, d)
+			confirmPendingRows(ctx, confirm, d)
 		}
 		// Owner: this stream, discarding a late open on behalf of the attempt
 		// or the session that already ended it.
@@ -2734,7 +2820,9 @@ func (bs *blockStream) performOpen(ctx context.Context, s *WSServer, sid session
 		if openArtifact != "" && store != nil {
 			if _, err := store.CloseBlockRows(ctx, content.CloseBlockRows{
 				EntryID: attempt, ArtifactID: openArtifact,
-			}); err != nil {
+			}); frameFailed(err) {
+				return
+			} else if err != nil {
 				s.log.Warn("block rows seal refused for a late open discarded after its attempt closed or its session detached; retried at the next flush, close or detach",
 					"session", sid, "entry", attempt, "error", err)
 				bs.recordOrphanSeal(sid, attempt, openArtifact)
@@ -2801,7 +2889,7 @@ func (bs *blockStream) settleStaleOpenRow(ctx context.Context, s *WSServer, sid 
 	for range maxCloseAttempts {
 		if _, err = store.CloseBlockRows(ctx, content.CloseBlockRows{
 			EntryID: attempt, ArtifactID: openArtifact,
-		}); err == nil {
+		}); err == nil || frameFailed(err) {
 			return
 		}
 	}
@@ -2856,7 +2944,9 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 		if err := store.AppendBlockRows(ctx, content.AppendBlockRows{
 			EntryID: block.entry, ArtifactID: block.artifactID,
 			FromRow: delivery.from, LostRows: delivery.lost, LostCause: delivery.cause, Rows: delivery.rows,
-		}); err != nil {
+		}); frameFailed(err) {
+			return
+		} else if err != nil {
 			s.log.Warn("deferred block rows append failed", "session", sid, "entry", block.entry, "error", err)
 			bs.requeuePendingRows(sid, pending[i:])
 			return
@@ -2875,7 +2965,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
-		confirmPendingRows(confirm, delivery)
+		confirmPendingRows(ctx, confirm, delivery)
 	}
 	next := bs.takePendingRows(sid, block.attempt)
 	if len(next) == 0 {
@@ -2935,10 +3025,20 @@ func (bs *blockStream) drainPendingCloses(ctx context.Context, s *WSServer, sid 
 	}
 }
 
-func confirmPendingRows(confirm func(uint64), delivery pendingRows) {
-	if confirm != nil {
-		confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
+// confirmPendingRows tells the helper a delivery is settled — it may forget
+// those rows. Inside a lifecycle frame the telling waits for the frame's
+// commit and is dropped if it does not commit (ADR-0077 decision 9): rows the
+// frame appended are not stored until then, and a helper told otherwise
+// never offers them again.
+func confirmPendingRows(ctx context.Context, confirm func(uint64), delivery pendingRows) {
+	if confirm == nil {
+		return
 	}
+	content.AfterLifecycleFrame(ctx, nil, func(committed bool) {
+		if committed {
+			confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
+		}
+	})
 }
 
 func (bs *blockStream) finishPendingRows(sid session.ID) {

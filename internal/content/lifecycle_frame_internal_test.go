@@ -30,6 +30,9 @@ type frameTimers struct {
 	holds  []*frameTimer
 	armed  chan *frameTimer
 	pauses []time.Duration
+	// onPause, when set, runs during each pause, before it ends: the
+	// connection is free then, and the test may change the store.
+	onPause func()
 }
 
 type frameTimer struct {
@@ -44,8 +47,14 @@ func (ft *frameTimers) timer(d time.Duration, fire func()) func() bool {
 	if d != LifecycleFrameMaxHold {
 		ft.mu.Lock()
 		ft.pauses = append(ft.pauses, d)
+		onPause := ft.onPause
 		ft.mu.Unlock()
-		go fire()
+		go func() {
+			if onPause != nil {
+				onPause()
+			}
+			fire()
+		}()
 		return func() bool { return false }
 	}
 	t := &frameTimer{fire: fire}
@@ -322,4 +331,107 @@ func TestAWriteOutsideAFrameIsNotRolledBackWithIt(t *testing.T) {
 		page, err := s.Ledger().ListEntries(ctx, 10)
 		return err == nil && len(page) == 1 && page[0].Intent == "outside the frame"
 	})
+}
+
+// A FAILED WRITE IS NEVER SEEN BY THE FRAME THAT MADE IT (ADR-0077 decision
+// 9). The frame's execution fails on its first transaction; the store rolls
+// the transaction back, pauses — the fault is gone by the time the pause
+// ends — begins a fresh one, replays the entry and the rest, and runs the
+// execution again. The frame's own code is told the execution was stored,
+// and it is: once, with the cursor.
+func TestAWriteThatFailsOnceAnswersItsFrameAsIfItHadNot(t *testing.T) {
+	s, raw, timers := openFrameStoreTimed(t)
+	ctx := context.Background()
+	if _, err := raw.ExecContext(ctx, `CREATE TEMP TRIGGER fault BEFORE INSERT ON executions BEGIN SELECT RAISE(ABORT, 'injected'); END`); err != nil {
+		t.Fatalf("injecting the fault: %v", err)
+	}
+	timers.onPause = func() {
+		if _, err := raw.ExecContext(ctx, `DROP TRIGGER IF EXISTS fault`); err != nil {
+			t.Errorf("clearing the fault during the pause: %v", err)
+		}
+	}
+	var seen error
+	if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, func(fctx context.Context) error {
+		seen = startFrame(s, "s-dom-frame-0")(fctx)
+		return nil
+	}); err != nil {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame applied", err)
+	}
+	if seen != nil {
+		t.Fatalf("the frame's own writes answered %v, want the failed execution's second run to answer it", seen)
+	}
+	if executions, cursor := storedFrame(t, s, "s-dom-frame-0"); executions != 1 || cursor != 120 {
+		t.Fatalf("after the frame: %d executions, cursor %d — want 1 and 120", executions, cursor)
+	}
+	if got := timers.recordedPauses(); len(got) != 1 || got[0] != 50*time.Millisecond {
+		t.Fatalf("pauses %v, want the one 50ms pause before the second transaction", got)
+	}
+}
+
+// A WRITE THE STORE REFUSES IS ITS ANSWER, AND THE FRAME GOES ON. A block
+// opened for an entry the store does not hold is refused (ErrNoSuchEntry)
+// — the answer the caller has always branched on — and the frame's other
+// writes and its cursor commit.
+func TestAWriteTheStoreRefusesIsItsAnswerAndTheFrameCommits(t *testing.T) {
+	s, _ := openFrameStore(t)
+	ctx := context.Background()
+	var refused error
+	if err := s.ApplyLifecycleFrame(ctx, frameSession, 120, func(fctx context.Context) error {
+		if err := startFrame(s, "s-dom-frame-0")(fctx); err != nil {
+			return err
+		}
+		_, refused = s.OpenBlockOutput(fctx, OpenBlockOutput{EntryID: "no-such-entry", ArtifactID: "art-refused"})
+		return nil
+	}); err != nil {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame committed around the refusal", err)
+	}
+	if !errors.Is(refused, ErrNoSuchEntry) {
+		t.Fatalf("the open for a missing entry answered %v, want ErrNoSuchEntry", refused)
+	}
+	if executions, cursor := storedFrame(t, s, "s-dom-frame-0"); executions != 1 || cursor != 120 {
+		t.Fatalf("after the frame: %d executions, cursor %d — want 1 and 120", executions, cursor)
+	}
+}
+
+// A REPLAY THE STORE ANSWERS DIFFERENTLY FAILS THE FRAME. The frame opens a
+// block under an artifact id; its transaction is rolled back by the bound,
+// and while it pauses another writer takes that id for another entry. The
+// replayed open would now be refused — the block the frame's caller already
+// installed is not the one the store would hold — so the frame fails and
+// stores nothing, rather than committing a frame nobody decided on.
+func TestAReplayTheStoreAnswersDifferentlyFailsTheFrame(t *testing.T) {
+	s, _, timers := openFrameStoreTimed(t)
+	ctx := context.Background()
+	for _, entry := range []string{"s-dom-frame-0", "s-dom-frame-1"} {
+		if err := startFrame(s, entry)(ctx); err != nil {
+			t.Fatalf("starting %s: %v", entry, err)
+		}
+	}
+	timers.onPause = func() {
+		if _, err := s.OpenBlockOutput(ctx, OpenBlockOutput{EntryID: "s-dom-frame-1", ArtifactID: "art-contested"}); err != nil {
+			t.Errorf("the other writer's open: %v", err)
+		}
+	}
+	err := s.ApplyLifecycleFrame(ctx, frameSession, 120, func(fctx context.Context) error {
+		if _, err := s.OpenBlockOutput(fctx, OpenBlockOutput{EntryID: "s-dom-frame-0", ArtifactID: "art-contested"}); err != nil {
+			return err
+		}
+		(<-timers.armed).fireNow()
+		return nil
+	})
+	if !errors.Is(err, ErrLifecycleFrameFailed) || !errors.Is(err, ErrFrameReplayDiverged) {
+		t.Fatalf("ApplyLifecycleFrame = %v, want the frame failed on its diverged replay", err)
+	}
+	if _, cursor := storedFrame(t, s, "s-dom-frame-0"); cursor != 0 {
+		t.Fatalf("the failed frame moved the cursor to %d", cursor)
+	}
+	row, err := s.Ledger().Entry(ctx, "s-dom-frame-0")
+	if err != nil || row == nil {
+		t.Fatalf("Entry: %v", err)
+	}
+	for _, ex := range row.Executions {
+		if len(ex.Artifacts) != 0 {
+			t.Fatalf("the failed frame's block was stored: %+v", ex.Artifacts)
+		}
+	}
 }

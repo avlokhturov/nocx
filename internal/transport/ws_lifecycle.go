@@ -245,7 +245,7 @@ func (s *WSServer) PublishLifecycleProjection(ctx context.Context, f lifecyclepu
 	stored := s.storedAttempt(ctx, f)
 	recorded := s.syncLifecycleLedger(ctx, stored)
 	if recorded != nil {
-		s.publishHistoryRecorded(f, *recorded)
+		afterCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
 	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
@@ -348,7 +348,7 @@ func (s *WSServer) publishClosedAttemptHistory(ctx context.Context, id lifecycle
 	}
 	if recorded := s.syncLifecycleLedger(ctx, s.storedAttempt(ctx, fact)); recorded != nil {
 		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {
-			s.raiseLifecycleBlockFinished(*recorded, fact)
+			afterCommit(ctx, func() { s.raiseLifecycleBlockFinished(*recorded, fact) })
 		}
 		// STASHED, not sent: this report runs before the lane's own
 		// completing fact (transitionsBelow's ordering in Ingest), and a
@@ -567,7 +567,7 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
 		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 	if recorded != nil {
-		s.historyRecordedNotification(wconn, state, *recorded)
+		afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, *recorded) })
 	} else if f.Attempt != nil {
 		// publishClosedAttemptHistory (transitionsBelow, run before this
 		// fact by Ingest) is usually the one that actually closed the
@@ -575,9 +575,22 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 		// again HERE answers nil — its receipt is waiting in the stash for
 		// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
 		if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
-			s.historyRecordedNotification(wconn, state, stashed)
+			afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, stashed) })
 		}
 	}
+}
+
+// afterCommit runs fn once the lifecycle frame ctx carries is stored, and
+// never when it is not; outside a frame, at once. What it carries says the
+// store recorded the frame's command — a history receipt, a finished
+// notification — and a frame that failed every attempt recorded nothing
+// (ADR-0077 decision 9): the next coordinator applies it and says so then.
+func afterCommit(ctx context.Context, fn func()) {
+	content.AfterLifecycleFrame(ctx, nil, func(committed bool) {
+		if committed {
+			fn()
+		}
+	})
 }
 
 // raiseLifecycleBlockFinished raises the attested completion event for the

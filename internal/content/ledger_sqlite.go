@@ -971,10 +971,18 @@ func (s *sqliteContent) StartExecution(ctx context.Context, in StartExecution) (
 		if err != nil {
 			return err
 		}
-		id, err = res.LastInsertId()
+		got, err := res.LastInsertId()
 		if err != nil {
 			return err
 		}
+		// A lifecycle frame replays this write into a fresh transaction
+		// when its first one failed (lifecycle_frame.go), and its caller
+		// already holds the id the first run answered: a different one is
+		// not the execution the caller goes on to finish.
+		if id != 0 && got != id {
+			return ErrFrameReplayDiverged
+		}
+		id = got
 		if in.Grant != nil {
 			// The policy column holds the decision MATRIX as JSON (ADR-0020
 			// §7 as amended 2026-08-16): the recorded grant's rows are what
