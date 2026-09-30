@@ -151,7 +151,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 	driveKernel := client.NewCompletionObservingAdoptingKernel(kernel, downlink)
 
 	coordinatorConn, peerConn := net.Pipe()
-	cursor := newLifecycleCursor(ctx, rp.registry.lifecycleCursors)
+	cursor := newLifecycleCursor(ctx, rp.registry.lifecycleCursors, rp.registry.lifecycleStopping)
 	adapter, err := lifecyclechannel.NewAdoptedStream(
 		log.NewSlogAdapter(rp.registry.log), driveKernel, coordinatorConn,
 		lifecyclechannel.Launch{

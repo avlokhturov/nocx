@@ -420,7 +420,7 @@ format:
 	$(GOFUMPT) -l -w .
 
 test:
-	$(GO) test -v -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") ./...
+	$(GO) test -v -race -count=1 -tags "$(FRAMECHECK_TEST_TAGS)" ./...
 	@echo "=== go test -tags release (the shipped profile directory) ==="
 	$(GO) test -race -count=1 -tags release ./internal/storage/...
 
@@ -691,6 +691,13 @@ LOCAL_SSH_PORTABLE_PKGS := $(filter-out $(LOCAL_SSH_OS_PKGS),$(LOCAL_SSH_PKGS))
 # be written literally inside a function call.
 comma := ,
 LOCAL_SSH_TAGS := $(LOCAL_SSH_TAG)$(if $(WAILS_PLATFORM_TAGS),$(comma)$(WAILS_PLATFORM_TAGS))
+
+# The Go test passes' tag list: the host's own tags plus nocx_framecheck, the
+# test-only detector for ADR-0077's contract (internal/content/framecheck_on.go:
+# a store call on a lifecycle frame's own goroutine without the frame's context
+# fails at once instead of waiting on the connection the frame holds). Never
+# a build tag: the shipped binary has none of it.
+FRAMECHECK_TEST_TAGS := nocx_framecheck$(if $(WAILS_PLATFORM_TAGS),$(comma)$(WAILS_PLATFORM_TAGS))
 
 # golangci-lint's type-checker IS the Go compiler: without the tag it does not
 # see a file that lives behind one, and the packages below are exactly those
@@ -1034,7 +1041,7 @@ test-ci:
 	    printf '%b\n' "$$claude_notice"; \
 	  fi; \
 	  pkgs="$$(printf '%s\n' "$$pkgs" | grep -vE 'nocx/$(CLAUDE_CONFORMANCE_PKG)(/|$$)')"; \
-	  $(GO) test -race -count=1 $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") $$pkgs; \
+	  $(GO) test -race -count=1 -tags "$(FRAMECHECK_TEST_TAGS)" $$pkgs; \
 	  if [ "$$run_claude" -eq 1 ]; then \
 	    echo ""; \
 	    echo "--- ./$(CLAUDE_CONFORMANCE_PKG)/... alone: it drives a live vendor CLI ---"; \

@@ -28,9 +28,15 @@ package app
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
+	"time"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -64,8 +70,9 @@ type cursorWait struct {
 // adapter (its report is an adapter option), bound to its session once the
 // helper has named it, and fed by the bridge.
 type lifecycleCursor struct {
-	ctx   context.Context
-	store lifecycleCursorStore
+	ctx      context.Context
+	store    lifecycleCursorStore
+	stopping *atomic.Bool
 
 	mu      sync.Mutex
 	sid     string
@@ -78,8 +85,8 @@ type lifecycleCursor struct {
 
 // newLifecycleCursor builds a cursor whose writes run under ctx's values and
 // never under its cancellation: the leg outlives the request that opened it.
-func newLifecycleCursor(ctx context.Context, store lifecycleCursorStore) *lifecycleCursor {
-	return &lifecycleCursor{ctx: context.WithoutCancel(ctx), store: store}
+func newLifecycleCursor(ctx context.Context, store lifecycleCursorStore, stopping *atomic.Bool) *lifecycleCursor {
+	return &lifecycleCursor{ctx: context.WithoutCancel(ctx), store: store, stopping: stopping}
 }
 
 // bind names the session the cursor is stored under and the helper stream
@@ -109,10 +116,24 @@ func (c *lifecycleCursor) relayed(n int, streamEnd proto.StreamOffset) {
 // applyFrame is the adapter's frame scope (lifecyclechannel.FrameScope): the
 // frame ending at consumed bytes into the carrier is applied by apply, inside
 // the store's frame, with the cursor at the helper stream offset it ends at.
-// A frame the store could not record returns the error, and nothing of it —
-// rows or cursor — was stored: the adapter then applies nothing more, and
-// the next coordinator resumes before it.
-func (c *lifecycleCursor) applyFrame(consumed uint64, apply func(ctx context.Context)) error {
+//
+// A FRAME THAT ARRIVES AFTER THE COORDINATOR BEGAN STOPPING IS NOT APPLIED
+// (ADR-0077). Stopping closes the sessions this frame's projection records
+// against, so what it would store is not what the frame says; it is not
+// applied at all — not in the kernel, not in the store — the cursor stays
+// before it, and the next coordinator applies it from there. That is a
+// handover and not a failure: nothing is logged as an error, and the pane
+// is told nothing. A frame already in hand when stopping began, and failing
+// because of it, is left the same way.
+//
+// Any other frame the store could not record, after every attempt the store
+// makes at it (content.ApplyLifecycleFrame), returns the error: nothing of
+// it — rows or cursor — was stored, the adapter halts the leg and reports
+// the loss, and the next coordinator resumes before it.
+func (c *lifecycleCursor) applyFrame(consumed uint64, kind lifecycle.EventKind, apply func(ctx context.Context)) error {
+	if c.isStopping() {
+		return lifecyclechannel.ErrFrameLeftForNext
+	}
 	c.mu.Lock()
 	offset, ok := c.streamOffsetLocked(consumed)
 	sid, store := c.sid, c.store
@@ -128,9 +149,17 @@ func (c *lifecycleCursor) applyFrame(consumed uint64, apply func(ctx context.Con
 			apply(ctx)
 			return nil
 		})
+		if err != nil && c.isStopping() {
+			return lifecyclechannel.ErrFrameLeftForNext
+		}
 		if err != nil {
-			log.From(c.ctx).Error("lifecycle cursor: the frame's effect could not be stored; nothing of it was, and the cursor has not moved",
-				"session", sid, "offset", offset, "error", err)
+			attempts, held := 1, time.Duration(0)
+			var failed *content.FrameFailedError
+			if errors.As(err, &failed) {
+				attempts, held = failed.Attempts, failed.Held
+			}
+			log.From(c.ctx).Error("lifecycle cursor: the frame's effect could not be stored on any attempt; nothing of it was, the cursor has not moved, and the leg halts",
+				"session", sid, "kind", kind, "attempts", attempts, "held_ms", held.Milliseconds(), "offset", offset, "error", err)
 			return err
 		}
 	} else {
@@ -143,6 +172,10 @@ func (c *lifecycleCursor) applyFrame(consumed uint64, apply func(ctx context.Con
 	}
 	c.mu.Unlock()
 	return nil
+}
+
+func (c *lifecycleCursor) isStopping() bool {
+	return c.stopping != nil && c.stopping.Load()
 }
 
 // streamOffsetLocked translates a carrier position into the helper stream

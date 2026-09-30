@@ -526,7 +526,7 @@ func (s *WSServer) applyIntegrationLoss(sid session.ID, cause string) (string, s
 		next.status = IntegrationConventional
 		next.reason = ssh.ReasonHandshakeTimeout
 	case cause == LossCauseListenerGone || cause == LossCauseMasterSocketGone ||
-		cause == LossCauseMasterExited:
+		cause == LossCauseMasterExited || cause == LossCauseStoreRefused:
 		// §6.2's second row: after the channel existed and before
 		// integration was live. What went away is nocx's own channel to the
 		// shell — the forwarded listener, the multiplex socket, or the
@@ -581,6 +581,10 @@ const (
 	LossCauseTransportGone    = "transport-gone"
 	LossCauseMasterSocketGone = "master-socket-gone"
 	LossCauseMasterExited     = "master-exited"
+	// LossCauseStoreRefused is the store refusing a lifecycle frame on every
+	// attempt (ADR-0077): this coordinator's channel to the shell is halted,
+	// though the shell's own is fine.
+	LossCauseStoreRefused = "store-refused"
 )
 
 // noteIntegrationLive records that an authenticated domain went live on a

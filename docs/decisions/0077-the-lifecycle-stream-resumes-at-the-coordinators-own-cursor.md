@@ -11,7 +11,12 @@
   the same day, on the escalation of this record's first draft: applying one lifecycle frame and
   storing the cursor are ONE SQLite transaction — no window in which a killed process re-delivers a
   frame — and every write a frame causes is idempotent, keyed by a stable identity of the block, so
-  a frame delivered twice is a no-op.
+  a frame delivered twice is a no-op. And, later that day, on the bound: a frame's hold on the store
+  is bounded at 250 ms; a frame that fails — by the bound or by a store error — is applied again by
+  the same coordinator up to three more times (pauses of 50, 100 and 200 ms), and only then does the
+  leg halt, visibly; the deadlock the frame's context guards against is detected in tests by a
+  goroutine-identity check behind a build tag and in production by the bound alone; and a frame that
+  arrives while the coordinator is stopping is left for the next one.
 - **Supersedes:**
   - [ADR-0024](0024-authenticated-shell-integration-channel.md), the 2026-09-02 amendment's bullet
     "The re-attachment resumes at the lifecycle window's HEAD, not its base." The re-attachment now
@@ -61,12 +66,10 @@ length — what this machine stored — and never from anything the helper guess
    settle of a block the frame ends — joins one SQLite transaction whose last statement moves the
    cursor. They commit together or not at all: a process killed anywhere inside the frame leaves the
    store exactly as it was before it, and the next coordinator applies the frame once. A write that
-   fails inside the frame fails the frame, and a failed frame commits nothing, cursor included; the
-   leg then applies nothing more (an adapter halt, as a handover ends it — the shell's transport did
-   not fail and nothing is marked lost), so no later frame is stored past one the store does not
-   hold. A refused frame is scoped like any other: the stream carried it and the coordinator dealt
-   with it. A coordinator going away finishes the frame it is applying — its transaction commits —
-   and applies nothing after it: that frame is the next coordinator's.
+   fails inside the frame fails the attempt, and a failed attempt commits nothing, cursor included
+   (decision 9 says what follows). A refused frame is scoped like any other: the stream carried it
+   and the coordinator dealt with it. A coordinator going away finishes the frame it is applying — its
+   transaction commits — and applies nothing after it: that frame is the next coordinator's.
 3. **Nothing before the cursor is re-delivered; everything after it is delivered once.** A command's
    end spoken while nobody was attached reaches the returning coordinator exactly once and settles its
    block, however many times the coordinator is replaced around it.
@@ -103,6 +106,55 @@ length — what this machine stored — and never from anything the helper guess
    writes the store; were a frame to hold the store's connection and then wait for the turn, the two
    would wait on each other.
 
+9. **A frame's hold is bounded, a failed frame is tried again, and the halt is the last resort.**
+   A frame may hold the store's one connection for `content.LifecycleFrameMaxHold` = **250 ms**,
+   counted from its first write; past it the attempt is rolled back where it stands, the connection
+   free again at once, exactly as an attempt whose write failed. Either way the SAME coordinator
+   applies the frame again, up to three more times, pausing 50, 100 and 200 ms before each, and the
+   leg's next frame waits for it, so the order the shell spoke in holds. A further attempt does not
+   run the kernel or the projection again — they already hold the frame — but replays, in order, in
+   a fresh transaction, the store writes the first attempt's projection made, with the cursor as its
+   last statement; that is safe because every such write is a no-op on a repeat (decision 7). Only
+   when the fourth attempt fails does the leg halt: it applies nothing more, the domain is not marked
+   lost (the shell's channel did not fail), and the loss reaches the pane's integration axis as
+   `store-refused` through the adapter's loss report — `lost` / channel-lost once the pane had
+   integrated, channel-unavailable before — with one error line naming the frame's kind, the
+   session, the attempts and the hold. The next coordinator applies the frame once, from the cursor.
+
+   THE BASIS FOR 250 MS, measured on the restart and shell-exit acceptances with the hold timed from
+   the frame's first write to the end of its commit: a plain run (119 frames) p50 0.70 ms, p99
+   12.7 ms, max 35.8 ms; the loaded bar (the acceptances beside `go test -race -count=5
+./internal/transport`), two runs of 232 and 234 frames, p50 0.73 / 0.66 ms, p99 21.9 / 11.4 ms,
+   max 52.1 / 17.9 ms, and one frame of 106.5 ms. Almost all of it is store work — store time p99
+   9–16 ms, the commit itself up to 11 ms on the encrypted WAL — and the non-store code between a
+   frame's writes (the rest of the fact's delivery, the kernel's attempt lookup) is p50 5–40 µs, its
+   tail (up to 6 ms loaded) CPU contention under the race-detector load. A reader outside the frame
+   waited at most 6.6 ms, a writer at most 52 ms, under load. 100 ms, the first figure, had already
+   been crossed once under load; 250 ms leaves the measured worst case more than twice over.
+
+10. **The frame's context contract is enforced in tests, and only the bound enforces it in a shipped
+    build.** A store call on the frame's own goroutine without the frame's context would wait for the
+    connection the frame holds while the frame waits for the call. Telling that call from another
+    goroutine's — which must wait — takes the calling goroutine's identity, which Go deliberately does
+    not offer, so the check that reads it from the runtime's stack lives only behind the
+    `nocx_framecheck` build tag (`internal/content/framecheck_on.go`): there such a call fails at
+    once with `ErrFrameContextMissing`, naming this contract — a write as an error, a read as a
+    panic, since a `*sql.Row` cannot carry the store's own error. CI's Go test runs pass the tag
+    (`.github/workflows/ci.yml`, `scripts/ci-linux.sh`, `.githooks/containerized-tests.sh`, and the
+    Makefile's `test` and `test-ci` passes through `FRAMECHECK_TEST_TAGS`). A shipped build compiles
+    the no-op twin (`framecheck_off.go`), and `TestTheFrameCheckIsOnlyInTheTaggedBuild` keeps any
+    stack-reading code out of it; there, the 250 ms bound is what ends such a wait — the missed call
+    then completes on its own and the frame is tried again.
+11. **A frame arriving while the coordinator stops is left for the next one.** From the moment
+    `App.Shutdown` begins, a lifecycle frame is not applied at all — neither by the kernel nor by the
+    store — and the cursor stays before it (`lifecycleCursor.applyFrame`,
+    `lifecyclechannel.ErrFrameLeftForNext`). Stopping closes the sessions a frame's projection
+    records against, so what it would store is not what the frame says (a start whose entry is not
+    recorded and whose block open fails on the missing entry was measured doing exactly that). A
+    frame already in hand when stopping began, and failing because of it, is left the same way. That
+    is a handover: no error line, no halt, nothing reported to the pane; the next coordinator applies
+    the frame from the cursor.
+
 ## Why not the helper's acknowledgement cursor
 
 The helper already keeps a per-subscriber lifecycle `acked` cursor, and it is the obvious thing to
@@ -121,20 +173,26 @@ effects live — the coordinator's store.
 - **The guarantee is transactional.** A frame's rows and its cursor are one commit; there is no
   interleaving of rows stored and cursor not, whether the process is killed, a statement fails, or
   the coordinator detaches. Measured by `TestAFaultInsideALifecycleFrameLeavesNeitherItsRowsNorTheCursor`
-  (a fault injected inside the frame's writes and one between its last row and the cursor) and
-  `TestAFrameFailedAtTheCursorIsAppliedOnceByTheNextCoordinator` (the process restarts on the stored
-  cursor and applies the frame once).
+  (a fault injected inside the frame's writes and one between its last row and the cursor, each on
+  every attempt), `TestAFrameRolledBackByItsHoldBoundIsAppliedOnceByTheSameCoordinator`,
+  `TestAFrameFailedAtTheCursorIsAppliedOnceOnItsNextAttempt` and
+  `TestAFrameTheStoreRefusesOnEveryAttemptHaltsTheLegAndIsAppliedOnceByTheNext` (the process
+  restarts on the stored cursor and applies the frame once).
 - **What this asks of every caller inside a frame:** each store call it makes carries the context the
   frame handed it. The store holds its one connection (`maxOpenConns` is one) from the frame's first
   write to its end, so a call on the frame's goroutine with any other context waits for a connection
   the frame will never release. The transport's lifecycle projection, the block stream and the
   completion downlink's loss report were threaded for this; a new path that writes the store from
-  inside a frame must be too.
-- Other store users wait while a frame holds the connection — for the length of one frame's writes.
+  inside a frame must be too, and CI's `nocx_framecheck` runs are what catch it when it does not
+  (decision 10).
+- Other store users wait while a frame holds the connection — for the length of one frame's writes,
+  and never longer than the 250 ms bound plus the frame's own commit or rollback.
   A completion the downlink finally gives up on is reported only after its queue has made room, so
   an Accept waiting for room inside a frame is never waiting on that report's write.
-- A store failure inside a frame ends the leg for this coordinator. That is the price of never
-  storing a later frame past one the store does not hold; the next coordinator resumes before it.
+- A frame that fails every attempt ends the leg for this coordinator, and the pane shows it. That is
+  the price of never storing a later frame past one the store does not hold; the next coordinator
+  resumes before it. A frame that fails and then succeeds costs its lane at most 350 ms of pauses,
+  during which the lane's later frames wait.
 - A coordinator's orderly shutdown waits for the frame it is applying, however long that frame's
   effect takes.
 - Round 1's seam test that pinned the base resume is replaced by one that pins the stored cursor

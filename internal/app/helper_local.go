@@ -39,6 +39,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -347,6 +348,9 @@ type localHelperOpener struct {
 	// lifecycleCursors keeps each pane's lifecycle cursor with its binding
 	// (lifecycle_cursor.go, ADR-0077). Nil keeps nothing.
 	lifecycleCursors lifecycleCursorStore
+	// lifecycleStopping is the coordinator's stopping signal, the same one
+	// helperRegistry carries. Nil never stops.
+	lifecycleStopping *atomic.Bool
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -660,6 +664,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		blockRows:          o.blockRows,
 		environmentEntries: o.environmentEntries,
 		cursors:            o.lifecycleCursors,
+		stopping:           o.lifecycleStopping,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is

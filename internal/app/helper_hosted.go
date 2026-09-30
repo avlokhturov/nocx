@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -87,7 +88,9 @@ type hostedSpawn struct {
 	// ADR-0077) with its binding, for the coordinator that takes the session
 	// back. Nil keeps nothing.
 	cursors lifecycleCursorStore
-	log     *slog.Logger
+	// stopping is the coordinator's stopping signal. Nil never stops.
+	stopping *atomic.Bool
+	log      *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -202,7 +205,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()
-		cursor = newLifecycleCursor(ctx, h.cursors)
+		cursor = newLifecycleCursor(ctx, h.cursors, h.stopping)
 		opts := []lifecyclechannel.Option{
 			lifecyclechannel.WithLossReporter(h.loss),
 			lifecyclechannel.WithFrameScope(cursor.applyFrame),

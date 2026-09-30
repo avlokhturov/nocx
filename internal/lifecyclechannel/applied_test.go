@@ -33,7 +33,7 @@ type appliedLog struct {
 
 // scope is a FrameScope that applies the frame and then records where it
 // ends.
-func (l *appliedLog) scope(consumed uint64, apply func(ctx context.Context)) error {
+func (l *appliedLog) scope(consumed uint64, _ lifecycle.EventKind, apply func(ctx context.Context)) error {
 	apply(context.Background())
 	l.report(consumed)
 	return nil
@@ -247,11 +247,18 @@ func TestAFrameTheStoreCouldNotRecordEndsTheLegUnapplied(t *testing.T) {
 	k := &observingKernel{AdoptingKernel: newTestKernel(), log: applied}
 	coordinator, shell := net.Pipe()
 	t.Cleanup(func() { _ = shell.Close() })
-	failing := func(consumed uint64, apply func(ctx context.Context)) error {
+	failing := func(consumed uint64, _ lifecycle.EventKind, apply func(ctx context.Context)) error {
 		apply(context.Background())
 		return errors.New("the store refused the frame")
 	}
-	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(failing))
+	var lossMu sync.Mutex
+	var losses []LossCause
+	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(failing),
+		WithLossReporter(func(_ lifecycle.LaneID, cause LossCause) {
+			lossMu.Lock()
+			losses = append(losses, cause)
+			lossMu.Unlock()
+		}))
 	if err != nil {
 		t.Fatalf("NewAdoptedStream: %v", err)
 	}
@@ -272,7 +279,54 @@ func TestAFrameTheStoreCouldNotRecordEndsTheLegUnapplied(t *testing.T) {
 	if len(events) != 1 || events[0] != "ingested:start" {
 		t.Fatalf("events %v, want only the frame the store refused: a frame after it was applied", events)
 	}
+	// The pane is told: the halt is a stated loss, not only a log line.
+	lossMu.Lock()
+	got := append([]LossCause(nil), losses...)
+	lossMu.Unlock()
+	if len(got) != 1 || got[0] != LossStoreRefused {
+		t.Fatalf("losses reported %v, want exactly store-refused", got)
+	}
 	if dom, ok := k.Domain(a.domain); !ok || dom.State == lifecycle.DomainLost {
 		t.Fatalf("the domain after the halt = %+v (known %v), want it live: a store failure is not the shell's transport lost", dom, ok)
+	}
+}
+
+// A FRAME LEFT FOR THE NEXT COORDINATOR (ADR-0077's teardown rule): the scope
+// answers ErrFrameLeftForNext because this coordinator is stopping. Nothing of
+// the frame reaches the kernel, nothing after it is applied, and nothing is
+// reported — a handover, not a loss.
+func TestAFrameLeftForTheNextCoordinatorIsNotAppliedAndReportsNothing(t *testing.T) {
+	applied := &appliedLog{}
+	k := &observingKernel{AdoptingKernel: newTestKernel(), log: applied}
+	coordinator, shell := net.Pipe()
+	t.Cleanup(func() { _ = shell.Close() })
+	stopping := func(uint64, lifecycle.EventKind, func(ctx context.Context)) error { return ErrFrameLeftForNext }
+	var lossMu sync.Mutex
+	var losses []LossCause
+	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(stopping),
+		WithLossReporter(func(_ lifecycle.LaneID, cause LossCause) {
+			lossMu.Lock()
+			losses = append(losses, cause)
+			lossMu.Unlock()
+		}))
+	if err != nil {
+		t.Fatalf("NewAdoptedStream: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	id := lifecycle.AttemptID("shell-95")
+	start := encodedFrame(t, shellEnv(a, 95, lifecycle.Event{
+		Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &id, Command: "make"},
+	}))
+	go func() { _, _ = shell.Write(start) }()
+	<-a.pumpDone
+
+	if _, _, events := applied.snapshot(); len(events) != 0 {
+		t.Fatalf("events %v, want none: a frame left for the next coordinator reached this kernel", events)
+	}
+	lossMu.Lock()
+	defer lossMu.Unlock()
+	if len(losses) != 0 {
+		t.Fatalf("losses reported %v, want none: stopping is a handover", losses)
 	}
 }

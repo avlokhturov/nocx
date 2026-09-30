@@ -23,6 +23,7 @@ import (
 	"path"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
@@ -570,9 +571,13 @@ type helperRegistry struct {
 	// (lifecycle_cursor.go, ADR-0077): this route's opens write it, and the
 	// re-adopt pass reads the one the store carried over. Nil keeps nothing.
 	lifecycleCursors lifecycleCursorStore
-	mu               sync.Mutex
-	hosts            map[session.ID]*hostHelper
-	closing          map[string]struct{}
+	// lifecycleStopping is raised when the coordinator begins stopping: a
+	// lifecycle frame arriving after it is left for the next coordinator
+	// (lifecycleCursor.applyFrame). Nil never stops.
+	lifecycleStopping *atomic.Bool
+	mu                sync.Mutex
+	hosts             map[session.ID]*hostHelper
+	closing           map[string]struct{}
 	// farTools are the far-side tool sockets this registry opened, keyed by the
 	// session each belongs to (nocx-e2bws). They are held HERE rather than by
 	// the hostHelper because the event that ends them is a session's end and not
@@ -977,7 +982,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		coordinatorConn, peerConn := net.Pipe()
 		var lifecycleErr error
 		// The caller's exchange, for the reason helper_hosted.go gives.
-		cursor = newLifecycleCursor(ctx, r.lifecycleCursors)
+		cursor = newLifecycleCursor(ctx, r.lifecycleCursors, r.lifecycleStopping)
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
 			log.NewSlogAdapter(r.log).WithContext(ctx), driveKernel, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),

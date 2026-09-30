@@ -86,6 +86,11 @@ const (
 	// teardown. Not a failure: the session is going away and the product
 	// has nothing to say about it.
 	LossClosed LossCause = "closed"
+	// LossStoreRefused is the store refusing a frame this coordinator
+	// applied, on every attempt (ADR-0077): the leg halts, so the pane's
+	// channel is gone for this coordinator though the shell's is not, and
+	// the next coordinator applies the frame from the cursor.
+	LossStoreRefused LossCause = "store-refused"
 )
 
 // LossReporter is told which path ended an adapter's transport or which
@@ -121,12 +126,24 @@ type options struct {
 // coordinator dealt with it, and resuming before it would only offer it
 // again. It runs on the pump's goroutine, before the next frame is read.
 //
+// kind is the frame's event kind, for the scope's own account of it.
+//
 // A non-nil return says the frame's effect could NOT be stored: nothing of it
 // was, and the cursor has not moved. The adapter then applies nothing more —
 // every later frame's effect would be stored past a frame the store does not
-// hold — and ends the leg as a handover does, leaving the frame to the next
-// coordinator, which resumes the stream at the cursor and applies it once.
-type FrameScope func(consumed uint64, apply func(ctx context.Context)) error
+// hold — and leaves the frame to the next coordinator, which resumes the
+// stream at the cursor and applies it once. ErrFrameLeftForNext is the
+// coordinator stopping, and ends the leg quietly, as a handover; any other
+// error is the store refusing the frame, and ends it as a stated loss
+// (LossStoreRefused), so the pane shows that its channel is gone.
+type FrameScope func(consumed uint64, kind lifecycle.EventKind, apply func(ctx context.Context)) error
+
+// ErrFrameLeftForNext is a FrameScope's answer for a frame this coordinator
+// will not apply because it has begun stopping: nothing of the frame is
+// applied — not in the kernel, not in the store — and the cursor has not
+// moved, so the next coordinator applies it from there. Not a failure: the
+// leg ends as a handover does, with nothing reported.
+var ErrFrameLeftForNext = errors.New("lifecyclechannel: the coordinator is stopping; the frame is left for the next one")
 
 // WithFrameScope registers the scope each frame is applied in.
 func WithFrameScope(f FrameScope) Option {
@@ -574,6 +591,11 @@ func (a *Adapter) pump() {
 				return
 			}
 			ierr, serr := a.applyFrame(env)
+			if errors.Is(serr, ErrFrameLeftForNext) {
+				a.leaveForNext(env.Event.Kind)
+				a.applying.Unlock()
+				return
+			}
 			if serr != nil {
 				a.halt(serr)
 				a.applying.Unlock()
@@ -644,8 +666,23 @@ func (a *Adapter) applyFrame(env lifecycle.Envelope) (ingestErr, storeErr error)
 		apply(context.Background())
 		return ingestErr, nil
 	}
-	storeErr = a.scope(a.dec.Consumed(), apply)
+	storeErr = a.scope(a.dec.Consumed(), env.Event.Kind, apply)
 	return ingestErr, storeErr
+}
+
+// leaveForNext ends the leg without applying the frame in hand, because the
+// coordinator is stopping (ErrFrameLeftForNext): a handover, said at info and
+// reported to nobody. Called on the pump with applying held.
+func (a *Adapter) leaveForNext(kind lifecycle.EventKind) {
+	a.loss.Do(func() {
+		a.log.Info("lifecycle channel left for the next coordinator: this one is stopping, and the frame in hand is not applied",
+			"transport", a.id, "lane", a.lane, "domain", a.domain, "kind", kind)
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
 }
 
 // halt ends the leg after a frame whose effect could not be stored
@@ -657,6 +694,11 @@ func (a *Adapter) halt(cause error) {
 	a.loss.Do(func() {
 		a.log.Error("lifecycle channel halted: a frame's effect could not be stored, so this coordinator applies nothing more and the next one resumes before it",
 			"transport", a.id, "lane", a.lane, "domain", a.domain, "error", cause)
+		// The pane says so (AGENTS.md: a soft degrade is visible in the
+		// product): its channel is gone for this coordinator.
+		if a.report != nil {
+			a.report(a.lane, LossStoreRefused)
+		}
 		a.stopHelloTimer()
 		a.mu.Lock()
 		a.closed = true

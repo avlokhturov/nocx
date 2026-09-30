@@ -13,10 +13,12 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 )
 
@@ -58,9 +60,46 @@ func storedCursor(t *testing.T, path, sid string) (content.ContentDB, uint64) {
 	return db, 0
 }
 
-func TestAFrameFailedAtTheCursorIsAppliedOnceByTheNextCoordinator(t *testing.T) {
+// immediatePauses is a frame timer under which a hold bound never fires and
+// every pause between attempts fires at once: no test waits on a duration.
+func immediatePauses(d time.Duration, fire func()) func() bool {
+	if d == content.LifecycleFrameMaxHold {
+		return func() bool { return true }
+	}
+	go fire()
+	return func() bool { return false }
+}
+
+func newRetryingLedgerStoreAt(t *testing.T, path string) content.ContentDB {
+	t.Helper()
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i) // newLedgerStoreAt's key, so either opens the file
+	}
+	db, err := content.Open(context.Background(), content.Config{
+		Path:       path,
+		Key:        key,
+		Budget:     content.Budget{RetentionBytes: 1 << 30, DiskCeilingBytes: 2 << 30, CompactionFloor: 0.8},
+		Logger:     log.NewSlogAdapter(nil),
+		FrameTimer: immediatePauses,
+	})
+	if err != nil {
+		t.Fatalf("content.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
+// THE SAME COORDINATOR APPLIES A FAILED FRAME AGAIN (the owner's retry,
+// 2026-09-30). The start frame's first attempt fails after its last row and
+// before the cursor; the store rolls it back and replays the writes the real
+// projection made — the entry, its execution, the block's artifact — in a
+// fresh transaction, and the frame lands exactly once, cursor included,
+// before the next frame is read. The restarted store then hands the next
+// coordinator the cursor past it.
+func TestAFrameFailedAtTheCursorIsAppliedOnceOnItsNextAttempt(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
-	first := newLedgerStoreAt(t, path)
+	first := newRetryingLedgerStoreAt(t, path)
 	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, first)
 	zero := uint64(0)
 	if err := first.Ledger().CreateSession(context.Background(), content.Session{
@@ -75,28 +114,17 @@ func TestAFrameFailedAtTheCursorIsAppliedOnceByTheNextCoordinator(t *testing.T) 
 	if err := applyFrameThroughTheStore(t, first, sid, pub, "T", r.prompt(2), promptEnd, false); err != nil {
 		t.Fatalf("the prompt frame: %v", err)
 	}
-	start := r.start(3, 0, "make build")
-	if err := applyFrameThroughTheStore(t, first, sid, pub, "T", start, startEnd, true); !errors.Is(err, content.ErrLifecycleFrameFailed) {
-		t.Fatalf("the faulted start frame = %v, want ErrLifecycleFrameFailed", err)
+	if err := applyFrameThroughTheStore(t, first, sid, pub, "T", r.start(3, 0, "make build"), startEnd, true); err != nil {
+		t.Fatalf("the start frame, failed once at its cursor = %v, want it applied on the next attempt", err)
 	}
-	if shape := ledgerShape(t, first); shape != "" {
-		t.Fatalf("the faulted frame left rows behind: %s", shape)
+	assertOneOfEach(t, first)
+	if shape := ledgerShape(t, first); shape == "" {
+		t.Fatal("the start frame stored nothing")
 	}
 	if err := first.Close(); err != nil {
-		t.Fatalf("closing the first coordinator's store: %v", err)
+		t.Fatalf("closing the store: %v", err)
 	}
-
-	// The restart: the next coordinator reads the cursor the store holds.
-	second, cursor := storedCursor(t, path, sid)
-	if cursor != promptEnd {
-		t.Fatalf("the stored cursor is %d, want %d — the end of the last frame whose rows were stored", cursor, promptEnd)
-	}
-	fresh := newFreshCoordinator(t, second, sid, lane, h)
-	if err := applyFrameThroughTheStore(t, second, sid, fresh.pub, "T2", start, startEnd, false); err != nil {
-		t.Fatalf("the start frame, offered again from the cursor: %v", err)
-	}
-	assertOneOfEach(t, second)
-	if shape := ledgerShape(t, second); shape == "" {
-		t.Fatal("the frame applied again stored nothing")
+	if _, cursor := storedCursor(t, path, sid); cursor != startEnd {
+		t.Fatalf("the stored cursor is %d, want %d — past the frame its next attempt applied", cursor, startEnd)
 	}
 }
