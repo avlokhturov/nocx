@@ -33,12 +33,16 @@ import (
 type blockRowsSink interface {
 	AttachBlockRows(sid session.ID)
 	DetachBlockRows(sid session.ID)
-	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row) (writtenUpTo uint64, confirm bool)
+	// HelperSessionEnded settles the session's streaming because THE
+	// HELPER reported the session's end (ADR-0076) — sealed, unlike the
+	// coordinator's own detach, which changes no block.
+	HelperSessionEnded(sid session.ID)
+	BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows []emulator.Row, lostCause string) (writtenUpTo uint64, confirm bool)
 	BlockIntervalEnded(sid session.ID, nonce [32]byte, endRow uint64, closing []emulator.Row, noFence bool)
 	// BlockBoundaryLost settles the block a boundary would have closed when
 	// its delivery to the helper finally failed (nocx-2v80t.3.29); the pane's
 	// completion downlink reports it (boundaryLossTo).
-	BlockBoundaryLost(sid session.ID, nonce [32]byte)
+	BlockBoundaryLost(ctx context.Context, sid session.ID, nonce [32]byte)
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
@@ -55,15 +59,28 @@ type confirmer interface {
 	ConfirmWritten(ctx context.Context, upToRow uint64) error
 }
 
-// bindBlockRows registers the rows callbacks of one attachment with the
+// bindHeldBlockRows registers the rows callbacks of one attachment with the
 // transport and starts its confirmer. The returned stop detaches the stream
 // (the transport closes what is still open) and ends the confirmer; it is
-// idempotent and is bound to the session's lifetime by the caller.
-func bindBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession) func() {
+// idempotent and is bound to the session's lifetime by the caller. The
+// attachment's rows plane was held from before its attach
+// (holdRowsBeforeAttach), so the frames that arrived in between reach the
+// stream once it is bound; a nil hold binds the attachment directly.
+func bindHeldBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows) func() {
+	return bindHeldBlockRowsAfter(ctx, sink, sid, attached, held, nil)
+}
+
+// bindHeldBlockRowsAfter is bindHeldBlockRows for a re-adopted pane: the held
+// rows reach the stream once replayed closes — the leg applied the window the
+// helper handed it (heldRows.bindAfter). A nil replayed releases at the bind.
+func bindHeldBlockRowsAfter(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows, replayed <-chan struct{}) func() {
 	if sink == nil || attached == nil {
 		return func() {}
 	}
-	return bindBlockRowsTo(ctx, sink, sid, attached, attached)
+	if held == nil {
+		return bindBlockRowsTo(ctx, sink, sid, attached, attached)
+	}
+	return held.bindAfter(ctx, sink, sid, attached, replayed)
 }
 
 // rowsSource is the registration half of an attachment, split out so a test
@@ -103,7 +120,7 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 			sink.BlockOutputIncomplete(sid, o.FromRow)
 			return
 		}
-		if up, confirm := sink.BlockRowsArrived(sid, o.FromRow, o.LostRows, o.Rows); confirm {
+		if up, confirm := sink.BlockRowsArrived(sid, o.FromRow, o.LostRows, o.Rows, o.LostCause); confirm {
 			marks.offer(up)
 		}
 	})
@@ -126,17 +143,175 @@ func bindBlockRowsTo(ctx context.Context, sink blockRowsSink, sid session.ID, sr
 	}
 }
 
+// heldRows is an attachment's rows plane from the instant the attachment
+// exists until the transport's stream for its session is bound
+// (nocx-zg3k3.5.11). The helper binds a new subscriber and wakes its row pump
+// before it answers the attach, so the rows a returning coordinator is owed —
+// the read-back from its confirmed mark, and live rows that departed since —
+// can arrive before Attach has even returned; and the stream is bound only
+// after, once the attach says what it resumed. Registered through
+// client.ObserveBeforeAttach, the hold takes every frame from the first one:
+// until bind it keeps them in arrival order, bind hands them to the stream
+// once the stream exists (after its re-bind of the store's open block), and
+// from then on each frame passes straight through. Before this the frames
+// reached an attachment nobody was watching yet and were dropped without a
+// word — the loaded restart acceptance sealed its block at 193 of 300 rows.
+//
+// It is a rowsSource, so the ordinary bridge (bindBlockRowsTo) registers its
+// consumers on it exactly as it would on the attachment.
+type heldRows struct {
+	mu    sync.Mutex
+	bound bool
+	held  []heldFrame
+	rows  func(client.OutputRows)
+	end   func(client.IntervalEnd)
+	clear func()
+}
+
+// heldFrame is one rows-plane frame, of whichever kind, in arrival order.
+type heldFrame struct {
+	rows  *client.OutputRows
+	end   *client.IntervalEnd
+	clear bool
+}
+
+// observe registers the hold on an attachment's rows plane.
+func (h *heldRows) observe(src rowsSource) {
+	src.OnOutputRows(h.takeRows)
+	src.OnIntervalEnd(h.takeEnd)
+	src.OnClearBoundary(h.takeClear)
+}
+
+// holdRowsBeforeAttach is the attach option that registers a hold, and the
+// hold it will register. A nil sink streams no rows, so nothing is held.
+func holdRowsBeforeAttach(sink blockRowsSink) (client.AttachOption, *heldRows) {
+	if sink == nil {
+		return func(*client.AttachedSession) {}, nil
+	}
+	h := &heldRows{}
+	return client.ObserveBeforeAttach(func(a *client.AttachedSession) { h.observe(a) }), h
+}
+
+// takeRows, takeEnd and takeClear are the attachment's observers. They run
+// on the connection's read loop and call the stream under the hold's lock, so
+// a frame arriving while bind releases the held ones waits its turn behind
+// them.
+func (h *heldRows) takeRows(o client.OutputRows) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.bound {
+		h.held = append(h.held, heldFrame{rows: &o})
+		return
+	}
+	if h.rows != nil {
+		h.rows(o)
+	}
+}
+
+func (h *heldRows) takeEnd(e client.IntervalEnd) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.bound {
+		h.held = append(h.held, heldFrame{end: &e})
+		return
+	}
+	if h.end != nil {
+		h.end(e)
+	}
+}
+
+func (h *heldRows) takeClear() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.bound {
+		h.held = append(h.held, heldFrame{clear: true})
+		return
+	}
+	if h.clear != nil {
+		h.clear()
+	}
+}
+
+// OnOutputRows, OnIntervalEnd and OnClearBoundary make the hold the bridge's
+// rowsSource: the consumers the bridge registers are the stream's.
+func (h *heldRows) OnOutputRows(f func(client.OutputRows)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.rows = f
+}
+
+func (h *heldRows) OnIntervalEnd(f func(client.IntervalEnd)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.end = f
+}
+
+func (h *heldRows) OnClearBoundary(f func()) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.clear = f
+}
+
+// release delivers what was held, in arrival order, and lets every later
+// frame pass straight through.
+func (h *heldRows) release() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, f := range h.held {
+		switch {
+		case f.rows != nil:
+			if h.rows != nil {
+				h.rows(*f.rows)
+			}
+		case f.end != nil:
+			if h.end != nil {
+				h.end(*f.end)
+			}
+		case f.clear:
+			if h.clear != nil {
+				h.clear()
+			}
+		}
+	}
+	h.held = nil
+	h.bound = true
+}
+
+// bindAfter binds the transport's stream to the held attachment now — the
+// re-bind of the store's open block and the consumers, through the ordinary
+// bridge — answers the bridge's stop, and keeps holding the rows plane until ready closes: a
+// re-adopted pane's replayed lifecycle window applied (nocx-zg3k3.5.11). The
+// read-back the helper sends at the attach starts at the command's first row,
+// and the command's block may be opened only by a start frame that window
+// carries — one the coordinator that went away left to this one. Released
+// before that, the rows find no block, are dropped unconfirmed, and the
+// read-back is not sent twice. Everything arriving meanwhile is held behind
+// them, so the stream sees one order. A nil ready releases at once: a fresh
+// open, with no window to replay.
+func (h *heldRows) bindAfter(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer, ready <-chan struct{}) func() {
+	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
+	if ready == nil {
+		h.release()
+		return stop
+	}
+	go func() {
+		<-ready
+		h.release()
+	}()
+	return stop
+}
+
 // boundaryLossTo is the completion downlink's report of a lost boundary,
 // routed to the transport's block stream for the session the downlink was
 // bound to — the helper session id, which is the transport's session id for
-// a hosted pane (bindBlockRows' own sid). A nil sink routes nothing: a pane
+// a hosted pane (bindHeldBlockRows' own sid). A nil sink routes nothing: a pane
 // whose rows are not streamed has no block for a loss to settle.
 func boundaryLossTo(sink blockRowsSink) client.BoundaryLost {
 	if sink == nil {
 		return nil
 	}
-	return func(sessionID string, fence [32]byte) {
-		sink.BlockBoundaryLost(session.ID(sessionID), fence)
+	return func(ctx context.Context, sessionID string, fence [32]byte) {
+		sink.BlockBoundaryLost(ctx, session.ID(sessionID), fence)
 	}
 }
 

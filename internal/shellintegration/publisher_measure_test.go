@@ -188,13 +188,18 @@ import (
 // zsh is not a mechanism. The CALL count is unchanged at 63: fewer bytes in the
 // same two files the bundle publishes raw, not less work.
 //
+// AND THEY GREW when both shells began naming every completion with the
+// attempt id they minted at start (ADR-0077): the worst path writes 85902
+// bytes, up from 85826 — the `"attempt":"…"` field and its doc comment in
+// two files. The CALL count is unchanged at 63.
+//
 // REPORT-p3-measure.md, which the failure messages below tell you to update
 // alongside these constants, HAS NEVER EXISTED in this repository — checked
 // across every ref. Whoever restores it, or removes the instruction, owns
 // nocx-uxuwu.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 85826
+	measuredMaxPublishBytes = 85902
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

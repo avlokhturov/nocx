@@ -1149,8 +1149,8 @@ __nocx_precmd() {
     # Authenticated channel first: refresh, complete (with the exit status
     # and a fresh fence nonce), write the SAME nonce to the pty after the
     # command's output (the render-order rendezvous, decision 1 carve-out),
-    # then prompt_ready. The complete carries no attempt id; the kernel
-    # resolves the domain's single open attempt.
+    # then prompt_ready. The complete names the attempt this shell minted
+    # at start (ADR-0077): the block's identity across coordinators.
     # A nested child whose command the widget consumed leaves __nocx_exit_code
     # = the widget's own last status (the launch's assignments clobbered $?);
     # the child's REAL status was captured right after the launch and
@@ -1187,7 +1187,7 @@ __nocx_precmd() {
             __nocx_lc_attempt_open=0
         elif [[ "${__nocx_lc_attempt_open:-0}" == "1" ]]; then
             if __nocx_lc_fence; then
-                if __nocx_lc_send complete ',"exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
+                if __nocx_lc_send complete ',"attempt":"'"$__nocx_lc_attempt_id"'","exit_code":'"$__nocx_exit_code"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
                     builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
                 else
                     __nocx_lc_recover

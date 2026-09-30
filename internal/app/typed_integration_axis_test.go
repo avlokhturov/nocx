@@ -143,7 +143,7 @@ func (s *typedAxisStack) integratedParent(t *testing.T) {
 	deadline := time.Now().Add(wantWithinTypedAxis)
 	for time.Now().Before(deadline) {
 		s.ws.RegisterIntegration(session.ID(s.sid), "/bin/bash", transport.IntegrationStarting, ssh.ReasonNone)
-		s.ws.PublishLifecycle(lifecyclepub.Fact{
+		s.ws.PublishLifecycle(context.Background(), lifecyclepub.Fact{
 			Lane:      string(typedAxisLane),
 			Domain:    "dom-typed-axis",
 			Epoch:     1,

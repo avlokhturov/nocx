@@ -24,6 +24,7 @@ type fakeSink struct {
 	incomplete []uint64
 	lost       []lostBoundary
 	lostCh     chan struct{} // signalled on every BlockBoundaryLost, when set
+	ended      []session.ID  // sessions the helper reported ended
 	answer     func(fromRow uint64, n int) (uint64, bool)
 }
 
@@ -39,7 +40,13 @@ func (f *fakeSink) DetachBlockRows(sid session.ID) {
 	f.detached = append(f.detached, sid)
 }
 
-func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row) (uint64, bool) {
+func (f *fakeSink) HelperSessionEnded(sid session.ID) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ended = append(f.ended, sid)
+}
+
+func (f *fakeSink) BlockRowsArrived(_ session.ID, fromRow, lost uint64, rows []emulator.Row, _ string) (uint64, bool) {
 	f.mu.Lock()
 	f.rows = append(f.rows, client.OutputRows{FromRow: fromRow, LostRows: lost, Rows: rows})
 	answer := f.answer
@@ -53,7 +60,7 @@ func (f *fakeSink) BlockIntervalEnded(_ session.ID, nonce [32]byte, endRow uint6
 	f.ends = append(f.ends, client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: endRow, Closing: closing, NoFence: noFence})
 }
 
-func (f *fakeSink) BlockBoundaryLost(sid session.ID, nonce [32]byte) {
+func (f *fakeSink) BlockBoundaryLost(_ context.Context, sid session.ID, nonce [32]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lost = append(f.lost, lostBoundary{sid: sid, nonce: nonce})
@@ -255,7 +262,7 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 
 // A nil sink or attachment wires nothing and stop is safe.
 func TestANilSinkWiresNothing(t *testing.T) {
-	stop := bindBlockRows(context.Background(), nil, "s1", nil)
+	stop := bindHeldBlockRows(context.Background(), nil, "s1", nil, nil)
 	stop()
 }
 
