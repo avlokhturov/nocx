@@ -106,7 +106,7 @@ func TestABoundaryWhoseDeliveryWasLostSealsItsBlockAsAGap(t *testing.T) {
 	fence := lifecycleFence(0x61)
 	e, sid, attempt, db := completedWithRows(t, fence)
 
-	e.ws.BlockBoundaryLost(sid, fence)
+	e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 
 	assertSealedAs(t, db, attempt, gap)
 	if rows := streamRows(t, db, attempt); len(rows) != 1 || rows[0].Text != "building" {
@@ -156,7 +156,7 @@ func TestAnEntryWhoseDeliveryWasLostSealsTheCurrentBlockAsAGap(t *testing.T) {
 		t.Fatal("the streamed row was not confirmed")
 	}
 
-	e.ws.BlockBoundaryLost(sid, [32]byte{})
+	e.ws.BlockBoundaryLost(context.Background(), sid, [32]byte{})
 
 	assertSealedAs(t, db, attempt, gap)
 	e.ws.blockStream.mu.Lock()
@@ -178,7 +178,7 @@ func TestALossAndADetachSettleOneBlockOnce(t *testing.T) {
 		fence := lifecycleFence(0x64)
 		e, sid, attempt, db := completedWithRows(t, fence)
 
-		e.ws.BlockBoundaryLost(sid, fence)
+		e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 		e.ws.DetachBlockRows(sid)
 
 		assertSealedAs(t, db, attempt, gap)
@@ -194,7 +194,7 @@ func TestALossAndADetachSettleOneBlockOnce(t *testing.T) {
 		// report arrives after the coordinator returns (it travels the
 		// re-adopted connection), and settles the still-open block.
 		e.ws.AttachBlockRows(sid)
-		e.ws.BlockBoundaryLost(sid, fence)
+		e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 
 		// The boundary was lost: its end never arrived, so the seal says
 		// the block is a gap — the rows it holds are whole.
@@ -213,7 +213,7 @@ func TestAnEndForALostBoundaryIsDropped(t *testing.T) {
 	fence := lifecycleFence(0x66)
 	e, sid, attempt, db := completedWithRows(t, fence)
 
-	e.ws.BlockBoundaryLost(sid, fence)
+	e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 	e.ws.BlockIntervalEnded(sid, fence, 1, []emulator.Row{aStreamRow("$ ")}, false)
 
 	e.ws.blockStream.mu.Lock()
@@ -256,7 +256,7 @@ func TestADetachDuringALostBoundarysSealSaysClosedOnce(t *testing.T) {
 	store.detach = func() { e.ws.DetachBlockRows(sid) }
 	e.ws.blockRowsStore = store
 
-	e.ws.BlockBoundaryLost(sid, fence)
+	e.ws.BlockBoundaryLost(context.Background(), sid, fence)
 
 	assertBlockSealed(t, db, attempt)
 	if n := closedCount(t, e, sid, attempt); n != 1 {

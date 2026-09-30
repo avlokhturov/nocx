@@ -271,9 +271,11 @@ func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
 	return ErrNotImplemented
 }
 
-func (s *ledgerStub) RecordLifecycleApplied(_ context.Context, sessionID string, offset uint64) error {
-	s.log.Info("content stub: LedgerRepository.RecordLifecycleApplied", "id", sessionID, "offset", offset)
-	return ErrNotImplemented
+func (s *ledgerStub) ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error {
+	s.log.Info("content stub: LedgerRepository.ApplyLifecycleFrame", "id", sessionID, "offset", offset)
+	// The frame is the kernel's as well as the store's: it is applied, and
+	// with no store there is nothing to record and nothing that can fail.
+	return apply(ctx)
 }
 
 func (s *ledgerStub) DeleteSession(_ context.Context, id string) error {

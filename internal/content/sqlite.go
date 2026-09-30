@@ -169,6 +169,13 @@ func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) er
 	if s.closed.Load() {
 		return ErrClosed
 	}
+	// A write inside a lifecycle frame joins the frame's transaction and
+	// runs here, on the frame's goroutine: the frame holds the one
+	// connection until it commits, so the writer goroutine could not run it
+	// before then (lifecycle_frame.go).
+	if f := s.frameOf(ctx); f != nil {
+		return f.write(ctx, fn)
+	}
 	req := writeReq{ctx: ctx, fn: fn, done: make(chan writeOutcome, 1)}
 	// Before the handoff the request is still the caller's, so a cancel or a
 	// Close may abandon it: nothing has run and nothing is owed.
@@ -1272,16 +1279,4 @@ func (s *sqliteContent) Close() error {
 		enforceFileModes(s.path)
 	})
 	return err
-}
-
-// querier is the statement surface *sql.DB and *sql.Tx share.
-type querier interface {
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
-}
-
-// conn is what a statement under ctx runs on.
-func (s *sqliteContent) conn(ctx context.Context) querier {
-	return s.db
 }

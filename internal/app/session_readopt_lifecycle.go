@@ -162,7 +162,7 @@ func (rp *readoptPass) adoptLifecycle(ctx context.Context, carrier hostedCarrier
 			Recovery:   launch.Recovery,
 		},
 		lifecyclechannel.WithLossReporter(rp.registry.reportLifecycleLoss),
-		lifecyclechannel.WithFrameApplied(cursor.frameApplied))
+		lifecyclechannel.WithFrameScope(cursor.applyFrame))
 	if err != nil {
 		_ = peerConn.Close()
 		stopDownlink()

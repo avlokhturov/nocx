@@ -36,14 +36,15 @@ func TestTheLifecycleCursorASessionAppliedSurvivesTheRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreateSession without a cursor: %v", err)
 	}
-	if err := ledger.RecordLifecycleApplied(ctx, bound, 412); err != nil {
-		t.Fatalf("RecordLifecycleApplied: %v", err)
+	nothing := func(context.Context) error { return nil }
+	if err := ledger.ApplyLifecycleFrame(ctx, bound, 412, nothing); err != nil {
+		t.Fatalf("ApplyLifecycleFrame: %v", err)
 	}
-	// A cursor never moves back: a late write for an offset already passed
+	// A cursor never moves back: a late frame for an offset already passed
 	// changes nothing, so the stored value always names the furthest frame
 	// whose effect is stored.
-	if err := ledger.RecordLifecycleApplied(ctx, bound, 97); err != nil {
-		t.Fatalf("RecordLifecycleApplied behind the cursor: %v", err)
+	if err := ledger.ApplyLifecycleFrame(ctx, bound, 97, nothing); err != nil {
+		t.Fatalf("ApplyLifecycleFrame behind the cursor: %v", err)
 	}
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

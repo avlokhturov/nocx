@@ -402,7 +402,7 @@ type Session struct {
 	// the helper's lifecycle stream offset one past the last frame whose
 	// effect this coordinator stored. A binding records it at 0 — the leg is
 	// attached at the stream's start and nothing is applied yet — and
-	// RecordLifecycleApplied moves it forward. Nil records none, and a
+	// ApplyLifecycleFrame moves it forward, in each frame's own transaction. Nil records none, and a
 	// re-adopt reads that as "this coordinator holds no record of what it
 	// applied", never as offset 0.
 	LifecycleApplied *uint64
@@ -539,7 +539,15 @@ type StartExecution struct {
 	// keyed by the app's id while every frame the shell sends names its own
 	// (ADR-0077). Recorded on the execution, and what EntryForShellAttempt
 	// answers from. Empty when the two are one id.
-	ShellAttempt       string
+	ShellAttempt string
+	// PinRoutineIfNone pins a routine, empty observation when the entry's
+	// environment has none yet — recorded in the same transaction, the way
+	// a frame capture ensures its own (ensureLedgerContext) — instead of
+	// refusing the run. It is the shell lifecycle's answer: a start the
+	// shell authenticated names a run that happened, and the only fact
+	// known about its environment is that it exists. Unset keeps the
+	// refusal for every caller that has something better to pin.
+	PinRoutineIfNone   bool
 	Lane               *string
 	Attempt            int
 	LeaseDeadline      *int64
@@ -1890,13 +1898,16 @@ type LedgerRepository interface {
 	// CreateSession records a restore key under a workspace. The workspace
 	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error
-	// RecordLifecycleApplied moves the session's lifecycle cursor forward to
-	// offset (ADR-0077): the stream offset one past the last lifecycle frame
-	// whose effect is stored. It is called once that frame's effect has been
-	// written and before the next frame is read, and it never moves the
-	// cursor back — a late write for an offset already passed changes
-	// nothing. A session with no binding row records nothing.
-	RecordLifecycleApplied(ctx context.Context, sessionID string, offset uint64) error
+	// ApplyLifecycleFrame applies one lifecycle frame as ONE transaction
+	// (ADR-0077): every store write apply makes under the context it is
+	// handed, and the session's lifecycle cursor moved forward to offset —
+	// the stream offset one past the frame — commit together, or none of
+	// them does. A write that fails under the frame fails the frame, and a
+	// failed frame returns an error wrapping ErrLifecycleFrameFailed with
+	// the store exactly as it was before it. The cursor never moves back: a
+	// frame at or behind the stored cursor changes it nothing, and a session
+	// with no binding row records none.
+	ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its
 	// session, ADR-0019 §5).

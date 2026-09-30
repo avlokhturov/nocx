@@ -38,7 +38,12 @@ func newMemCursorStore() *memCursorStore {
 	return &memCursorStore{cursor: map[string]uint64{}, history: map[string][]uint64{}}
 }
 
-func (m *memCursorStore) RecordLifecycleApplied(_ context.Context, sid string, offset uint64) error {
+// ApplyLifecycleFrame applies the frame and then records its cursor — the
+// store's own frame, minus the transaction this test has no rows for.
+func (m *memCursorStore) ApplyLifecycleFrame(ctx context.Context, sid string, offset uint64, apply func(context.Context) error) error {
+	if err := apply(ctx); err != nil {
+		return err
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if cur, ok := m.cursor[sid]; ok && offset <= cur {

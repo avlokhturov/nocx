@@ -4,6 +4,7 @@ package transport
 // helper reports does.
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -50,7 +51,7 @@ func TestDetachBlockRows_ACoordinatorDetachChangesNoBlock(t *testing.T) {
 	// its cursor — and the re-adopt's attempt fact, when it arrives,
 	// finds the block already installed.
 	e.ws.AttachBlockRows(session.ID(sid))
-	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, session.ID(sid), attempt)
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 2, 0, []emulator.Row{aStreamRow("kept-2"), aStreamRow("kept-3")}, ""); !confirm || written != 4 {
 		t.Fatalf("continued ack = (%d, %v), want rows 2 and 3 appended to the open block", written, confirm)
 	}

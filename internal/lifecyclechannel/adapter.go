@@ -27,6 +27,7 @@
 package lifecyclechannel
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -55,7 +56,7 @@ const writeTimeout = 5 * time.Second
 type Kernel interface {
 	BindTransport(t lifecycle.TransportID, port lifecycle.Port) error
 	RequestDomain(lane lifecycle.LaneID, parent *lifecycle.DomainID, t lifecycle.TransportID) (lifecycle.DomainHandle, error)
-	Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error
+	Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error
 	NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, garbageBytes, garbageFrames int) error
 	TransportLost(t lifecycle.TransportID) error
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
@@ -106,23 +107,30 @@ type Option func(*options)
 type options struct {
 	helloTimeout time.Duration
 	lossReporter LossReporter
-	frameApplied FrameApplied
+	frameScope   FrameScope
 }
 
-// FrameApplied is told, after the kernel has returned from a frame, the
-// position in this adapter's carrier that frame ends at: every byte the
-// decoder has taken, the frame's own and any garbage skipped before it
-// (ADR-0077). It is called on the pump's goroutine, before the next frame is
-// read, so a sink that stores the position synchronously stores it after the
-// frame's effect and before any later frame's — the order the coordinator's
-// lifecycle cursor needs. A refused frame is reported too: the stream carried
-// it and this coordinator dealt with it, and resuming before it would only
-// offer it again.
-type FrameApplied func(consumed uint64)
+// FrameScope applies one frame as one unit of work (ADR-0077). consumed is
+// the position in this adapter's carrier the frame ends at — every byte the
+// decoder has taken, the frame's own and any garbage skipped before it — and
+// apply runs the kernel's ingest of it under the context the scope hands it.
+// The scope stores the frame's effect and the coordinator's cursor past it
+// together, or neither: every write the frame's projection makes under that
+// context joins the one transaction, and the cursor is its last statement. A
+// refused frame is scoped like any other — the stream carried it and this
+// coordinator dealt with it, and resuming before it would only offer it
+// again. It runs on the pump's goroutine, before the next frame is read.
+//
+// A non-nil return says the frame's effect could NOT be stored: nothing of it
+// was, and the cursor has not moved. The adapter then applies nothing more —
+// every later frame's effect would be stored past a frame the store does not
+// hold — and ends the leg as a handover does, leaving the frame to the next
+// coordinator, which resumes the stream at the cursor and applies it once.
+type FrameScope func(consumed uint64, apply func(ctx context.Context)) error
 
-// WithFrameApplied registers the sink for each frame's end position.
-func WithFrameApplied(f FrameApplied) Option {
-	return func(o *options) { o.frameApplied = f }
+// WithFrameScope registers the scope each frame is applied in.
+func WithFrameScope(f FrameScope) Option {
+	return func(o *options) { o.frameScope = f }
 }
 
 // WithHelloTimeout bounds an adapter handshake and listener expectation:
@@ -162,13 +170,13 @@ type Adapter struct {
 	// hello-timeout is measured against.
 	openedAt time.Time
 	report   LossReporter
-	applied  FrameApplied
+	scope    FrameScope
 
 	mu     sync.Mutex
 	closed bool
 	loss   sync.Once
 	// applying is held by the pump across one frame's application — the
-	// detached check, the kernel's Ingest and the applied report — so a
+	// detached check and the frame's scope, its ingest and its store — so a
 	// Detach that takes it knows no frame is half-applied and none will
 	// start (ADR-0077).
 	applying sync.Mutex
@@ -209,7 +217,7 @@ func NewStream(logger log.Logger, k Kernel, conn io.ReadWriteCloser, opts ...Opt
 		id:   lifecycle.TransportID("tpt-" + tptHex),
 		lane: lifecycle.LaneID("lane-" + laneHex),
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
-		applied:  o.frameApplied,
+		scope:    o.frameScope,
 		openedAt: time.Now(),
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
@@ -300,7 +308,7 @@ func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteClos
 		lane: adopt.Lane, domain: adopt.Domain, epoch: adopt.Epoch,
 		capability: capability, recovery: recovery,
 		conn: conn, helloTimeout: o.helloTimeout, report: o.lossReporter,
-		applied: o.frameApplied,
+		scope: o.frameScope,
 	}
 	a.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, a.reportGap)
 	if bindErr := k.BindTransport(a.id, a); bindErr != nil {
@@ -565,8 +573,12 @@ func (a *Adapter) pump() {
 				a.applying.Unlock()
 				return
 			}
-			ierr := a.kernel.Ingest(a.id, env)
-			a.reportApplied()
+			ierr, serr := a.applyFrame(env)
+			if serr != nil {
+				a.halt(serr)
+				a.applying.Unlock()
+				return
+			}
 			a.applying.Unlock()
 			if ierr != nil {
 				// Quarantine (a Desynchronized domain), a rejected
@@ -622,12 +634,35 @@ func (a *Adapter) pump() {
 	}
 }
 
-// reportApplied tells the sink where the frame the kernel just returned from
-// ends (ADR-0077).
-func (a *Adapter) reportApplied() {
-	if a.applied != nil {
-		a.applied(a.dec.Consumed())
+// applyFrame ingests one frame inside its scope: ingestErr is the kernel's
+// verdict on the frame, storeErr says its effect could not be stored.
+func (a *Adapter) applyFrame(env lifecycle.Envelope) (ingestErr, storeErr error) {
+	apply := func(ctx context.Context) { ingestErr = a.kernel.Ingest(ctx, a.id, env) }
+	if a.scope == nil {
+		// No scope, no store frame: a leg whose frames nothing records
+		// (a test's, or one with no cursor) applies them under nothing.
+		apply(context.Background())
+		return ingestErr, nil
 	}
+	storeErr = a.scope(a.dec.Consumed(), apply)
+	return ingestErr, storeErr
+}
+
+// halt ends the leg after a frame whose effect could not be stored
+// (FrameScope): as a handover does — the carrier closed, the kernel not told
+// the transport was lost, since nothing about the shell's channel failed —
+// so the frame and everything after it are the next coordinator's to apply.
+// Called on the pump with applying held.
+func (a *Adapter) halt(cause error) {
+	a.loss.Do(func() {
+		a.log.Error("lifecycle channel halted: a frame's effect could not be stored, so this coordinator applies nothing more and the next one resumes before it",
+			"transport", a.id, "lane", a.lane, "domain", a.domain, "error", cause)
+		a.stopHelloTimer()
+		a.mu.Lock()
+		a.closed = true
+		a.mu.Unlock()
+		_ = a.conn.Close()
+	})
 }
 
 // endOfStream applies the end-of-stream policy: a domain the shell already

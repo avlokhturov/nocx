@@ -205,7 +205,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		cursor = newLifecycleCursor(ctx, h.cursors)
 		opts := []lifecyclechannel.Option{
 			lifecyclechannel.WithLossReporter(h.loss),
-			lifecyclechannel.WithFrameApplied(cursor.frameApplied),
+			lifecyclechannel.WithFrameScope(cursor.applyFrame),
 		}
 		if h.helloTimeout > 0 {
 			opts = append(opts, lifecyclechannel.WithHelloTimeout(h.helloTimeout))

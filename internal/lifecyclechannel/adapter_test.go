@@ -2,6 +2,7 @@ package lifecyclechannel
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"os/exec"
 	"strings"
@@ -47,7 +48,7 @@ func newTestKernel() *lifecyclepub.Publisher {
 // kernel mints it, so this emitter has nothing to do but exist.
 type ackingEmitter struct{}
 
-func (ackingEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (ackingEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // shellEnv builds an authenticated envelope for the adapter's minted domain.
 func shellEnv(a *Adapter, seq uint64, evt lifecycle.Event) lifecycle.Envelope {

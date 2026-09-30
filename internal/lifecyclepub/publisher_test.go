@@ -1,6 +1,7 @@
 package lifecyclepub_test
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"sync"
@@ -56,7 +57,7 @@ type recorder struct {
 	facts []lifecyclepub.Fact
 }
 
-func (r *recorder) PublishLifecycle(f lifecyclepub.Fact) {
+func (r *recorder) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.facts = append(r.facts, f)
@@ -105,7 +106,7 @@ func fenceByte(n byte) lifecycle.FenceNonce {
 
 func mustIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycle.TransportID, e lifecycle.Envelope) {
 	t.Helper()
-	if err := pub.Ingest(tID, e); err != nil {
+	if err := pub.Ingest(context.Background(), tID, e); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 }
@@ -258,7 +259,7 @@ func TestPublisherRejectedFramePublishesNothing(t *testing.T) {
 
 	bad := env("L", h, 2, promptEvt())
 	bad.Capability[0] ^= 0xff // a wrong bearer: rejected before any state is consulted
-	if err := pub.Ingest("T", bad); err == nil {
+	if err := pub.Ingest(context.Background(), "T", bad); err == nil {
 		t.Fatal("wrong capability must be rejected")
 	}
 	if got := len(r.all()); got != 1 {
@@ -354,7 +355,7 @@ func TestPublisherPublishesRevokeWhileQuarantining(t *testing.T) {
 	}
 	clock.advance(2 * time.Second) // the recovery budget expires
 
-	if err := pub.Ingest("T", env("L", h, 2, promptEvt())); err == nil {
+	if err := pub.Ingest(context.Background(), "T", env("L", h, 2, promptEvt())); err == nil {
 		t.Fatal("a quarantined event must be rejected")
 	}
 	facts := r.all()
@@ -465,7 +466,7 @@ func (h *heldEmitter) arm() {
 	h.armed = true
 }
 
-func (h *heldEmitter) PublishLifecycle(f lifecyclepub.Fact) {
+func (h *heldEmitter) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	h.mu.Lock()
 	hold := h.armed
 	h.armed = false
@@ -473,7 +474,7 @@ func (h *heldEmitter) PublishLifecycle(f lifecyclepub.Fact) {
 	if hold {
 		<-h.release
 	}
-	h.recorder.PublishLifecycle(f)
+	h.recorder.PublishLifecycle(context.Background(), f)
 }
 
 // TestPublisherReplayCannotOvertakeTheFactItRaced pins the ordering of a
@@ -518,7 +519,7 @@ func TestPublisherReplayCannotOvertakeTheFactItRaced(t *testing.T) {
 
 		// The bridge ingests the hello, and goes as far as it can.
 		ingested := make(chan error, 1)
-		go func() { ingested <- pub.Ingest("T", env("L", h, 1, helloEvt())) }()
+		go func() { ingested <- pub.Ingest(context.Background(), "T", env("L", h, 1, helloEvt())) }()
 		synctest.Wait()
 
 		close(em.release)
@@ -549,7 +550,7 @@ func TestPublisherForwardsErrors(t *testing.T) {
 	pub.SetEmitter(r)
 
 	// Ingest on an unbound transport.
-	if err := pub.Ingest("nope", lifecycle.Envelope{}); err == nil {
+	if err := pub.Ingest(context.Background(), "nope", lifecycle.Envelope{}); err == nil {
 		t.Fatal("Ingest on an unbound transport must error")
 	}
 	// RequestDomain on an unbound transport.
@@ -670,7 +671,7 @@ func TestPublisherLeavesDomainPendingWhenTheAcceptCannotBeDelivered(t *testing.T
 	pub.SetEmitter(&recorder{})
 	_ = pub.BindTransport("T", failingSendPort{})
 	h, _ := pub.RequestDomain("L", nil, "T")
-	if err := pub.Ingest("T", env("L", h, 1, helloEvt())); err != nil {
+	if err := pub.Ingest(context.Background(), "T", env("L", h, 1, helloEvt())); err != nil {
 		t.Fatalf("Ingest: %v", err)
 	}
 	if _, err := pub.SubmitAttempt(h.Domain, "make", "/", "local", ""); !errors.Is(err, lifecycle.ErrDomainPending) {

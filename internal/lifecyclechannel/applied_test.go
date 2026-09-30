@@ -2,6 +2,8 @@ package lifecyclechannel
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -12,11 +14,12 @@ import (
 	"github.com/shady2k/nocx/internal/waittest"
 )
 
-// THE APPLIED CURSOR (ADR-0077). The coordinator resumes the helper's
-// lifecycle stream at the offset of the last frame whose effect it stored, so
-// the adapter — the one place that knows where a frame ends AND when the
-// kernel is done with it — reports each frame's end position, and reports it
-// only once the kernel has returned from that frame.
+// THE FRAME SCOPE (ADR-0077). The coordinator resumes the helper's lifecycle
+// stream at the offset of the last frame whose effect it stored, so the
+// adapter — the one place that knows where a frame ends — hands each frame to
+// the scope with that position, and the scope's ingest is the kernel's
+// application of it. The log below records the position once the scope's
+// ingest has returned, which is when a store commits the frame.
 
 // appliedLog records every position the adapter reported, and what the kernel
 // had been told was applied at the moment each Ingest began.
@@ -26,6 +29,14 @@ type appliedLog struct {
 	atIngest  []uint64
 	events    []string
 	ingesting int
+}
+
+// scope is a FrameScope that applies the frame and then records where it
+// ends.
+func (l *appliedLog) scope(consumed uint64, apply func(ctx context.Context)) error {
+	apply(context.Background())
+	l.report(consumed)
+	return nil
 }
 
 func (l *appliedLog) report(pos uint64) {
@@ -69,7 +80,7 @@ type observingKernel struct {
 	once    sync.Once
 }
 
-func (k *observingKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+func (k *observingKernel) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
 	k.log.mu.Lock()
 	k.log.atIngest = append(k.log.atIngest, lastLocked(k.log.reported))
 	k.log.ingesting++
@@ -82,7 +93,7 @@ func (k *observingKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope
 			<-k.hold
 		}
 	}
-	err := k.AdoptingKernel.Ingest(t, env)
+	err := k.AdoptingKernel.Ingest(ctx, t, env)
 	k.log.note("ingested:" + string(env.Event.Kind))
 	return err
 }
@@ -109,7 +120,7 @@ func TestTheAdapterReportsEachFramesEndOnlyOnceTheKernelHasAppliedIt(t *testing.
 	coordinator, shell := net.Pipe()
 	t.Cleanup(func() { _ = shell.Close() })
 	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(),
-		WithFrameApplied(applied.report))
+		WithFrameScope(applied.scope))
 	if err != nil {
 		t.Fatalf("NewAdoptedStream: %v", err)
 	}
@@ -175,7 +186,7 @@ func TestDetachFinishesTheFrameInFlightAndAppliesNoFrameAfterIt(t *testing.T) {
 	coordinator, shell := net.Pipe()
 	t.Cleanup(func() { _ = shell.Close() })
 	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(),
-		WithFrameApplied(applied.report))
+		WithFrameScope(applied.scope))
 	if err != nil {
 		t.Fatalf("NewAdoptedStream: %v", err)
 	}
@@ -223,5 +234,45 @@ func TestDetachFinishesTheFrameInFlightAndAppliesNoFrameAfterIt(t *testing.T) {
 		if events[i] != want[i] {
 			t.Fatalf("events %v, want %v: the detach returned before the frame in flight was applied", events, want)
 		}
+	}
+}
+
+// A frame whose effect the store could not record ends the leg: nothing of
+// it was stored and the cursor did not move, so every later frame belongs to
+// the next coordinator, which resumes before the failed one. The leg ends as
+// a handover does — the kernel is not told the shell's transport was lost,
+// because it was not: nothing of the domain is marked lost or unknown here.
+func TestAFrameTheStoreCouldNotRecordEndsTheLegUnapplied(t *testing.T) {
+	applied := &appliedLog{}
+	k := &observingKernel{AdoptingKernel: newTestKernel(), log: applied}
+	coordinator, shell := net.Pipe()
+	t.Cleanup(func() { _ = shell.Close() })
+	failing := func(consumed uint64, apply func(ctx context.Context)) error {
+		apply(context.Background())
+		return errors.New("the store refused the frame")
+	}
+	a, err := NewAdoptedStream(log.NewSlogAdapter(nil), k, coordinator, adoptedLaunch(), WithFrameScope(failing))
+	if err != nil {
+		t.Fatalf("NewAdoptedStream: %v", err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+
+	id := lifecycle.AttemptID("shell-90")
+	code := 0
+	start := encodedFrame(t, shellEnv(a, 90, lifecycle.Event{
+		Kind: lifecycle.KindStart, Start: &lifecycle.Start{AttemptID: &id, Command: "make"},
+	}))
+	complete := encodedFrame(t, shellEnv(a, 91, lifecycle.Event{
+		Kind: lifecycle.KindComplete, Complete: &lifecycle.Complete{ExitCode: &code, Fence: lifecycle.FenceNonce{9}},
+	}))
+	go func() { _, _ = shell.Write(append(append([]byte(nil), start...), complete...)) }()
+	<-a.pumpDone
+
+	_, _, events := applied.snapshot()
+	if len(events) != 1 || events[0] != "ingested:start" {
+		t.Fatalf("events %v, want only the frame the store refused: a frame after it was applied", events)
+	}
+	if dom, ok := k.Domain(a.domain); !ok || dom.State == lifecycle.DomainLost {
+		t.Fatalf("the domain after the halt = %+v (known %v), want it live: a store failure is not the shell's transport lost", dom, ok)
 	}
 }

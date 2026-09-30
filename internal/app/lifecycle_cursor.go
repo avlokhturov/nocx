@@ -14,17 +14,17 @@ package app
 // attached settles its block on return).
 //
 // Two facts meet here and nowhere else. The adapter knows where in ITS
-// carrier each frame ends and when the kernel has finished applying it
-// (lifecyclechannel.WithFrameApplied). The bridge knows which stretch of the
+// carrier each frame ends, and hands this type each frame to apply
+// (lifecyclechannel.WithFrameScope). The bridge knows which stretch of the
 // helper's stream it handed that carrier — every byte it relays arrives at
 // the adapter's end of an in-memory pipe verbatim and in order, and the
 // attachment's own ingest cursor says where each stretch ends in the
 // helper's stream. So the bridge records each relayed stretch BEFORE it
-// writes it, the adapter reports each applied frame's end, and this type
-// translates one into the other and stores the result — synchronously, on
-// the adapter's pump, after the frame's effect and before the next frame is
-// read. A cursor stored that way never covers a frame whose effect is not
-// stored, which is the half of "atomic with its effect" that loses nothing.
+// writes it, and this type translates the frame's end into the helper's
+// stream and applies the frame inside the store's own frame
+// (content.ApplyLifecycleFrame): every write the frame's projection makes
+// and the cursor past it commit as ONE transaction, or none of them does.
+// There is no window in which the rows are stored and the cursor is not.
 
 import (
 	"context"
@@ -38,7 +38,7 @@ import (
 // row (content.LedgerRepository satisfies it). Nil keeps nothing — a
 // coordinator with no store has no record for the next one to resume from.
 type lifecycleCursorStore interface {
-	RecordLifecycleApplied(ctx context.Context, sessionID string, offset uint64) error
+	ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error
 }
 
 // lifecycleOffsets is the attachment's ingest cursor: the helper stream
@@ -106,34 +106,43 @@ func (c *lifecycleCursor) relayed(n int, streamEnd proto.StreamOffset) {
 	c.mu.Unlock()
 }
 
-// frameApplied is the adapter's report: the frame ending at consumed bytes
-// into the carrier has been applied. The helper stream offset it ends at is
-// stored before this returns.
-func (c *lifecycleCursor) frameApplied(consumed uint64) {
+// applyFrame is the adapter's frame scope (lifecyclechannel.FrameScope): the
+// frame ending at consumed bytes into the carrier is applied by apply, inside
+// the store's frame, with the cursor at the helper stream offset it ends at.
+// A frame the store could not record returns the error, and nothing of it —
+// rows or cursor — was stored: the adapter then applies nothing more, and
+// the next coordinator resumes before it.
+func (c *lifecycleCursor) applyFrame(consumed uint64, apply func(ctx context.Context)) error {
 	c.mu.Lock()
 	offset, ok := c.streamOffsetLocked(consumed)
-	if !ok || offset <= c.applied {
-		c.mu.Unlock()
-		if !ok {
-			log.From(c.ctx).Warn("lifecycle cursor: an applied frame ends outside every relayed stretch; the cursor stays where it was",
-				"session", c.sid, "consumed", consumed)
-		}
-		return
-	}
-	c.applied = offset
 	sid, store := c.sid, c.store
-	c.releaseLocked()
 	c.mu.Unlock()
-	if store == nil || sid == "" {
-		return
+	if !ok {
+		log.From(c.ctx).Warn("lifecycle cursor: a frame ends outside every relayed stretch; it is applied and the cursor stays where it was",
+			"session", sid, "consumed", consumed)
+		apply(c.ctx)
+		return nil
 	}
-	if err := store.RecordLifecycleApplied(c.ctx, sid, offset); err != nil {
-		// The next coordinator then resumes from an older cursor and is
-		// offered frames this one applied — the direction ADR-0024 guards,
-		// so it is said out loud rather than left in a counter.
-		log.From(c.ctx).Warn("lifecycle cursor: the applied offset could not be stored",
-			"session", sid, "offset", offset, "error", err)
+	if store != nil && sid != "" {
+		err := store.ApplyLifecycleFrame(c.ctx, sid, offset, func(ctx context.Context) error {
+			apply(ctx)
+			return nil
+		})
+		if err != nil {
+			log.From(c.ctx).Error("lifecycle cursor: the frame's effect could not be stored; nothing of it was, and the cursor has not moved",
+				"session", sid, "offset", offset, "error", err)
+			return err
+		}
+	} else {
+		apply(c.ctx)
 	}
+	c.mu.Lock()
+	if offset > c.applied {
+		c.applied = offset
+		c.releaseLocked()
+	}
+	c.mu.Unlock()
+	return nil
 }
 
 // streamOffsetLocked translates a carrier position into the helper stream

@@ -42,7 +42,7 @@ type blockRowsSink interface {
 	// BlockBoundaryLost settles the block a boundary would have closed when
 	// its delivery to the helper finally failed (nocx-2v80t.3.29); the pane's
 	// completion downlink reports it (boundaryLossTo).
-	BlockBoundaryLost(sid session.ID, nonce [32]byte)
+	BlockBoundaryLost(ctx context.Context, sid session.ID, nonce [32]byte)
 	// BlockClearBoundary is one sighted erase-saved-lines (nocx-2v80t.3.17),
 	// on the same ordered callback sequence as the two above.
 	BlockClearBoundary(sid session.ID)
@@ -288,8 +288,8 @@ func boundaryLossTo(sink blockRowsSink) client.BoundaryLost {
 	if sink == nil {
 		return nil
 	}
-	return func(sessionID string, fence [32]byte) {
-		sink.BlockBoundaryLost(session.ID(sessionID), fence)
+	return func(ctx context.Context, sessionID string, fence [32]byte) {
+		sink.BlockBoundaryLost(ctx, session.ID(sessionID), fence)
 	}
 }
 

@@ -981,7 +981,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
 			log.NewSlogAdapter(r.log).WithContext(ctx), driveKernel, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
-			lifecyclechannel.WithFrameApplied(cursor.frameApplied),
+			lifecyclechannel.WithFrameScope(cursor.applyFrame),
 		)
 		if lifecycleErr != nil {
 			_ = peerConn.Close()

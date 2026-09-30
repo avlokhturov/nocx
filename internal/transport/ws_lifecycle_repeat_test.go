@@ -196,8 +196,19 @@ func TestARepeatedLifecycleFrameIsANoOpOnAFreshCoordinator(t *testing.T) {
 					repeat = tc.repeat(r)
 				}
 				fresh := newFreshCoordinator(t, db, sid, lane, h)
-				if err := fresh.pub.Ingest("T2", repeat); err != nil {
-					t.Logf("the fresh kernel refused the repeated %s: %v", repeat.Event.Kind, err)
+				// Offered the way the coordinator applies every frame: inside
+				// the store's own frame, so a repeat whose writes failed —
+				// an entry the store refused as a conflicting replay, say —
+				// fails the frame here rather than passing unseen.
+				var ingestErr error
+				if err := db.Ledger().ApplyLifecycleFrame(context.Background(), sid, 1<<20, func(ctx context.Context) error {
+					ingestErr = fresh.pub.Ingest(ctx, "T2", repeat)
+					return nil
+				}); err != nil {
+					t.Fatalf("the repeated %s failed its frame: %v", repeat.Event.Kind, err)
+				}
+				if ingestErr != nil {
+					t.Logf("the fresh kernel refused the repeated %s: %v", repeat.Event.Kind, ingestErr)
 				}
 				if after := ledgerShape(t, db); after != before {
 					t.Fatalf("the repeated %s changed the store:\n before %s\n after  %s", repeat.Event.Kind, before, after)
