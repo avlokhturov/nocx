@@ -81,10 +81,17 @@ func scrollbackPageRowsAt(cols int) uint64 {
 // baseline the next feed reads the depth's fall as retention pruning INSIDE
 // that feed and flags an interval incomplete for a loss that never happened
 // (noteDepartedLocked's prune branch). The treatment is the one a resize
-// already gets (rebaselineLocked): the active buffer is measured fresh, the
-// hidden one starts from a fresh measurement at its next read, and the
-// refill debt both carry survives, because un-reporting a reported row is
-// the defect this port exists to prevent.
+// already gets (rebaselineLocked), borrowed with the geometry held STILL:
+// the active buffer is measured fresh, the hidden one starts from a fresh
+// measurement at its next read — pruning took pages of its history too,
+// and it cannot be measured from here — and the refill debt both carry
+// survives, because un-reporting a reported row is the defect this port
+// exists to prevent. No resize is FABRICATED by the borrow: rebaseline
+// Locked stamps the hidden buffer with the rows it is handed, and at
+// t.geom.Rows — unchanged, for nothing but history moved — the hidden
+// buffer's pushed/refill arithmetic in noteDepartedLocked is vacuous
+// (zero pushed, zero refill), exactly the truth for a mutation that
+// touched history and never the screen.
 //
 // A budget applied at zero erases what is retained at once; one applied
 // lower than the current depth prunes it at once — the library answers the
