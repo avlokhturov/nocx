@@ -1445,12 +1445,12 @@ func (o *localHelperOpener) LocalSessions(ctx context.Context, generation string
 // attachment's own Close is what releases the daemon's subscriber; this
 // connection then sits idle until the coordinator goes, which is exactly what
 // the ordinary open's shared connection does between panes.
-func (o *localHelperOpener) Attach(ctx context.Context, params proto.AttachParams) (*helperclient.AttachedSession, error) {
+func (o *localHelperOpener) Attach(ctx context.Context, params proto.AttachParams, opts ...helperclient.AttachOption) (*helperclient.AttachedSession, error) {
 	c, err := o.sessionConn(ctx, params.Session.Generation, params.Session.Session)
 	if err != nil {
 		return nil, err
 	}
-	return c.Attach(ctx, params)
+	return c.Attach(ctx, params, opts...)
 }
 
 // AdoptLifecycle asks this machine's daemon for the identity a taken-back

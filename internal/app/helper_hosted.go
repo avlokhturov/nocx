@@ -264,6 +264,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		downlink.Bind(entry.HostSessionID)
 	}
 
+	// The rows plane is held from the first frame, for the reason the
+	// re-adopt's is (heldRows): the stream is bound below.
+	holdOpt, held := holdRowsBeforeAttach(h.blockRows)
 	attached, err := h.client.Attach(ctx, proto.AttachParams{
 		Subscriber: subscriber,
 		Session: proto.HostSessionID{
@@ -272,7 +275,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		},
 		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
-	})
+	}, holdOpt)
 	if err != nil {
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
@@ -320,7 +323,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
 	// adopt, like the screen drain, so no row the runtime streams from its
 	// first output is dropped at a door nobody opened yet.
-	stopBlockRows := bindBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached)
+	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
 
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {

@@ -262,7 +262,7 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 
 // A nil sink or attachment wires nothing and stop is safe.
 func TestANilSinkWiresNothing(t *testing.T) {
-	stop := bindBlockRows(context.Background(), nil, "s1", nil)
+	stop := bindHeldBlockRows(context.Background(), nil, "s1", nil, nil)
 	stop()
 }
 

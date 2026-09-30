@@ -86,11 +86,11 @@ type recordingLocalRoute struct {
 	attach []proto.AttachParams
 }
 
-func (r *recordingLocalRoute) Attach(ctx context.Context, params proto.AttachParams) (*client.AttachedSession, error) {
+func (r *recordingLocalRoute) Attach(ctx context.Context, params proto.AttachParams, opts ...client.AttachOption) (*client.AttachedSession, error) {
 	r.mu.Lock()
 	r.attach = append(r.attach, params)
 	r.mu.Unlock()
-	return r.Client.Attach(ctx, params)
+	return r.Client.Attach(ctx, params, opts...)
 }
 
 func (r *recordingLocalRoute) LocalSessions(ctx context.Context, _ string) ([]client.SessionEntry, error) {

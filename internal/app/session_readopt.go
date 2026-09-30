@@ -128,7 +128,7 @@ type localHelperRoute interface {
 // the opener owns. *client.Client satisfies it; so does localHelperOpener, by
 // forwarding both to the connection it holds.
 type hostedCarrier interface {
-	Attach(ctx context.Context, params proto.AttachParams) (*client.AttachedSession, error)
+	Attach(ctx context.Context, params proto.AttachParams, opts ...client.AttachOption) (*client.AttachedSession, error)
 	AdoptLifecycle(ctx context.Context, id client.HostSessionID) (*proto.LifecycleLaunch, error)
 	// LifecycleComplete carries one already-authenticated completion DOWN to
 	// the helper session it names (owner decision 2026-09-19) — the third
@@ -705,6 +705,11 @@ func (rp *readoptPass) readopt(
 		nocxlog.From(ctx).Debug("re-adopt: the lifecycle stream resumes",
 			"session", p.SessionID, "offset", uint64(lifecycleFrom), "storedCursor", !lifecycleFresh,
 			"windowBase", entry.LifecycleWindow.Base, "windowHead", entry.LifecycleWindow.Written)
+		// THE ROWS PLANE IS HELD FROM THE FIRST FRAME (nocx-zg3k3.5.11):
+		// the helper sends the rows this coordinator is owed as soon as the
+		// subscriber exists, before it answers, and the stream is bound only
+		// below (heldRows).
+		holdOpt, held := holdRowsBeforeAttach(rp.blockRows)
 		attached, err := carrier.Attach(ctx, proto.AttachParams{
 			Subscriber: proto.SubscriberID(hex.EncodeToString(subscriberRaw[:])),
 			Session: proto.HostSessionID{
@@ -731,7 +736,7 @@ func (rp *readoptPass) readopt(
 			LifecycleOffset: lifecycleFrom,
 			LifecycleFresh:  lifecycleFresh,
 			RequestWrite:    true,
-		})
+		}, holdOpt)
 		if err != nil {
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", reattachTarget(p), err)
@@ -818,8 +823,10 @@ func (rp *readoptPass) readopt(
 				"another nocx already holds the keyboard of this session on %s", reattachTarget(p))
 		}
 		// THE STREAMED BLOCK OUTPUT, restored-pane half (nocx-2v80t.3.7):
-		// registered before the adopt, like the screen drain above.
-		stopBlockRows := bindBlockRows(ctx, rp.blockRows, sid, attached)
+		// registered before the adopt, like the screen drain above — and
+		// after the lost-range settle, so the re-bind finds the store as the
+		// settle left it; what the helper sent meanwhile was held.
+		stopBlockRows := bindHeldBlockRows(ctx, rp.blockRows, sid, attached, held)
 		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
 			stopBlockRows()
