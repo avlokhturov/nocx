@@ -425,7 +425,20 @@ func (c *Client) SpawnSSH(ctx context.Context, params proto.SSHSpawnParams) (Ses
 // Attach subscribes this coordinator to a helper-owned session and returns its
 // raw PTY data channel. Registration happens before the request so data sent
 // immediately after the helper accepts the subscriber cannot be lost.
-func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*AttachedSession, error) {
+// AttachOption configures one Attach on the attachment it creates.
+type AttachOption func(*AttachedSession)
+
+// ObserveBeforeAttach runs f on the attachment after it exists and before the
+// helper is asked for it — the one moment a consumer can be registered that no
+// frame for this attachment can precede (nocx-zg3k3.5.11). The helper binds a
+// new subscriber and wakes its row pump before it writes the attach's result,
+// so the read-back a returning coordinator is owed can arrive ahead of that
+// result; an observer registered once Attach has returned has missed it.
+func ObserveBeforeAttach(f func(*AttachedSession)) AttachOption {
+	return f
+}
+
+func (c *Client) Attach(ctx context.Context, params proto.AttachParams, opts ...AttachOption) (*AttachedSession, error) {
 	session, err := proto.SessionBytes(params.Session.Session)
 	if err != nil {
 		return nil, err
@@ -450,6 +463,9 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	}
 	c.attachments[subscriber] = a
 	c.mu.Unlock()
+	for _, opt := range opts {
+		opt(a)
+	}
 
 	var result proto.AttachResult
 	if err := c.Call(ctx, proto.ServiceSession, proto.OpAttach, params, &result); err != nil {
