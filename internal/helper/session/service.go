@@ -508,6 +508,7 @@ func (s *Service) Ops() []string {
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
 		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpScreenResend, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
+		proto.OpSetScrollback,
 	}
 }
 
@@ -555,6 +556,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.LifecycleCompleteParams{})
 	case proto.OpLifecycleEntered:
 		return host.SchemaFor(proto.LifecycleEnteredParams{})
+	case proto.OpSetScrollback:
+		return host.SchemaFor(proto.SetScrollbackParams{})
 	}
 	return nil
 }
@@ -814,6 +817,23 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return proto.AdoptLifecycleResult{Lifecycle: hs.lifecycleLaunch}, nil
+	case proto.OpSetScrollback:
+		var p proto.SetScrollbackParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		hs, err := s.find(p.Session)
+		if err != nil {
+			return nil, err
+		}
+		// Through the runtime, the way a resize is: the runtime's mutex
+		// makes the application indivisible against a feed, and the adapter
+		// re-baselines its departed-rows measurement across it, so the prune
+		// the new budget takes is never reported as a loss.
+		if err := hs.runtime.ApplyScrollback(p.MaxLines); err != nil {
+			return nil, err
+		}
+		return proto.SetScrollbackResult{}, nil
 	}
 	return nil, fmt.Errorf("session: no op %q", op)
 }
@@ -973,7 +993,7 @@ func (s *Service) spawn(ctx context.Context, p proto.SpawnParams) (_ proto.Spawn
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
+		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1155,7 +1175,7 @@ func (s *Service) spawnSSH(ctx context.Context, p proto.SSHSpawnParams) (_ proto
 	}, spawnShape{
 		sessionID: proto.SessionHex(raw), raw: raw, workspace: p.Workspace, key: p.IdempotencyKey,
 		cols: cols, rows: rows, xpixel: p.XPixel, ypixel: p.YPixel, bound: bound, reserved: reserved,
-		rowBuffer: rowBuffer, lifecycle: p.Lifecycle,
+		rowBuffer: rowBuffer, scrollback: scrollbackOf(p.ScrollbackLines), lifecycle: p.Lifecycle,
 	}, lg, &spawned)
 }
 
@@ -1291,7 +1311,11 @@ type spawnShape struct {
 	reserved int64
 	// rowBuffer is the session's row buffer bound, clamped (nocx-2v80t.3.36).
 	rowBuffer int64
-	lifecycle *proto.LifecycleLaunch
+	// scrollback is the session's scrollback budget in physical lines,
+	// resolved from the spawn (nil named none and took the default;
+	// nocx-zg3k3.10.1).
+	scrollback uint64
+	lifecycle  *proto.LifecycleLaunch
 }
 
 // finishSpawn builds the session around a process that ALREADY EXISTS: the
@@ -1335,6 +1359,18 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 	// run with no sink bound.
 	owner := newSessionOwner(proc, rt, win, s.log)
 	rt.SetReplies(owner)
+	// The session's scrollback budget (nocx-zg3k3.10.1), applied BEFORE the
+	// first byte is read: the retention the session keeps from birth is the
+	// one its coordinator named, never the adapter's unlimited clearing. A
+	// budget that cannot be applied fails the spawn — a session left
+	// unlimited would be a state the person's setting says cannot exist,
+	// and "the emulator refused" is a sentence about this pane, not a
+	// default to run under.
+	if err := rt.ApplyScrollback(shape.scrollback); err != nil {
+		release()
+		lg.Error("helper: the session's scrollback budget could not be applied", "error", err)
+		return proto.SpawnResult{}, fmt.Errorf("%w: %v", ErrSpawn, err)
+	}
 	// The session's one token book (nocx-6q1uh.4, spec §6.2), drawn over
 	// THIS incarnation and bound to the owner before anything can submit a
 	// token-bearing intent — the same ordering guarantee SetReplies already
