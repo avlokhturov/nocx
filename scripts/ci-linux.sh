@@ -199,7 +199,7 @@ if [ "$RUN_NO_KEYRING" = 1 ]; then
     # the variant ci.yml runs them in (make test-alloc-budgets owns the list).
     run_variant "no Secret Service" '
         go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
-        go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+        go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
         if [ -n "$ALLOC_BUDGET_PKGS" ]; then
             go test -count=1 -tags gtk3,nocx_local_ssh -run "StaysWithinItsBudget\$" $ALLOC_BUDGET_PKGS
         fi
@@ -218,7 +218,7 @@ if [ "$RUN_KEYRING" = 1 ]; then
             eval \"\$(echo -n nocx-ci | gnome-keyring-daemon --daemonize --login)\"
             echo -n nocx-ci | gnome-keyring-daemon --unlock
             go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
-            go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+            go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
         "' || RC=1
 fi
 

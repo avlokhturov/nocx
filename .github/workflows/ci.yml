@@ -284,7 +284,7 @@ jobs:
       - name: Test (the local helper's ssh client, nocx_local_ssh)
         env:
           PKGS: ${{ steps.localssh.outputs.list }}
-        run: go test -race -tags gtk3,nocx_local_ssh -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -424,7 +424,7 @@ jobs:
           echo "=== Running tests ==="
           go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -435,7 +435,7 @@ jobs:
         run: |
           go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
       # THE ALLOCATION BUDGETS, WITHOUT -race (nocx-zg3k3.5.8). Every pass above
       # runs -race, which instruments and adds allocations (the pump's window
@@ -591,7 +591,7 @@ jobs:
           echo "=== Running tests ==="
           go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -602,7 +602,7 @@ jobs:
         run: |
           go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
   ci-frontend:
     needs: changes

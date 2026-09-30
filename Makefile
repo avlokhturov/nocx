@@ -1086,7 +1086,7 @@ test-ci:
 	@# host gate measures them (see test-alloc-budgets).
 	@$(MAKE) -s test-alloc-budgets
 	@echo ""
-	@echo "=== go test -race -tags $(LOCAL_SSH_TAGS) (this machine's helper, the one with the ssh client) ==="
+	@echo "=== go test -race -tags $(LOCAL_SSH_TAGS),nocx_framecheck (this machine's helper, the one with the ssh client) ==="
 	@# The other build constraint the suite is partitioned by, and the second
 	@# pass it needs (nocx-xk1di): the run above is the UNTAGGED build — the
 	@# artifact `make helpers` ships — and these are the packages whose files
@@ -1094,7 +1094,7 @@ test-ci:
 	@# the tag does not appear in `go list ./...`, so no pass here ever compiled
 	@# it, let alone ran its tests. LOCAL_SSH_PKGS is derived and checked by
 	@# `make ci-local-ssh-split` — one list, asked for by ci.yml's jobs too.
-	$(GO) test -race -count=1 -tags "$(LOCAL_SSH_TAGS)" $(LOCAL_SSH_PKGS)
+	$(GO) test -race -count=1 -tags "$(LOCAL_SSH_TAGS),nocx_framecheck" $(LOCAL_SSH_PKGS)
 
 build-ci:
 	@echo "=== go build ./... ==="
