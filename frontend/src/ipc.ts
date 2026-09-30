@@ -987,11 +987,11 @@ export class WSClient {
     // additionalProperties:false and has no such field, so a frame carrying
     // one would be malformed at the source. The discrimination is exact,
     // not a guess from shape.
-    if (
-      parsed !== null &&
-      typeof parsed === 'object' &&
-      typeof (parsed as { pageId?: unknown }).pageId === 'string'
-    ) {
+    const candidate =
+      parsed !== null && typeof parsed === 'object'
+        ? (parsed as { pageId?: unknown; rows?: unknown })
+        : undefined
+    if (typeof candidate?.pageId === 'string' && Array.isArray(candidate.rows)) {
       state.historyPageCallback?.(parsed as SessionHistoryPageRows)
       return
     }

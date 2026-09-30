@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
 import { SessionHandle, WSClient } from './ipc'
@@ -49,8 +49,8 @@ async function connectedSession(): Promise<{
 }
 
 describe('historyPage', () => {
-  let consoleLog: ReturnType<typeof vi.spyOn>
-  let consoleWarn: ReturnType<typeof vi.spyOn>
+  let consoleLog: MockInstance
+  let consoleWarn: MockInstance
 
   beforeEach(() => {
     MockWebSocket.last = null
