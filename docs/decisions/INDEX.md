@@ -135,6 +135,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0075 | [An overflowing row stream ends the block in flight incomplete, and the buffers are the person's](0075-an-overflowing-row-stream-ends-the-block-in-flight-incomplete.md)                      | Accepted (2026-09-26; the owner's rule of 2026-09-25; supersedes AD-10's "records the hole" for the row stream and extends ADR-0074 decision 3)                      |
 | 0076 | [The coordinator going away changes no block; only what the helper reports does](0076-the-coordinator-going-away-changes-no-block.md)                                                         | Accepted (2026-09-29; the owner's rule; supersedes ADR-0074 decision 3 where a coordinator detach was read as the session's end)                                     |
 | 0077 | [The lifecycle stream resumes at the coordinator's own cursor](0077-the-lifecycle-stream-resumes-at-the-coordinators-own-cursor.md)                                                           | Accepted (2026-09-30; the owner's decision; supersedes ADR-0024's 2026-09-02 amendment bullet "resumes at the lifecycle window's HEAD")                              |
+| 0078 | [The terminal's history has two tiers, and the live one is the emulator's own](0078-the-terminals-history-has-two-tiers-and-the-live-one-is-the-emulators-own.md)                             | Accepted (2026-10-01; the owner's decisions of 2026-09-21, the second narrowed on 2026-10-01; supersedes nothing, states what changed in ADR-0009 and ADR-0066)      |
 
 ## Adding one
 
