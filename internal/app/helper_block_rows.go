@@ -67,13 +67,20 @@ type confirmer interface {
 // (holdRowsBeforeAttach), so the frames that arrived in between reach the
 // stream once it is bound; a nil hold binds the attachment directly.
 func bindHeldBlockRows(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows) func() {
+	return bindHeldBlockRowsAfter(ctx, sink, sid, attached, held, nil)
+}
+
+// bindHeldBlockRowsAfter is bindHeldBlockRows for a re-adopted pane: the held
+// rows reach the stream once replayed closes — the leg applied the window the
+// helper handed it (heldRows.bindAfter). A nil replayed releases at the bind.
+func bindHeldBlockRowsAfter(ctx context.Context, sink blockRowsSink, sid session.ID, attached *client.AttachedSession, held *heldRows, replayed <-chan struct{}) func() {
 	if sink == nil || attached == nil {
 		return func() {}
 	}
 	if held == nil {
 		return bindBlockRowsTo(ctx, sink, sid, attached, attached)
 	}
-	return held.bind(ctx, sink, sid, attached)
+	return held.bindAfter(ctx, sink, sid, attached, replayed)
 }
 
 // rowsSource is the registration half of an attachment, split out so a test
@@ -250,6 +257,13 @@ func (h *heldRows) OnClearBoundary(f func()) {
 // held, in arrival order. It answers the bridge's stop.
 func (h *heldRows) bind(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer) func() {
 	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
+	h.release()
+	return stop
+}
+
+// release delivers what was held, in arrival order, and lets every later
+// frame pass straight through.
+func (h *heldRows) release() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for _, f := range h.held {
@@ -270,6 +284,27 @@ func (h *heldRows) bind(ctx context.Context, sink blockRowsSink, sid session.ID,
 	}
 	h.held = nil
 	h.bound = true
+}
+
+// bindAfter binds the stream now — its re-bind of the store's open block
+// happens here — and keeps holding the rows plane until ready closes: a
+// re-adopted pane's replayed lifecycle window applied (nocx-zg3k3.5.11). The
+// read-back the helper sends at the attach starts at the command's first row,
+// and the command's block may be opened only by a start frame that window
+// carries — one the coordinator that went away left to this one. Released
+// before that, the rows find no block, are dropped unconfirmed, and the
+// read-back is not sent twice. Everything arriving meanwhile is held behind
+// them, so the stream sees one order. A nil ready releases at once (bind).
+func (h *heldRows) bindAfter(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer, ready <-chan struct{}) func() {
+	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
+	if ready == nil {
+		h.release()
+		return stop
+	}
+	go func() {
+		<-ready
+		h.release()
+	}()
 	return stop
 }
 

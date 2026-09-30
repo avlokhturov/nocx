@@ -320,8 +320,14 @@ type AttachedSession struct {
 	// through sessionExited/finish directly and needs no target — there is
 	// always more that COULD arrive until the process is observed to end).
 	exitFinalOffset *proto.StreamOffset
-	offset          proto.StreamOffset
-	lifecycleOffset proto.StreamOffset
+	// exitLifecycleHead is the lifecycle window an adopted leg is owed when
+	// the session already exited (ExitAfterLifecycle, nocx-zg3k3.5.11): the
+	// attachment ends only once the lifecycle cursor reaches it as well.
+	// Guarded alongside exit; nil when no leg reads this attachment's
+	// lifecycle stream.
+	exitLifecycleHead *proto.StreamOffset
+	offset            proto.StreamOffset
+	lifecycleOffset   proto.StreamOffset
 	// lifecycleDrain is the one-shot hold's client half (nocx-zg3k3.5.11
 	// Round 4): the channel LifecycleDrained armed, with the target it
 	// closes at. nil when nothing waits; the cursor's two move sites under
@@ -793,6 +799,20 @@ func (a *AttachedSession) reportHole(gap *proto.Gap) {
 // actually closes a.done, once this attachment's own read cursor reaches
 // finalOffset — called here for the (rare) case nothing is left to read at
 // all, and again after every Read that moves the cursor toward it.
+// ExitAfterLifecycle names the lifecycle window an adopted leg is owed, for
+// a session whose exit AdoptExitStatus carries (nocx-zg3k3.5.11). Ending the
+// attachment at the pane's output frontier alone closed the lifecycle reader
+// too — with the helper's replay of that window still on its way, the leg
+// read EOF and the command's completion was never applied. Call it before
+// AdoptExitStatus, and only when a leg will read the lifecycle stream: the
+// attachment then ends once both cursors reached their frontiers.
+func (a *AttachedSession) ExitAfterLifecycle(head proto.StreamOffset) {
+	a.exitMu.Lock()
+	target := head
+	a.exitLifecycleHead = &target
+	a.exitMu.Unlock()
+}
+
 func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.StreamOffset) {
 	a.exitMu.Lock()
 	already := a.exit != nil
@@ -822,13 +842,13 @@ func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.S
 // already does for the case where a coordinator was attached the whole time.
 func (a *AttachedSession) checkFullyDrained() {
 	a.exitMu.Lock()
-	target := a.exitFinalOffset
+	target, lifecycleHead := a.exitFinalOffset, a.exitLifecycleHead
 	a.exitMu.Unlock()
 	if target == nil {
 		return
 	}
 	a.mu.Lock()
-	reached := a.offset >= *target
+	reached := a.offset >= *target && (lifecycleHead == nil || a.lifecycleOffset >= *lifecycleHead)
 	a.mu.Unlock()
 	if reached {
 		a.finish()
@@ -991,6 +1011,9 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	// An exited session waiting on its lifecycle window ends once this read
+	// reaches it (ExitAfterLifecycle); a no-op otherwise.
+	defer l.session.checkFullyDrained()
 	item, ok := l.session.take(l.session.lifecycleData, l.closed)
 	if !ok {
 		return 0, io.EOF
@@ -1062,6 +1085,12 @@ func (l *attachedLifecycle) Write(p []byte) (int, error) {
 
 func (l *attachedLifecycle) Close() error {
 	l.once.Do(func() { close(l.closed) })
+	// Nobody reads the window any more: an exited session waiting on it
+	// (ExitAfterLifecycle) waits no longer.
+	l.session.exitMu.Lock()
+	l.session.exitLifecycleHead = nil
+	l.session.exitMu.Unlock()
+	l.session.checkFullyDrained()
 	return nil
 }
 

@@ -92,3 +92,49 @@ func TestASecondDrainArmReturnsTheFirstHold(t *testing.T) {
 		t.Fatal("a second arm minted a second hold; the drain is per attachment")
 	}
 }
+
+// AN EXITED SESSION'S ATTACHMENT ENDS ONLY ONCE ITS LIFECYCLE WINDOW IS READ
+// TOO (nocx-zg3k3.5.11, the loaded bar under -race: "the block settled
+// unknown"). A re-adopted session whose shell exited while nobody was
+// attached ends its attachment once the pane's output has drained to the
+// frontier the exit named — and that ending closed the lifecycle reader as
+// well, with the helper's replay of the lifecycle window still on its way:
+// the bridge read EOF, the command's completion was never applied, and the
+// helper's own end settled the block unknown. With the adopted leg's window
+// head named, the attachment waits for the lifecycle cursor to reach it.
+func TestAnExitedAttachmentWaitsForItsLifecycleWindow(t *testing.T) {
+	_, a := drainFixture()
+	a.ExitAfterLifecycle(proto.StreamOffset(8))
+	a.AdoptExitStatus(ExitStatus{}, proto.StreamOffset(0)) // the pane's output already drained
+	select {
+	case <-a.Done():
+		t.Fatal("the attachment ended with its lifecycle window still owed")
+	default:
+	}
+	a.deliverLifecycle([]byte("12345678"))
+	n, err := a.Lifecycle().Read(make([]byte, 16))
+	if err != nil || n != 8 {
+		t.Fatalf("the replayed window read = %d, %v, want its 8 bytes", n, err)
+	}
+	select {
+	case <-a.Done():
+	default:
+		t.Fatal("the attachment did not end once the lifecycle window was read")
+	}
+}
+
+// The paired half: a leg that stops reading — its bridge closed the reader —
+// owes the window nothing more, and the exited session's attachment ends.
+func TestAnExitedAttachmentEndsWhenItsLifecycleReaderCloses(t *testing.T) {
+	_, a := drainFixture()
+	a.ExitAfterLifecycle(proto.StreamOffset(8))
+	a.AdoptExitStatus(ExitStatus{}, proto.StreamOffset(0))
+	if err := a.Lifecycle().Close(); err != nil {
+		t.Fatalf("closing the lifecycle reader: %v", err)
+	}
+	select {
+	case <-a.Done():
+	default:
+		t.Fatal("the attachment is still waiting on a lifecycle window nobody reads")
+	}
+}

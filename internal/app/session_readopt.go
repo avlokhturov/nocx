@@ -758,6 +758,10 @@ func (rp *readoptPass) readopt(
 		if adoption.cursor != nil {
 			adoption.cursor.bind(p.SessionID, attached.LifecycleIngested())
 		}
+		// The same drain gates the rows plane (heldRows.bindAfter): the
+		// read-back the helper sends at the attach may belong to a block
+		// only the replayed window's start frame opens.
+		var replayed <-chan struct{}
 		if entry.LifecycleWindow.Written > 0 {
 			head := proto.StreamOffset(entry.LifecycleWindow.Written)
 			drained := attached.LifecycleDrained(head)
@@ -765,6 +769,7 @@ func (rp *readoptPass) readopt(
 				drained = adoption.cursor.reached(head)
 			}
 			rp.adopter.HoldSessionEndFor(sid, drained)
+			replayed = drained
 		}
 		// THE STORED CURSOR IS NO LONGER IN THE HELPER'S WINDOW: the helper
 		// answered from its base, and every frame between the cursor and the
@@ -807,6 +812,13 @@ func (rp *readoptPass) readopt(
 			// gone, and it is what lets this attachment reach EOF/Done on
 			// its own once it has actually read that far, instead of
 			// hanging forever waiting for bytes that will never come.
+			// And the lifecycle window with it (nocx-zg3k3.5.11): an adopted
+			// leg is owed the replay up to the window's head — the command's
+			// completion among it — and the attachment's end would otherwise
+			// close the leg's reader before that replay arrives.
+			if adoption.cursor != nil && entry.LifecycleWindow.Written > 0 {
+				attached.ExitAfterLifecycle(proto.StreamOffset(entry.LifecycleWindow.Written))
+			}
 			attached.AdoptExitStatus(*entry.Exit, proto.StreamOffset(entry.Window.Written))
 		}
 		if !attached.WriteGranted() {
@@ -826,7 +838,7 @@ func (rp *readoptPass) readopt(
 		// registered before the adopt, like the screen drain above — and
 		// after the lost-range settle, so the re-bind finds the store as the
 		// settle left it; what the helper sent meanwhile was held.
-		stopBlockRows := bindHeldBlockRows(ctx, rp.blockRows, sid, attached, held)
+		stopBlockRows := bindHeldBlockRowsAfter(ctx, rp.blockRows, sid, attached, held, replayed)
 		sess, err := rp.registry.registry.Adopt(ctx, cfg, sid, attached)
 		if err != nil {
 			stopBlockRows()
