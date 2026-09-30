@@ -55,7 +55,8 @@ func (o *orderedSink) BlockClearBoundary(sid session.ID) {
 func TestRowsArrivingBetweenTheAttachAndTheBindReachTheStreamInOrder(t *testing.T) {
 	sink := &orderedSink{fakeSink: &fakeSink{answer: func(uint64, int) (uint64, bool) { return 0, false }}}
 	src := &fakeSource{}
-	held := holdRows(src)
+	held := &heldRows{}
+	held.observe(src)
 
 	var nonce sessionruntime.FenceNonce
 	nonce[0] = 0xcd

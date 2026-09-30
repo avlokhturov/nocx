@@ -168,13 +168,11 @@ type heldFrame struct {
 	clear bool
 }
 
-// holdRows registers the hold on an attachment's rows plane.
-func holdRows(src rowsSource) *heldRows {
-	h := &heldRows{}
+// observe registers the hold on an attachment's rows plane.
+func (h *heldRows) observe(src rowsSource) {
 	src.OnOutputRows(h.takeRows)
 	src.OnIntervalEnd(h.takeEnd)
 	src.OnClearBoundary(h.takeClear)
-	return h
 }
 
 // holdRowsBeforeAttach is the attach option that registers a hold, and the
@@ -184,11 +182,7 @@ func holdRowsBeforeAttach(sink blockRowsSink) (client.AttachOption, *heldRows) {
 		return func(*client.AttachedSession) {}, nil
 	}
 	h := &heldRows{}
-	return client.ObserveBeforeAttach(func(a *client.AttachedSession) {
-		a.OnOutputRows(h.takeRows)
-		a.OnIntervalEnd(h.takeEnd)
-		a.OnClearBoundary(h.takeClear)
-	}), h
+	return client.ObserveBeforeAttach(func(a *client.AttachedSession) { h.observe(a) }), h
 }
 
 // takeRows, takeEnd and takeClear are the attachment's observers. They run
