@@ -648,7 +648,14 @@ func (s *WSServer) AttachBlockRows(sid session.ID) {
 	// The helper's end fact may have arrived before this lane registered
 	// (the shell exited while the coordinator was away): the adopted
 	// domain's recorded terminal state settles the session now (Round 10).
-	// Idempotent — HelperSessionEnded seals only open blocks.
+	// Idempotent — HelperSessionEnded seals only open blocks. Behind an
+	// armed end hold (nocx-zg3k3.5.11 Round 4) the settle waits for the
+	// replayed window instead: consulting now would read a kernel that has
+	// ingested nothing yet, and the exit's own post-hold settle would race
+	// the teardown's unregistering.
+	if s.settleWhenEndHoldLifts(sid) {
+		return
+	}
 	if s.adoptedDomainTerminal(sid) {
 		s.HelperSessionEnded(sid)
 	}
@@ -661,7 +668,11 @@ func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(
 	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, confirm, s.blockRowsBuffer())
 	s.blockStream.adoptOpenBlock(sid, found)
-	// The same boundary consult as AttachBlockRows (Round 10).
+	// The same boundary consult as AttachBlockRows (Round 10), and the same
+	// end-hold deferral (nocx-zg3k3.5.11 Round 4).
+	if s.settleWhenEndHoldLifts(sid) {
+		return
+	}
 	if s.adoptedDomainTerminal(sid) {
 		s.HelperSessionEnded(sid)
 	}
@@ -1290,6 +1301,32 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		bs.mu.Unlock()
 		return 0, false
 	}
+	// THE DIRECT ADMISSION ARMS THE IN-FLIGHT MARK IN THE SAME LOCK HOLD
+	// THAT ADMITTED IT (nocx-zg3k3.5.11 Round 5): the store call below runs
+	// outside bs.mu, and until it returns, block.rows — the cursor a close
+	// snapshots — names the PREVIOUS delivery. A close that resolved in
+	// that window (the fence resolving a parked end, or the replayed
+	// window's domain closed — both on the lifecycle goroutine, concurrent
+	// with this read loop) wrote its closing screen at the stale cursor; on
+	// the loaded run the two transactions interleaved, both succeeded, and
+	// the sealed body lost them both (2/40, sealed at 256 of 300). A close
+	// reads flushing under this same mu, so arming here leaves no window
+	// between the admission and the mark; the deferred path has always held
+	// the same invariant through takeForFlushLocked. The mark comes down in
+	// finishDirectDelivery, on every path the store call can take.
+	var store blockOutputStore
+	armed := sourced && block != nil && block.kept
+	if armed {
+		store = s.blockStore()
+		armed = store != nil
+	}
+	if armed {
+		if bs.flushingBytes == nil {
+			bs.flushingBytes = make(map[session.ID]int64)
+		}
+		bs.flushing[sid] = true
+		bs.flushingBytes[sid] += heldRowsBytes(rows)
+	}
 	bs.mu.Unlock()
 	if !sourced {
 		return 0, false
@@ -1308,10 +1345,11 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		// Rows of no block, or of a keep the policy refused: dropped, and
 		// NOT confirmed -- the mark means stored (nocx-zg3k3.5.3), and the
 		// resend must be able to offer them again for a fresh decision.
+		// Never armed above: nothing is in flight.
 		return 0, false
 	}
-	store := s.blockStore()
-	if store == nil {
+	if !armed {
+		// No store is wired: nothing to append, nothing in flight.
 		return 0, false
 	}
 	// Owner: this stream, inside the helper's row delivery. Closing event:
@@ -1326,6 +1364,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 		// refusing to confirm is what lets them be offered again.
 		log.From(ctx).Warn("block rows append failed", "session", sid, "entry", block.entry,
 			"artifact", block.artifactID, "from", fromRow, "error", err)
+		s.finishDirectDelivery(sid, block, rows)
 		return 0, false
 	}
 	// Probe (nocx-zg3k3.5.3 round 7): the direct append's answer — which
@@ -1344,7 +1383,34 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 			EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
 		})
 	}
+	s.finishDirectDelivery(sid, block, rows)
 	return writtenUpTo, true
+}
+
+// finishDirectDelivery is the direct path's completion tail, run on every
+// path the store call can take: the in-flight mark the admission armed comes
+// down under bs.mu, and whatever parked behind the delivery either flushes
+// (the next batch, under the same flushing ownership the deferred path
+// holds) or hands the stream to its parked closes. This is what makes the
+// close wait: closeBlockRows parks on flushing, and this is where flushing
+// comes down.
+func (s *WSServer) finishDirectDelivery(sid session.ID, block *openBlock, delivered []emulator.Row) {
+	bs := s.blockStream
+	bs.mu.Lock()
+	bs.flushingBytes[sid] -= heldRowsBytes(delivered)
+	confirm := bs.confirmers[sid]
+	bs.mu.Unlock()
+	// takePendingRows takes bs.mu itself, so it runs outside the hold above
+	// — the deferred path's own order (flushPendingRows' tail).
+	next := bs.takePendingRows(sid, block.attempt)
+	if len(next) > 0 {
+		bs.flushPendingRows(s, sid, block, next, confirm)
+		return
+	}
+	bs.mu.Lock()
+	bs.flushing[sid] = false
+	bs.mu.Unlock()
+	bs.drainPendingCloses(s, sid)
 }
 
 // noFenceNonce is the sentinel [Session.SealEnvironmentEntry] sends: a

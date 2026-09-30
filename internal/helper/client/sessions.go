@@ -322,6 +322,13 @@ type AttachedSession struct {
 	exitFinalOffset *proto.StreamOffset
 	offset          proto.StreamOffset
 	lifecycleOffset proto.StreamOffset
+	// lifecycleDrain is the one-shot hold's client half (nocx-zg3k3.5.11
+	// Round 4): the channel LifecycleDrained armed, with the target it
+	// closes at. nil when nothing waits; the cursor's two move sites under
+	// mu are the only writers, and finish() — the attachment's end — closes
+	// it, so a hold can never outlive the stream it was armed on.
+	lifecycleDrain       chan struct{}
+	lifecycleDrainTarget proto.StreamOffset
 	// pendingReset and pendingLifecycleReset count the live resets that have
 	// been RECEIVED but not yet REACHED by the reader, and they exist because
 	// the helper moves its own cursor the moment it sends one. The interval
@@ -812,6 +819,50 @@ func (a *AttachedSession) checkFullyDrained() {
 	}
 }
 
+// LifecycleIngested returns this attachment's lifecycle ingest cursor: the
+// stream position of the next lifecycle byte the reader will hand over. It
+// moves only as the bridge actually reads frames — it is not an ack and not
+// the helper's own notion of what it has sent.
+func (a *AttachedSession) LifecycleIngested() proto.StreamOffset {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lifecycleOffset
+}
+
+// LifecycleDrained arms the one-shot hold a re-adopted session's end waits
+// on (nocx-zg3k3.5.11 Round 4): the returned channel closes once the ingest
+// cursor has reached target — the window's head, the offset the helper's
+// retained lifecycle record ends at — or the attachment has ended, whichever
+// first. A second arm returns the first hold: the hold is per attachment,
+// and two waiters on one window wait one drain. An attachment that ends
+// (finish) closes an armed hold, so the transport's exit can never wait on
+// a stream that is already gone.
+func (a *AttachedSession) LifecycleDrained(target proto.StreamOffset) <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lifecycleDrain != nil {
+		return a.lifecycleDrain
+	}
+	drained := make(chan struct{})
+	if a.lifecycleOffset >= target {
+		close(drained)
+		return drained
+	}
+	a.lifecycleDrain = drained
+	a.lifecycleDrainTarget = target
+	return drained
+}
+
+// lifecycleDrainReachedLocked closes the armed hold once the cursor has
+// reached its target. Called with mu held, from the only two places the
+// lifecycle cursor moves: the reset's jump and the advance per read.
+func (a *AttachedSession) lifecycleDrainReachedLocked() {
+	if a.lifecycleDrain != nil && a.lifecycleOffset >= a.lifecycleDrainTarget {
+		close(a.lifecycleDrain)
+		a.lifecycleDrain = nil
+	}
+}
+
 func (a *AttachedSession) recordExit(status proto.SessionExitStatus) {
 	snapshot := &ExitStatus{Code: status.Code, Signal: status.Signal, At: status.At, Cause: string(status.Cause)}
 	a.exitMu.Lock()
@@ -834,7 +885,21 @@ func (a *AttachedSession) WaitErr() (error, bool) {
 	return &snapshot, true
 }
 
-func (a *AttachedSession) finish() { a.once.Do(func() { close(a.done) }) }
+// finish ends the attachment. An armed lifecycle drain closes with it: the
+// transport's exit hold waits this channel, and a stream that is over can
+// never owe a window. a.mu is NOT held by any caller (checked), so taking
+// it here cannot invert against the exitMu path above.
+func (a *AttachedSession) finish() {
+	a.once.Do(func() {
+		a.mu.Lock()
+		if a.lifecycleDrain != nil {
+			close(a.lifecycleDrain)
+			a.lifecycleDrain = nil
+		}
+		a.mu.Unlock()
+		close(a.done)
+	})
+}
 
 func (a *AttachedSession) Read(p []byte) (int, error) {
 	if len(p) == 0 {
@@ -920,6 +985,7 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if l.session.pendingLifecycleReset > 0 {
 			l.session.pendingLifecycleReset--
 		}
+		l.session.lifecycleDrainReachedLocked()
 		l.session.mu.Unlock()
 	}
 	n := copy(p, item.payload)
@@ -933,6 +999,7 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if !frozen {
 			l.session.lifecycleOffset += advance
 		}
+		l.session.lifecycleDrainReachedLocked()
 		offset := l.session.lifecycleOffset
 		ptyOffset := l.session.offset
 		l.session.mu.Unlock()

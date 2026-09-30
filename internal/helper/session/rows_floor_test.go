@@ -46,3 +46,52 @@ func TestTheResendWalksFromTheRunningIntervalsStart(t *testing.T) {
 		t.Fatalf("the resend starts at %d, want the running interval's own start 0 — the head rows are the command's", batches[0].from)
 	}
 }
+
+// The interval ENDS before the coordinator returns — the tail-unwatched
+// ordering, where the release happens after the shutdown and the command
+// has completed by the time the re-adopt attaches. The running interval's
+// own start dies with it, and the mark's own leap (the late ack above) is
+// then the only bound left: the head rows are lost for good unless the
+// walk's lower bound survives the interval's end.
+func TestTheResendWalksFromTheEarliestIntervalEvenAfterItEnds(t *testing.T) {
+	hs, rt, sink := rowsBridgeSession(t, 80, 24)
+
+	// The interval opens, streams [0..16), and the coordinator confirms
+	// all sixteen — its mark leaps past rows its artifact may not hold.
+	if err := rt.Ingest([]byte("\x1b]133;C\x07")); err != nil {
+		t.Fatalf("ingest the output mark: %v", err)
+	}
+	rowsFeed(t, rt, 0, 40)
+	sink.waitFor(1, 0, 0)
+	if err := hs.confirmRows(sink, "coord-1", 16); err != nil {
+		t.Fatalf("confirm the stored rows: %v", err)
+	}
+
+	// The command ends: the interval seals, and the in-flight record —
+	// the running start with it — is gone.
+	if err := rt.Ingest([]byte("\x1b]133;D\x07")); err != nil {
+		t.Fatalf("ingest the command end: %v", err)
+	}
+
+	// The coordinator goes away; rows depart for nobody.
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+	rowsFeed(t, rt, 100, 100)
+
+	// It comes back, and the resend runs.
+	sink2 := newRowsSink()
+	hs.mu.Lock()
+	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
+	hs.mu.Unlock()
+	hs.wakeRows()
+	sink2.waitFor(1, 0, 0)
+
+	batches := decodeResentRows(t, sink2.rowFrames())
+	if len(batches) == 0 {
+		t.Fatalf("the resend delivered nothing")
+	}
+	if batches[0].from != 0 {
+		t.Fatalf("the resend starts at %d, want the ended interval's own start 0 — the mark leapt past the head and nothing else bounds the walk", batches[0].from)
+	}
+}

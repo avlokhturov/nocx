@@ -193,6 +193,15 @@ type Session struct {
 	rendezvousLatest    FenceNonce
 	rendezvousHasLatest bool
 
+	// streamedFromFloor is the smallest absolute row-stream index any
+	// interval of this session has ever streamed from. The interval in
+	// flight's own start dies at its seal; the floor is folded at every
+	// interval's first streamed batch and survives them all, because the
+	// helper's resend reads it as its walk's lower bound at a re-adopt
+	// whose command has already ended (nocx-zg3k3.5.11). Guarded by mu.
+	streamedFromFloor    uint64
+	streamedFromFloorSet bool
+
 	completeness Completeness
 
 	allowance *Allowance

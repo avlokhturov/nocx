@@ -148,11 +148,16 @@ type hostedCarrier interface {
 
 // sessionAdopter installs the transport-owned half of a re-adopted session:
 // the replay ring at the offset the recording ends at, the hole observer, the
-// output pump and the exit monitor. *transport.WSServer satisfies it; the
-// interface exists so this pass is testable without a WebSocket server, and so
-// the composition root keeps naming the direction of the dependency.
+// output pump and the exit monitor. HoldSessionEndFor arms the per-session
+// end hold (nocx-zg3k3.5.11 Round 4): the session's shell exit waits the
+// given drain — the attachment's lifecycle cursor reaching the window's
+// head — before its teardown may unregister the replay's lane.
+// *transport.WSServer satisfies it; the interface exists so this pass is
+// testable without a WebSocket server, and so the composition root keeps
+// naming the direction of the dependency.
 type sessionAdopter interface {
 	ReadoptHostedSession(ctx context.Context, sid session.ID, reattach transport.HostedSessionReattach) error
+	HoldSessionEndFor(sid session.ID, drained <-chan struct{})
 }
 
 // readoptPass is the collaborator reconcileSessions calls. It holds the
@@ -710,6 +715,18 @@ func (rp *readoptPass) readopt(
 		if err != nil {
 			adoption.abort()
 			return transport.HostedSessionOpen{}, fmt.Errorf("attach to the session still running on %s: %w", reattachTarget(p), err)
+		}
+		// THE END HOLD IS ARMED BEFORE ANYTHING SETTLES (nocx-zg3k3.5.11
+		// Round 4). The window the helper retained is the replay this
+		// attachment is about to deliver, and the shell's exit carry —
+		// AdoptExitStatus above, once the pane's own output drains — must
+		// not tear the lane down ahead of it. The drain is the attachment's
+		// lifecycle cursor reaching the window's head; armed only when a
+		// window exists, so a conventional session arms nothing and its end
+		// proceeds exactly as it always did.
+		if entry.LifecycleWindow.Written > 0 {
+			rp.adopter.HoldSessionEndFor(sid, attached.LifecycleDrained(
+				proto.StreamOffset(entry.LifecycleWindow.Written)))
 		}
 		// THE HOST'S OWN VERDICT ON A SHELL THAT ENDED WHILE WE WERE AWAY.
 		// The helper's exit notification fired once, at the moment the process

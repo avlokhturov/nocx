@@ -322,6 +322,12 @@ func (s *WSServer) NoteIntegrationLoss(lane lifecycle.LaneID, cause string) {
 	if !ok {
 		return
 	}
+	// THE END HOLD'S BOUND (nocx-zg3k3.5.11 Round 4): the lifecycle channel
+	// is what carries the replayed window a hold waits for, so its loss is
+	// the one event that can leave a hold waiting forever. Release every
+	// hold for the session — the exit proceeds, and the boundary settle
+	// consults whatever the kernel managed to record before the loss.
+	s.releaseSessionEndHolds(sid)
 	status, reason, changed := s.applyIntegrationLoss(sid, cause)
 	if !changed {
 		return

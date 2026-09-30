@@ -158,8 +158,12 @@ func (s *WSServer) ReadoptHostedSession(ctx context.Context, sid session.ID, rea
 	// before the lane registered — the one-shot settle it would have
 	// carried was lost to the unregistered lane (nocx-zg3k3.5.3 Round 9).
 	// The kernel still holds the domain's recorded terminal state; the
-	// session's open entry settles from it here.
-	s.settleAdoptedTerminalDomains(sid)
+	// session's open entry settles from it here — behind an armed end hold
+	// (nocx-zg3k3.5.11 Round 4), where the settle waits for the replayed
+	// window instead of reading a kernel that has ingested nothing yet.
+	if !s.settleWhenEndHoldLifts(sid) {
+		s.settleAdoptedTerminalDomains(sid)
+	}
 	return nil
 }
 
