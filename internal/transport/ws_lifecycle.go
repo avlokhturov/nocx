@@ -32,6 +32,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -245,7 +246,7 @@ func (s *WSServer) PublishLifecycleProjection(ctx context.Context, f lifecyclepu
 	stored := s.storedAttempt(ctx, f)
 	recorded := s.syncLifecycleLedger(ctx, stored)
 	if recorded != nil {
-		afterCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
+		lifecyclecommit.OnCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
 	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
@@ -348,7 +349,7 @@ func (s *WSServer) publishClosedAttemptHistory(ctx context.Context, id lifecycle
 	}
 	if recorded := s.syncLifecycleLedger(ctx, s.storedAttempt(ctx, fact)); recorded != nil {
 		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {
-			afterCommit(ctx, func() { s.raiseLifecycleBlockFinished(*recorded, fact) })
+			lifecyclecommit.OnCommit(ctx, func() { s.raiseLifecycleBlockFinished(*recorded, fact) })
 		}
 		// STASHED, not sent: this report runs before the lane's own
 		// completing fact (transitionsBelow's ordering in Ingest), and a
@@ -486,109 +487,105 @@ func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 	// because it describes the host integration, not the renderer watching it.
 	s.recordInstalledFact(f)
 
-	// The session's integration axis (nocx-dvql): a live domain is the
-	// kernel's own word that this session integrated, and it is read from
-	// the published fact rather than re-derived, so there is exactly one
-	// authority for "is a domain live". The loss half is NOT taken from
-	// here — a handshake that expires moves no projection and publishes no
-	// fact — it comes from the adapter's loss cause (NoteIntegrationLoss).
-	// Before the subscriber checks below: this updates backend state, and
-	// the emit inside it does its own subscriber lookup.
-	if integrationLiveFromFact(f) {
-		s.noteIntegrationLive(sid)
-	}
-
-	// An episode without a subscriber is not opened: the next attach replays
-	// the fact, and the episode opens then, when the ack can actually come
-	// back.
-	//
-	// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
-	// silence while the one below it said "no subscriber" out loud, and the
-	// difference is not cosmetic: a session opened by the BACKEND has no
-	// receiver at all — OpenSession creates no ring and no subscriber by
-	// design — so this is the branch a worker participant's pane takes, every
-	// time, and the whole establishment then expires with the only visible
-	// trace being the adapter's bare hello-timeout ten seconds later.
-	rx := s.getRx(sid)
-	if rx == nil {
-		s.log.Info("lifecycle.changed dropped: the session has no receiver",
-			"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
-		return
-	}
-	wconn, state := rx.getSubscriber()
-	if wconn == nil {
-		// Said out loud, because the drop is otherwise invisible: the fact is
-		// gone and the only trace is a renderer that never hears about a
-		// transition. That silence is what made nocx-2h08 read as three
-		// different tests hanging on three different deadlines.
-		s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
-		return
-	}
-	if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
-		s.openRecovery(sid, f)
-	}
-	// The envelope is the Responder's now (nocx-292k): every write goes
-	// through the outbound queue and its pump, which is the only writer on
-	// the socket. SessionID is transport addressing, not a lifecycle fact:
-	// one WebSocket carries several tabs, and the renderer must route this
-	// notification before any tab mutates or acknowledges its state.
-	//
-	// The session identity rides the fact (nocx-3oupk): the renderer
-	// compares it against the pair it learned at open, so a fact for this
-	// sessionId out of a previous backend instance — or an earlier epoch of
-	// this one — is refused instead of applied. It is distinct from the
-	// domain epoch the Fact itself carries, which is the lifecycle
-	// kernel's per-domain counter.
-	params := lifecycleChangedParams{
-		SessionID:      string(sid),
-		InstanceID:     string(sess.Identity().InstanceID),
-		SessionEpoch:   sess.Identity().Epoch,
-		SignalDelivery: s.signalDeliveryFor(f),
-		Fact:           f,
-	}
-	// THIS FACT BEFORE ITS OWN RECEIPT (nocx-2v80t.3.22): history.recorded
-	// names the attempt this fact is the one to report as done, and a
-	// renderer that reads the receipt first still has the attempt open in
-	// its own kernel — the receipt then has no finished block to attach to
-	// and is dropped for good, never retried. Measured against a real echo
-	// of a command carrying a credential: the receipt reached the socket
-	// every time before the fact naming its completion did, and the block
-	// never got its capture-offer chip. Sending the fact first costs
-	// nothing else it did not already cost — the receipt is still the very
-	// next write on this connection.
-	if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
-		s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
-		return
-	}
-	// The delivered path is audible too. Every drop above says so, and this
-	// was the one branch that did not — so a renderer that never showed its
-	// editor left a log in which "sent and refused" and "never sent" read the
-	// same (nocx-n14oo.8's reasoning, for the other half).
-	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
-		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
-	if recorded != nil {
-		afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, *recorded) })
-	} else if f.Attempt != nil {
-		// publishClosedAttemptHistory (transitionsBelow, run before this
-		// fact by Ingest) is usually the one that actually closed the
-		// ledger row for this attempt's completion, which is why syncing it
-		// again HERE answers nil — its receipt is waiting in the stash for
-		// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
-		if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
-			afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, stashed) })
+	// WHAT THE RENDERER IS TOLD WAITS FOR THE FRAME (ADR-0077 decision 12).
+	// Everything below leaves the process — the integration axis, the
+	// recovery episode, the fact itself and its history receipt — so inside a
+	// lifecycle frame it runs once the frame is stored, in the order the
+	// frame caused it and after the shell's own ACCEPT, and not at all for a
+	// frame that failed every attempt; the next coordinator applies that
+	// frame and tells the renderer then. Outside a frame it runs at once.
+	lifecyclecommit.OnCommit(ctx, func() {
+		// The session's integration axis (nocx-dvql): a live domain is the
+		// kernel's own word that this session integrated, and it is read from
+		// the published fact rather than re-derived, so there is exactly one
+		// authority for "is a domain live". The loss half is NOT taken from
+		// here — a handshake that expires moves no projection and publishes no
+		// fact — it comes from the adapter's loss cause (NoteIntegrationLoss).
+		// Before the subscriber checks below: this updates backend state, and
+		// the emit inside it does its own subscriber lookup.
+		if integrationLiveFromFact(f) {
+			s.noteIntegrationLive(sid)
 		}
-	}
-}
 
-// afterCommit runs fn once the lifecycle frame ctx carries is stored, and
-// never when it is not; outside a frame, at once. What it carries says the
-// store recorded the frame's command — a history receipt, a finished
-// notification — and a frame that failed every attempt recorded nothing
-// (ADR-0077 decision 9): the next coordinator applies it and says so then.
-func afterCommit(ctx context.Context, fn func()) {
-	content.AfterLifecycleFrame(ctx, nil, func(committed bool) {
-		if committed {
-			fn()
+		// An episode without a subscriber is not opened: the next attach replays
+		// the fact, and the episode opens then, when the ack can actually come
+		// back.
+		//
+		// BOTH drop paths are audible now (nocx-n14oo.8). This one returned in
+		// silence while the one below it said "no subscriber" out loud, and the
+		// difference is not cosmetic: a session opened by the BACKEND has no
+		// receiver at all — OpenSession creates no ring and no subscriber by
+		// design — so this is the branch a worker participant's pane takes, every
+		// time, and the whole establishment then expires with the only visible
+		// trace being the adapter's bare hello-timeout ten seconds later.
+		rx := s.getRx(sid)
+		if rx == nil {
+			s.log.Info("lifecycle.changed dropped: the session has no receiver",
+				"session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
+			return
+		}
+		wconn, state := rx.getSubscriber()
+		if wconn == nil {
+			// Said out loud, because the drop is otherwise invisible: the fact is
+			// gone and the only trace is a renderer that never hears about a
+			// transition. That silence is what made nocx-2h08 read as three
+			// different tests hanging on three different deadlines.
+			s.log.Debug("lifecycle.changed dropped: no subscriber", "session", string(sid), "lane", f.Lane, "lifecycle", f.Lifecycle)
+			return
+		}
+		if f.Lifecycle == lifecyclepub.LifecycleLost && f.Recovery != nil {
+			s.openRecovery(sid, f)
+		}
+		// The envelope is the Responder's now (nocx-292k): every write goes
+		// through the outbound queue and its pump, which is the only writer on
+		// the socket. SessionID is transport addressing, not a lifecycle fact:
+		// one WebSocket carries several tabs, and the renderer must route this
+		// notification before any tab mutates or acknowledges its state.
+		//
+		// The session identity rides the fact (nocx-3oupk): the renderer
+		// compares it against the pair it learned at open, so a fact for this
+		// sessionId out of a previous backend instance — or an earlier epoch of
+		// this one — is refused instead of applied. It is distinct from the
+		// domain epoch the Fact itself carries, which is the lifecycle
+		// kernel's per-domain counter.
+		params := lifecycleChangedParams{
+			SessionID:      string(sid),
+			InstanceID:     string(sess.Identity().InstanceID),
+			SessionEpoch:   sess.Identity().Epoch,
+			SignalDelivery: s.signalDeliveryFor(f),
+			Fact:           f,
+		}
+		// THIS FACT BEFORE ITS OWN RECEIPT (nocx-2v80t.3.22): history.recorded
+		// names the attempt this fact is the one to report as done, and a
+		// renderer that reads the receipt first still has the attempt open in
+		// its own kernel — the receipt then has no finished block to attach to
+		// and is dropped for good, never retried. Measured against a real echo
+		// of a command carrying a credential: the receipt reached the socket
+		// every time before the fact naming its completion did, and the block
+		// never got its capture-offer chip. Sending the fact first costs
+		// nothing else it did not already cost — the receipt is still the very
+		// next write on this connection.
+		if err := wconn.TryNotify("lifecycle.changed", mustMarshal(params)); err != nil {
+			s.log.Debug("write lifecycle.changed", "session", string(sid), "lane", f.Lane, "error", err)
+			return
+		}
+		// The delivered path is audible too. Every drop above says so, and this
+		// was the one branch that did not — so a renderer that never showed its
+		// editor left a log in which "sent and refused" and "never sent" read the
+		// same (nocx-n14oo.8's reasoning, for the other half).
+		s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
+			"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
+		if recorded != nil {
+			s.historyRecordedNotification(wconn, state, *recorded)
+		} else if f.Attempt != nil {
+			// publishClosedAttemptHistory (transitionsBelow, run before this
+			// fact by Ingest) is usually the one that actually closed the
+			// ledger row for this attempt's completion, which is why syncing it
+			// again HERE answers nil — its receipt is waiting in the stash for
+			// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
+			if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
+				s.historyRecordedNotification(wconn, state, stashed)
+			}
 		}
 	})
 }

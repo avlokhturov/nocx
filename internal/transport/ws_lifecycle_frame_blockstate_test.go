@@ -15,11 +15,13 @@ package transport
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/lifecycle"
@@ -303,4 +305,78 @@ func frameThatFailsEveryAttempt(t *testing.T, endFirst bool) {
 		t.Fatalf("the entry after the next coordinator = %+v, %v — want closed, success", row, err)
 	}
 	assertOneOfEach(t, db)
+}
+
+// drainInbox takes every control-plane frame the inbox has retained, and
+// answers their notification methods.
+func drainInbox(conn *websocket.Conn) []string {
+	var methods []string
+	b := inboxOf(conn)
+	for {
+		msg, ok := b.take(func([]byte) bool { return true })
+		if !ok {
+			return methods
+		}
+		if f, decoded := decodeFrame(msg); decoded && f.ID == nil {
+			methods = append(methods, f.Method)
+		}
+	}
+}
+
+// renderedUntilSentinel sends a sentinel down the session's subscriber and
+// answers every notification the renderer received before it, in order: the
+// subscriber's queue is FIFO, so whatever was sent before the sentinel has
+// arrived when it has.
+func renderedUntilSentinel(t *testing.T, e *lifecycleTestEnv, sid string, n int) []string {
+	t.Helper()
+	marker := fmt.Sprintf("test.sentinel.%d", n)
+	e.ws.notifyBlockSubscriber(context.Background(), session.ID(sid), marker, struct{}{})
+	if _, err := awaitFrame(e.conn, time.Now().Add(10*time.Second), isNotification(marker)); err != nil {
+		t.Fatalf("the sentinel never arrived: %v", err)
+	}
+	return drainInbox(e.conn)
+}
+
+// A FRAME THAT IS NEVER STORED TELLS THE RENDERER NOTHING (codex review of
+// the run, findings 4 and 5; ADR-0077 decision 12). The completion's frame
+// runs its whole projection — the entry closes, the fence resolves the end
+// marker that came first, the block seals — and then its cursor cannot be
+// written, on every attempt. Nothing of it is stored, the block is open
+// again in memory, and the renderer, which would otherwise have been told
+// the command finished and its block closed, was told nothing.
+func TestAFrameThatIsNeverStoredTellsTheRendererNothing(t *testing.T) {
+	db := newLedgerStore(t)
+	e, pub, lane, h, sid, _ := newLifecycleLedgerEnvWithStore(t, db)
+	// The binding records no cursor, so every frame's last write fails.
+	createSessionRow(t, db, sid)
+	e.ws.AttachBlockRows(session.ID(sid))
+	r := repeatFrames{lane: lane, h: h}
+	mustLifecycleIngest(t, pub, "T", r.prompt(2))
+	mustLifecycleIngest(t, pub, "T", r.start(3, 0, "make build"))
+	const entry = "s-dom-repeat-0"
+	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0,
+		[]emulator.Row{aStreamRow("row-0"), aStreamRow("row-1"), aStreamRow("row-2")}, ""); !confirm || written != 3 {
+		t.Fatalf("rows ack = (%d, %v), want rows 0..2 stored", written, confirm)
+	}
+	e.ws.BlockIntervalEnded(session.ID(sid), lifecycleFence(0x50), 3, nil, false)
+	_ = renderedUntilSentinel(t, e, sid, 1)
+
+	ferr := db.Ledger().ApplyLifecycleFrame(context.Background(), sid, 340, func(ctx context.Context) error {
+		return pub.Ingest(ctx, "T", r.complete(4, 0))
+	})
+	if !errors.Is(ferr, content.ErrLifecycleCursorMissing) {
+		t.Fatalf("the complete frame = %v, want it failed at its cursor", ferr)
+	}
+	for _, m := range renderedUntilSentinel(t, e, sid, 2) {
+		switch m {
+		case "block.closed", "block.grew", "lifecycle.changed", "history.recorded":
+			t.Fatalf("the renderer was sent %s for a frame that was never stored", m)
+		}
+	}
+	if art := blockArtifact(t, db, entry); art.State != content.ArtifactOpen {
+		t.Fatalf("the block's artifact is %q after the frame failed, want open", art.State)
+	}
+	if mem, ok := memoryBlock(e.ws, session.ID(sid), entry); !ok || !mem.Current {
+		t.Fatalf("the block in memory after the frame failed: %+v (present %v), want open and current", mem, ok)
+	}
 }

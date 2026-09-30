@@ -16,12 +16,14 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -40,6 +42,21 @@ type pendingCompletion struct {
 	entry    string
 	fence    [32]byte
 	exitCode *int
+	// hold is the lifecycle frame the fact was accepted in (ADR-0077
+	// decision 12): the fact keeps its place in the queue from acceptance,
+	// and is not sent until that frame is stored — or is taken out when it
+	// is not. Released at once for a fact accepted outside a frame.
+	hold *frameHold
+}
+
+// frameHold is one queued fact's wait for its frame's commit. Guarded by the
+// downlink's mu.
+type frameHold struct {
+	released bool
+	// abandoned is set when the session ended while the fact still waited:
+	// if its frame is then stored, the fact is reported lost as the rest of
+	// the abandoned queue was.
+	abandoned error
 }
 
 // CompletionDownlink delivers the completions one hosted pane's kernel
@@ -224,6 +241,8 @@ func (d *CompletionDownlink) Bind(entry HostSessionID) {
 // ctx is the frame's (ADR-0077): a completion that cannot be queued because
 // the session has already ended is reported lost from inside Accept, and
 // that report settles a block — a write that joins the frame's transaction.
+// A completion accepted inside a frame takes its place in the queue now and
+// is sent only once that frame is stored (ADR-0077 decision 12; settleHold).
 func (d *CompletionDownlink) Accept(ctx context.Context, ingest func() error, completion *lifecycle.Complete) error {
 	d.accept.Lock()
 	defer d.accept.Unlock()
@@ -267,7 +286,7 @@ func (d *CompletionDownlink) enqueue(ctx context.Context, c pendingCompletion) {
 			d.lost(ctx, c, err)
 			return
 		}
-		if len(d.pending) < maxPendingCompletions {
+		if d.deliverableLocked() < maxPendingCompletions {
 			break
 		}
 		if !d.bound {
@@ -277,12 +296,56 @@ func (d *CompletionDownlink) enqueue(ctx context.Context, c pendingCompletion) {
 		}
 		d.space.Wait()
 	}
+	hold := &frameHold{}
+	c.hold = hold
 	d.pending = append(d.pending, c)
+	d.mu.Unlock()
+	// Its place is taken; its send waits for the frame that accepted it.
+	// Outside a frame this settles at once.
+	lifecyclecommit.After(ctx, nil, func(committed bool) { d.settleHold(c, committed) })
+}
+
+// settleHold releases a queued fact whose frame was stored, or takes it out of
+// the queue when its frame was not: the next coordinator applies that frame
+// and queues the fact again then.
+func (d *CompletionDownlink) settleHold(c pendingCompletion, committed bool) {
+	d.mu.Lock()
+	if err := c.hold.abandoned; err != nil {
+		d.mu.Unlock()
+		if committed {
+			d.lost(context.WithoutCancel(d.ctx), c, err)
+		}
+		return
+	}
+	if committed {
+		c.hold.released = true
+	} else {
+		d.pending = slices.DeleteFunc(d.pending, func(p pendingCompletion) bool { return p.hold == c.hold })
+		d.space.Broadcast()
+	}
 	d.mu.Unlock()
 	select {
 	case d.wake <- struct{}{}:
 	default:
 	}
+}
+
+// deliverableLocked counts the queued facts released for sending: the bound
+// holds those, and a fact still waiting for its own frame's commit never
+// makes that frame wait for room.
+func (d *CompletionDownlink) deliverableLocked() int {
+	n := 0
+	for _, p := range d.pending {
+		if p.hold == nil || p.hold.released {
+			n++
+		}
+	}
+	return n
+}
+
+// headReadyLocked says the queue's head may be sent.
+func (d *CompletionDownlink) headReadyLocked() bool {
+	return len(d.pending) > 0 && (d.pending[0].hold == nil || d.pending[0].hold.released)
 }
 
 // run is the worker: the only sender. It delivers the queue's head, and only
@@ -291,7 +354,7 @@ func (d *CompletionDownlink) enqueue(ctx context.Context, c pendingCompletion) {
 func (d *CompletionDownlink) run() {
 	for {
 		d.mu.Lock()
-		for len(d.pending) == 0 && d.ctx.Err() == nil {
+		for !d.headReadyLocked() && d.ctx.Err() == nil {
 			d.mu.Unlock()
 			select {
 			case <-d.wake:
@@ -300,7 +363,15 @@ func (d *CompletionDownlink) run() {
 			d.mu.Lock()
 		}
 		if err := d.ctx.Err(); err != nil {
-			abandoned := d.pending
+			var abandoned []pendingCompletion
+			for _, c := range d.pending {
+				if c.hold != nil && !c.hold.released {
+					// Its frame decides: reported lost if stored.
+					c.hold.abandoned = err
+					continue
+				}
+				abandoned = append(abandoned, c)
+			}
 			d.pending = nil
 			d.space.Broadcast()
 			d.mu.Unlock()

@@ -38,7 +38,7 @@ package content
 // not that. Only a frame that fails every attempt ends in failure; then every
 // store call it still makes answers ErrLifecycleFrameFailed, nothing of it is
 // stored, and whoever keeps state beside the store re-reads it from the
-// store when the frame ends (AfterLifecycleFrame).
+// store when the frame ends (lifecyclecommit.After).
 //
 // A WRITE THE STORE REFUSES IS ITS ANSWER, NOT A FAILURE: a missing entry, a
 // discontinuous append, an id already used. The write's savepoint is rolled
@@ -63,6 +63,7 @@ import (
 
 	sqlite3 "github.com/ncruces/go-sqlite3"
 
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -160,12 +161,6 @@ var ErrLifecycleCursorMissing = errors.New("content: the session's binding is go
 // lifecycleFrameKey carries the frame in a context.
 type lifecycleFrameKey struct{}
 
-// afterFrame is one caller's hook for the frame's end.
-type afterFrame struct {
-	key any
-	fn  func(committed bool)
-}
-
 // lifecycleFrame is one frame's unit of work, across every transaction it
 // begins.
 type lifecycleFrame struct {
@@ -200,7 +195,9 @@ type lifecycleFrame struct {
 	// writes are the store writes the frame made, in order — each one the
 	// store accepted. A fresh transaction replays them.
 	writes []func(ctx context.Context) error
-	after  []afterFrame
+	// effects is the frame's post-commit queue (lifecyclecommit): what the
+	// frame tells anyone outside the process waits for its end.
+	effects *lifecyclecommit.Queue
 	// release gives back the frame's goroutine claim (framecheck).
 	release func()
 }
@@ -212,41 +209,6 @@ func (s *sqliteContent) frameOf(ctx context.Context) *lifecycleFrame {
 		return nil
 	}
 	return f
-}
-
-// AfterLifecycleFrame runs fn when the lifecycle frame ctx carries ends —
-// committed says whether it was stored — on the frame's goroutine, once the
-// store's connection is free. A second call with the same non-nil key in one
-// frame adds nothing. Outside a frame fn runs at once, committed.
-//
-// It is how a projection keeps what leaves the store's hands in step with
-// what the store holds: an effect that tells someone else a frame's writes
-// are stored — the helper's confirmation that its rows are safe — waits for
-// the commit, and state kept in memory beside the store is re-read from the
-// store when the frame did not commit.
-func AfterLifecycleFrame(ctx context.Context, key any, fn func(committed bool)) {
-	f, _ := ctx.Value(lifecycleFrameKey{}).(*lifecycleFrame)
-	if f == nil {
-		fn(true)
-		return
-	}
-	f.mu.Lock()
-	if f.ended {
-		committed := f.dead == nil
-		f.mu.Unlock()
-		fn(committed)
-		return
-	}
-	if key != nil {
-		for _, a := range f.after {
-			if a.key == key {
-				f.mu.Unlock()
-				return
-			}
-		}
-	}
-	f.after = append(f.after, afterFrame{key: key, fn: fn})
-	f.mu.Unlock()
 }
 
 // conn is what a statement under ctx runs on: the frame's transaction once
@@ -644,7 +606,8 @@ func (s *sqliteContent) ApplyLifecycleFrame(ctx context.Context, sessionID strin
 	}
 	f := &lifecycleFrame{s: s}
 	f.release = s.claimGoroutine(f)
-	fctx := context.WithValue(ctx, lifecycleFrameKey{}, f)
+	fctx, effects := lifecyclecommit.Begin(context.WithValue(ctx, lifecycleFrameKey{}, f))
+	f.effects = effects
 	if err := apply(fctx); err != nil {
 		f.fail(err)
 	}
@@ -727,17 +690,13 @@ func (f *lifecycleFrame) commit(ctx context.Context, sessionID string, offset ui
 	}
 }
 
-// finish gives back the frame's goroutine and runs what waited for its end.
+// finish gives back the frame's goroutine and runs what waited for its end:
+// the frame's effects, in order, when it committed — and those that must know
+// it did not, when it did not.
 func (f *lifecycleFrame) finish(committed bool) {
 	if f.release != nil {
 		f.release()
 	}
 	enforceFileModes(f.s.path)
-	f.mu.Lock()
-	after := f.after
-	f.after = nil
-	f.mu.Unlock()
-	for _, a := range after {
-		a.fn(committed)
-	}
+	f.effects.End(committed)
 }

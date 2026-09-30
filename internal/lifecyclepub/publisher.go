@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
@@ -543,7 +544,7 @@ func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID
 func (p *Publisher) buildAndDeliverGrant(ctx context.Context, out lifecycle.Outbound) {
 	grant := out.Envelope.Event.DomainGrant
 	if grant == nil {
-		_ = p.kernel.Deliver(out)
+		lifecyclecommit.OnCommit(ctx, func() { _ = p.kernel.Deliver(out) })
 		return
 	}
 	req := GrantRequest{
@@ -579,7 +580,7 @@ func (p *Publisher) buildAndDeliverGrant(ctx context.Context, out lifecycle.Outb
 		// reason (fail-open: the pump never panics).
 	}
 	p.publishLane(ctx, out.Envelope.Lane)
-	_ = p.kernel.Deliver(out)
+	lifecyclecommit.OnCommit(ctx, func() { _ = p.kernel.Deliver(out) })
 }
 
 // answerAgentEnrolment fills the verdict and delivers it.
@@ -768,7 +769,11 @@ func (p *Publisher) transitionsBelow(ctx context.Context, before map[lifecycle.A
 // under the turn it already holds (holdsTurn).
 //
 // ctx is the frame's: every emission the frame causes carries it, and with it
-// the store transaction the frame's writes join.
+// the store transaction the frame's writes join. What the frame sends the
+// shell — the ACCEPT, a grant, an enrolment's answer, any other outbound —
+// waits in the frame's post-commit queue (lifecyclecommit, ADR-0077 decision
+// 12) in the order the kernel minted it, and goes out only if the frame is
+// stored; outside a frame it goes out at once.
 func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
 	turn := p.laneEmission(env.Lane)
 	turn <- struct{}{}
@@ -813,13 +818,13 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 			// "enrolled" and starts the agent in the next instruction cannot
 			// beat the watch it was promised. That is the byte-zero guarantee
 			// the whole grid rests on.
-			p.answerAgentEnrolment(env, out)
+			lifecyclecommit.OnCommit(ctx, func() { p.answerAgentEnrolment(env, out) })
 		case lifecycle.KindAccept:
 			// The shell must receive ACCEPT before the lifecycle.changed
 			// prompt_ready publication. Otherwise a renderer can submit
 			// against the prompt_ready fact while the domain still waits
 			// for the shell's authenticated admission.
-			p.deliverAccept(out)
+			lifecyclecommit.OnCommit(ctx, func() { p.deliverAccept(out) })
 		}
 	}
 	p.transitionsBelow(ctx, before)
@@ -832,7 +837,9 @@ func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lif
 		case lifecycle.KindDomainGrant, lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn, lifecycle.KindAccept:
 			continue // already delivered above, with their answers
 		}
-		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		lifecyclecommit.OnCommit(ctx, func() {
+			_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		})
 	}
 	return nil
 }

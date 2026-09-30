@@ -64,7 +64,7 @@ func assertSealedAs(t *testing.T, db content.ContentDB, entryID string, want *co
 // counted without waiting on a duration.
 func closedCount(t *testing.T, e *lifecycleTestEnv, sid session.ID, entryID string) int {
 	t.Helper()
-	e.ws.notifyBlockSubscriber(sid, "test.sentinel", struct{}{})
+	e.ws.notifyBlockSubscriber(context.Background(), sid, "test.sentinel", struct{}{})
 	if _, err := awaitFrame(e.conn, time.Now().Add(wantWithin), isNotification("test.sentinel")); err != nil {
 		t.Fatalf("the sentinel never arrived: %v", err)
 	}

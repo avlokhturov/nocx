@@ -45,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
@@ -805,7 +806,7 @@ type frameRebind struct {
 // — once per frame, whichever of its facts touched the session first.
 // Outside a frame it does nothing.
 func (s *WSServer) rebindIfFrameFails(ctx context.Context, sid session.ID) {
-	content.AfterLifecycleFrame(ctx, frameRebind{s: s, sid: sid}, func(committed bool) {
+	lifecyclecommit.After(ctx, frameRebind{s: s, sid: sid}, func(committed bool) {
 		if !committed {
 			s.rebindBlockRowsFromStore(sid)
 		}
@@ -972,7 +973,7 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 		}
 	}
 	for _, closed := range s.blockStream.detach(ctx, s.blockStore(), sid) {
-		s.notifyBlockSubscriber(sid, "block.closed", closed)
+		s.notifyBlockSubscriber(ctx, sid, "block.closed", closed)
 	}
 	// The settle can run before the re-adopting stream has installed the
 	// open block (the terminal-state consult at the attach boundary,
@@ -1517,7 +1518,7 @@ func (s *WSServer) BlockRowsArrived(sid session.ID, fromRow, lost uint64, rows [
 	bs.mu.Unlock()
 	if len(rows) > 0 {
 		// A loss-only delivery stored no row, so nothing grew.
-		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+		s.notifyBlockSubscriber(ctx, sid, "block.grew", blockGrewParams{
 			EntryID: block.entry, From: fromRow, Count: uint64(len(rows)), //nolint:gosec // a row count, not a byte count
 		})
 	}
@@ -2037,7 +2038,7 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 		keepEntryID = &id
 	}
 	bs.mu.Unlock()
-	s.notifyBlockSubscriber(sid, "block.cleared", blockClearedParams{KeepEntryID: keepEntryID})
+	s.notifyBlockSubscriber(ctx, sid, "block.cleared", blockClearedParams{KeepEntryID: keepEntryID})
 }
 
 // closeBlockRows appends the closing rows and seals the block an interval
@@ -2208,7 +2209,7 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	detachedSettle := func(sealed, said bool) {
 		finish()
 		if said && claim() {
-			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
+			s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
 		}
 	}
 	// fail records one failed close attempt and answers whether the end is
@@ -2310,7 +2311,7 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 		bs.mu.Unlock()
 		finish()
 		if claim() {
-			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
+			s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: sealed})
 		}
 		promote()
 	}
@@ -2323,14 +2324,14 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	if block == nil {
 		finish()
 		if attempt != "" {
-			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
+			s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
 		}
 		return true
 	}
 	if !block.kept {
 		finish()
 		if claim() {
-			s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: false})
+			s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: false})
 		}
 		promote()
 		return true
@@ -2431,7 +2432,7 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 		block.closingIn = true
 		block.rows = cursor + uint64(len(closing)) //nolint:gosec // a row count, not a byte count
 		bs.mu.Unlock()
-		s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+		s.notifyBlockSubscriber(ctx, sid, "block.grew", blockGrewParams{
 			EntryID: block.entry, From: cursor, Count: uint64(len(closing)), //nolint:gosec // a row count, not a byte count
 		})
 	}
@@ -2481,7 +2482,7 @@ func (s *WSServer) closeBlockRowsNow(ctx context.Context, sid session.ID, attemp
 	bs.mu.Unlock()
 	finish()
 	if claim() {
-		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
+		s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: block.entry, Kept: true})
 	}
 	promote()
 	return true
@@ -2617,7 +2618,7 @@ func (bs *blockStream) abandonAttempt(ctx context.Context, s *WSServer, sid sess
 		// Nothing to seal, and still an end: the renderer closes a block on
 		// block.closed alone, and it holds one for this attempt whenever its
 		// running fact reached the pane (nocx-2v80t.3.30).
-		s.notifyBlockSubscriber(sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
+		s.notifyBlockSubscriber(ctx, sid, "block.closed", blockClosedParams{EntryID: attempt, Kept: false})
 		return
 	}
 	// No fence: nothing sighted this interval's end, and nothing ever will.
@@ -2961,7 +2962,7 @@ func (bs *blockStream) flushPendingRows(ctx context.Context, s *WSServer, sid se
 		bs.flushingBytes[sid] -= heldRowsBytes(delivery.rows)
 		bs.mu.Unlock()
 		if len(delivery.rows) > 0 {
-			s.notifyBlockSubscriber(sid, "block.grew", blockGrewParams{
+			s.notifyBlockSubscriber(ctx, sid, "block.grew", blockGrewParams{
 				EntryID: block.entry, From: delivery.from, Count: uint64(len(delivery.rows)), //nolint:gosec // a row count, not a byte count
 			})
 		}
@@ -3034,7 +3035,7 @@ func confirmPendingRows(ctx context.Context, confirm func(uint64), delivery pend
 	if confirm == nil {
 		return
 	}
-	content.AfterLifecycleFrame(ctx, nil, func(committed bool) {
+	lifecyclecommit.After(ctx, nil, func(committed bool) {
 		if committed {
 			confirm(delivery.from + uint64(len(delivery.rows))) //nolint:gosec // a row count, not a byte count
 		}
@@ -3142,7 +3143,17 @@ func (bs *blockStream) publishFence(ctx context.Context, s *WSServer, sid sessio
 // notifyBlockSubscriber sends a block notification to the session's one
 // attached subscriber — the same fan-out files.changed and git.changed use.
 // No subscriber, no send: a client that attaches later reads history.
-func (s *WSServer) notifyBlockSubscriber(sid session.ID, method string, params any) {
+//
+// Inside a lifecycle frame the notification waits for the frame's commit, in
+// the frame's order, and is dropped with a frame that is never stored
+// (ADR-0077 decision 12): the renderer is not told a block closed that the
+// store — and, after the frame's failure, this stream's memory — still holds
+// open. Outside a frame it goes at once.
+func (s *WSServer) notifyBlockSubscriber(ctx context.Context, sid session.ID, method string, params any) {
+	lifecyclecommit.OnCommit(ctx, func() { s.sendBlockNotification(sid, method, params) })
+}
+
+func (s *WSServer) sendBlockNotification(sid session.ID, method string, params any) {
 	rx := s.getRx(sid)
 	if rx == nil {
 		return

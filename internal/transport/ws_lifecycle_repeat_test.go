@@ -170,6 +170,15 @@ func TestARepeatedLifecycleFrameIsANoOpOnAFreshCoordinator(t *testing.T) {
 			}
 			t.Run(name, func(t *testing.T) {
 				e, pub, lane, h, sid, db := newLifecycleLedgerEnv(t, true)
+				// The binding, born with its cursor as production's is: the
+				// repeat below is applied inside a frame, whose cursor must
+				// land on it (ADR-0077 decision 9).
+				zero := uint64(0)
+				if err := db.Ledger().CreateSession(context.Background(), content.Session{
+					ID: sid, WorkspaceID: "ws-lifecycle", LifecycleApplied: &zero,
+				}); err != nil {
+					t.Fatalf("CreateSession: %v", err)
+				}
 				e.ws.AttachBlockRows(session.ID(sid))
 				r := repeatFrames{lane: lane, h: h}
 				frames := tc.applied(r)

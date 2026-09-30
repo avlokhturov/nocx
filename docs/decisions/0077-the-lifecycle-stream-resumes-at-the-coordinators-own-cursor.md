@@ -133,7 +133,23 @@ length — what this machine stored — and never from anything the helper guess
    trusted blindly either: the store changed under the frame while it paused only if a replayed
    write answers differently from its first run — refused where it was accepted, or naming another
    execution or artifact than the one the projection holds — and then the frame fails rather than
-   commit a frame nobody decided (`content.ErrFrameReplayDiverged`).
+   commit a frame nobody decided (`content.ErrFrameReplayDiverged`). Every recorded write keeps its
+   first answer (`frameAnswer`): whether Submit minted a row (history may be turned on during the
+   pause) and whether it found one already there, StartExecution's execution id, OpenBlockOutput's
+   artifact — the refused keep included — and CloseBlockRows' summary. A value the store merely
+   stamps afresh on every run (`submitted_at`, the next `ingest_seq`, which another writer may take
+   during the pause) is not a decision, no caller inside a frame reads it, and it is not compared.
+
+   THE BOUND DECIDES UP TO THE COMMIT. Disarming the bound as the commit begins can lose to a
+   callback that already started; the commit then waits for the callback and begins the transaction
+   again rather than commit one the bound rolled back. SQLite's COMMIT itself cannot be interrupted —
+   a rollback racing it would only lose, since a transaction ends once — so the commit (measured up
+   to 11 ms) is the one part of a hold the bound does not cut short.
+
+   THE CURSOR MUST LAND. The cursor is the frame's last write and its proof of being applied: a
+   write that matches no binding — the session's row is gone, or it records no cursor — fails the
+   frame (`content.ErrLifecycleCursorMissing`); a cursor already at or past the frame is the
+   legitimate no-op. Every binding a lifecycle leg is bound to is born with its cursor at 0.
 
    A WRITE THE STORE REFUSES IS ITS ANSWER, NOT A FAILURE: a missing entry, a discontinuous append, an
    id already used. Its savepoint is rolled back, the frame goes on, and the projection branches on
@@ -146,7 +162,7 @@ length — what this machine stored — and never from anything the helper guess
    what would tell someone else it was (the helper's row confirmations, the history receipt, the
    finished notification) waits for a commit that never comes, and when the frame ends the session's
    block state is read again from the store exactly as a coordinator that went away and came back
-   reads it (`content.AfterLifecycleFrame`; the transport's `rebindBlockRowsFromStore`), so whatever
+   reads it (`lifecyclecommit.After`; the transport's `rebindBlockRowsFromStore`), so whatever
    the frame's projection did in memory before its last attempt failed is gone with the rows it
    wrote. The leg then halts: it applies nothing more, the domain is not marked lost (the shell's
    channel did not fail), and the loss reaches the pane's integration axis as `store-refused` through
@@ -187,6 +203,34 @@ length — what this machine stored — and never from anything the helper guess
     frame already in hand when stopping began, and failing because of it, is left the same way. That
     is a handover: no error line, no halt, nothing reported to the pane; the next coordinator applies
     the frame from the cursor.
+
+12. **What a frame tells anyone outside the process waits for the frame's commit, in one ordered
+    queue.** A frame's ingest decides things the store records and things it tells others: the shell
+    its ACCEPT, a grant or an enrolment's answer and any other outbound envelope
+    (`lifecyclepub.Publisher.Ingest`); the renderer its lifecycle fact, integration axis, recovery
+    episode, block notifications and history receipt (`transport`); the helper its completion or
+    environment entry (`helper/client.CompletionDownlink`) and the confirmation that its rows are
+    stored; the notification feed its finished command. Telling any of them before the frame's
+    transaction commits tells them of a frame that may fail every attempt — and then the store
+    never holds what they were told, or the next coordinator applies the frame and tells them twice.
+    So each of these goes through one queue per frame (`internal/lifecyclecommit`), begun and ended
+    by the store's frame, in the order the frame caused it — the ACCEPT before the lifecycle fact it
+    must precede — run once the frame commits and dropped when it does not. A completion keeps its
+    place in the downlink's queue from its acceptance, so what another source accepted after it still
+    reaches the helper after it; a frame that fails takes it out. Outside a frame every effect runs at
+    once, so a leg with no store, a replay and the rows plane are unchanged.
+
+    THE SHELL'S HALF. A frame carrying a hello whose ACCEPT is withheld and which then fails every
+    attempt leaves the shell unanswered: its domain is established in this coordinator's kernel with
+    the accept pending, the shell's hook stays unadmitted (conventional, the safe direction), and the
+    leg halts with `store-refused` as decision 9 says. The next coordinator resumes the helper's
+    stream at the cursor, which never passed that hello, so the hello is offered again; the domain it
+    adopts is Established, and the kernel answers a hello on an established domain with a fresh
+    ACCEPT ("reconnect within the epoch"), which that coordinator's committed frame sends. The shell
+    receives exactly one ACCEPT — never one from the frame that was not stored.
+    `TestAnAcceptWaitsForItsFramesCommitAndTheNextCoordinatorSendsItOnce` measures it;
+    `TestAFrameThatIsNeverStoredTellsTheRendererNothing` and
+    `TestACompletionFromAFrameIsDeliveredOnlyIfTheFrameIsStored` measure the renderer and the helper.
 
 ## Why not the helper's acknowledgement cursor
 
