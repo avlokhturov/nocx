@@ -241,15 +241,52 @@ func (s *WSServer) signalDeliveryFor(f lifecyclepub.Fact) string {
 
 // PublishLifecycleProjection updates server-owned projections without
 // emitting a duplicate lifecycle notification to the renderer.
-func (s *WSServer) PublishLifecycleProjection(f lifecyclepub.Fact) {
-	recorded := s.syncLifecycleLedger(f)
+func (s *WSServer) PublishLifecycleProjection(ctx context.Context, f lifecyclepub.Fact) {
+	stored := s.storedAttempt(ctx, f)
+	recorded := s.syncLifecycleLedger(ctx, stored)
 	if recorded != nil {
-		s.publishHistoryRecorded(f, *recorded)
+		afterCommit(ctx, func() { s.publishHistoryRecorded(f, *recorded) })
 	}
 	// The streamed block's half of the same fact: an authenticated start
 	// opens (and answers the keep decision for) the command's block, a
 	// completed attempt publishes the fence its interval end waits for.
-	s.blockStream.attemptFact(s, f)
+	s.blockStream.attemptFact(ctx, s, stored)
+}
+
+// storedAttempt is f with its attempt named the way the store keys it
+// (ADR-0077). A coordinator that never saw a command's start knows it only
+// by the id the shell minted, while the store may key it by the id the app
+// minted when the command was submitted from nocx's editor — the shell id is
+// then that entry's alias, recorded on its execution. Every store-facing
+// projection of a fact reads this copy, so a frame delivered again to a
+// fresh coordinator reaches the block it belongs to by identity rather than
+// opening a second one. The renderer keeps the kernel's own name.
+func (s *WSServer) storedAttempt(ctx context.Context, f lifecyclepub.Fact) lifecyclepub.Fact {
+	if s.contentDB == nil || f.Attempt == nil || f.Attempt.ID == "" {
+		return f
+	}
+	s.lifecycleMu.Lock()
+	sid, ok := s.lifecycleLanes[lifecycle.LaneID(f.Lane)]
+	s.lifecycleMu.Unlock()
+	if !ok {
+		return f
+	}
+	sess, err := s.registry.Get(sid)
+	if err != nil || sess.PaneID() == "" {
+		return f
+	}
+	entry, err := s.contentDB.Ledger().EntryForShellAttempt(ctx, sess.PaneID(), f.Attempt.ID)
+	if err != nil {
+		s.log.Warn("lifecycle ledger: the attempt's stored name could not be read", "attempt", f.Attempt.ID, "error", err)
+		return f
+	}
+	if entry == "" || entry == f.Attempt.ID {
+		return f
+	}
+	named := *f.Attempt
+	named.ID = entry
+	f.Attempt = &named
+	return f
 }
 
 // THE TWO TRANSITIONS THE FACT STREAM CANNOT CARRY are delivered through the
@@ -276,7 +313,7 @@ func (s *WSServer) publishHistoryRecorded(f lifecyclepub.Fact, data historyRecor
 	}
 }
 
-func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
+func (s *WSServer) publishClosedAttemptHistory(ctx context.Context, id lifecycle.AttemptID) {
 	if s.lifecyclePub == nil {
 		return
 	}
@@ -307,11 +344,11 @@ func (s *WSServer) publishClosedAttemptHistory(id lifecycle.AttemptID) {
 		// call, a block this attempt opened stays "current" forever, and
 		// every later command in the session queues up behind one that can
 		// never close.
-		s.blockStream.attemptFact(s, fact)
+		s.blockStream.attemptFact(ctx, s, s.storedAttempt(ctx, fact))
 	}
-	if recorded := s.syncLifecycleLedger(fact); recorded != nil {
+	if recorded := s.syncLifecycleLedger(ctx, s.storedAttempt(ctx, fact)); recorded != nil {
 		if att.State != lifecycle.AttemptUnknown || !s.unknownAttemptImpliesSessionEnd(att.Domain) {
-			s.raiseLifecycleBlockFinished(*recorded, fact)
+			afterCommit(ctx, func() { s.raiseLifecycleBlockFinished(*recorded, fact) })
 		}
 		// STASHED, not sent: this report runs before the lane's own
 		// completing fact (transitionsBelow's ordering in Ingest), and a
@@ -403,7 +440,7 @@ func (s *WSServer) unknownAttemptImpliesSessionEnd(domain lifecycle.DomainID) bo
 // publisher's emitter after construction. The destination is resolved at emit
 // time, exactly like files.changed — with no subscriber the fact is dropped
 // and the projection re-syncs on the next attach.
-func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
+func (s *WSServer) PublishLifecycle(ctx context.Context, f lifecyclepub.Fact) {
 	lane := lifecycle.LaneID(f.Lane)
 	s.lifecycleMu.Lock()
 	sid, ok := s.lifecycleLanes[lane]
@@ -412,12 +449,13 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		s.log.Debug("lifecycle.changed for unregistered lane", "lane", f.Lane)
 		return
 	}
-	recorded := s.syncLifecycleLedger(f)
+	stored := s.storedAttempt(ctx, f)
+	recorded := s.syncLifecycleLedger(ctx, stored)
 	// The streamed block's half of the same fact (ws_block_rows.go): an
 	// authenticated start opens — and answers the keep decision for — the
 	// command's block; a completed attempt publishes the fence its interval
 	// end waits for. Inert without a rows source.
-	s.blockStream.attemptFact(s, f)
+	s.blockStream.attemptFact(ctx, s, stored)
 	// Session death wins, and it wins BEFORE the wire (protocol §12.1).
 	// When the pty/SSH channel's Done() has closed, the session's whole
 	// remaining contract is `exit`: "emit exit, cancel any pending
@@ -529,7 +567,7 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 	s.log.Debug("lifecycle.changed sent", "session", string(sid), "lane", f.Lane,
 		"lifecycle", f.Lifecycle, "domain", f.Domain, "epoch", f.Epoch)
 	if recorded != nil {
-		s.historyRecordedNotification(wconn, state, *recorded)
+		afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, *recorded) })
 	} else if f.Attempt != nil {
 		// publishClosedAttemptHistory (transitionsBelow, run before this
 		// fact by Ingest) is usually the one that actually closed the
@@ -537,9 +575,22 @@ func (s *WSServer) PublishLifecycle(f lifecyclepub.Fact) {
 		// again HERE answers nil — its receipt is waiting in the stash for
 		// exactly this fact, never sent ahead of it (nocx-2v80t.3.22).
 		if stashed, ok := s.takeStashedHistoryRecorded(lifecycle.AttemptID(f.Attempt.ID)); ok {
-			s.historyRecordedNotification(wconn, state, stashed)
+			afterCommit(ctx, func() { s.historyRecordedNotification(wconn, state, stashed) })
 		}
 	}
+}
+
+// afterCommit runs fn once the lifecycle frame ctx carries is stored, and
+// never when it is not; outside a frame, at once. What it carries says the
+// store recorded the frame's command — a history receipt, a finished
+// notification — and a frame that failed every attempt recorded nothing
+// (ADR-0077 decision 9): the next coordinator applies it and says so then.
+func afterCommit(ctx context.Context, fn func()) {
+	content.AfterLifecycleFrame(ctx, nil, func(committed bool) {
+		if committed {
+			fn()
+		}
+	})
 }
 
 // raiseLifecycleBlockFinished raises the attested completion event for the
@@ -581,13 +632,10 @@ func (s *WSServer) raiseLifecycleBlockFinished(data historyRecordedData, f lifec
 // The lifecycle publisher is the authority for state; this function only
 // advances the ledger's existing Submit → StartExecution → FinishExecution
 // lifecycle and never invents a second phase machine.
-func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData {
+func (s *WSServer) syncLifecycleLedger(ctx context.Context, f lifecyclepub.Fact) *historyRecordedData {
 	if s.contentDB == nil || f.Attempt == nil {
 		return nil
 	}
-	// Owner: the lifecycle publisher's synchronous projection callback.
-	// Closing event: callback return after this ledger transition completes.
-	ctx := context.Background()
 	ledger := s.contentDB.Ledger()
 	row, err := ledger.Entry(ctx, f.Attempt.ID)
 	if err != nil {
@@ -682,24 +730,23 @@ func (s *WSServer) syncLifecycleLedger(f lifecyclepub.Fact) *historyRecordedData
 			}
 		}
 	}
+	// The shell's own id for this command, recorded on the execution when
+	// the entry is keyed by another — the alias a fresh coordinator finds
+	// the block by (storedAttempt).
+	var shellAttempt string
+	if s.lifecyclePub != nil {
+		if att, ok := s.lifecyclePub.Attempt(lifecycle.AttemptID(f.Attempt.ID)); ok {
+			shellAttempt = string(att.ShellID())
+		}
+	}
+	// One store call and no recovered failure: inside a lifecycle frame
+	// every failed write fails the whole frame (ADR-0077), so the start pins
+	// a routine observation itself when the environment has none rather
+	// than failing and retrying.
 	start := func() (int64, error) {
-		execID, startErr := ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
-		if startErr == nil {
-			return execID, nil
-		}
-		env := content.Environment{ID: row.EnvironmentID}
-		if row.Environment != nil {
-			env = *row.Environment
-		}
-		if ensureErr := ledger.EnsureEnvironment(ctx, env); ensureErr != nil {
-			return 0, ensureErr
-		}
-		if _, observeErr := ledger.RecordObservation(ctx, content.Observation{
-			EnvironmentID: row.EnvironmentID, Confidence: "{}", Criticality: content.CriticalityRoutine, Payload: "{}",
-		}); observeErr != nil {
-			return 0, observeErr
-		}
-		return ledger.StartExecution(ctx, content.StartExecution{EntryID: row.ID})
+		return ledger.StartExecution(ctx, content.StartExecution{
+			EntryID: row.ID, ShellAttempt: shellAttempt, PinRoutineIfNone: true,
+		})
 	}
 	if f.Attempt.State == lifecyclepub.AttemptOpen {
 		if row.Phase == content.PhaseOpen {
@@ -970,13 +1017,13 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 	// The submit IS this command's authenticated start: the block stream
 	// answers the keep decision here, once per command, before any row
 	// exists. Inert without a rows source (ws_block_rows.go).
-	s.blockStream.openAttemptFor(s, sid, string(att.ID))
+	s.blockStream.openAttemptFor(ctx, s, sid, string(att.ID))
 	if current, ok := s.lifecyclePub.Attempt(att.ID); ok && current.Started {
 		// The shell can authenticate its Start concurrently with the
 		// store insert. The publisher emitted that fact before this row
 		// existed, so reconcile the kernel's current state once the row
 		// is durable.
-		s.syncLifecycleLedger(lifecyclepub.Fact{
+		s.syncLifecycleLedger(ctx, lifecyclepub.Fact{
 			Attempt: &lifecyclepub.Attempt{ID: string(current.ID), State: lifecyclepub.AttemptOpen},
 		})
 	}

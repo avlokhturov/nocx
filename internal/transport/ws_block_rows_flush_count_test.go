@@ -79,7 +79,7 @@ func TestBlockRowsArrived_AutoFlushCountsTheBatchAgainstTheBound(t *testing.T) {
 	const command = "printf auto-flush"
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
 		lifecycleSubmitParams(string(h.Domain), command), 43))
-	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), got.ID)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, session.ID(sid), got.ID)
 
 	if written, confirm := e.ws.BlockRowsArrived(session.ID(sid), 0, 0, []emulator.Row{aStreamRow("x")}, ""); confirm {
 		t.Fatalf("pre-bind row was acknowledged through %d; it must wait in bs.pending", written)

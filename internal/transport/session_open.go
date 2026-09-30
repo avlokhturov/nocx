@@ -565,6 +565,12 @@ func (o *sessionOpener) recordHostedBinding(ctx context.Context, sess session.Se
 		ProfileID:     cfg.ProfileID,
 		HelperCommand: hosted.HelperCommand,
 		Fingerprint:   hosted.Fingerprint,
+		// THE LIFECYCLE CURSOR IS BORN WITH THE BINDING (ADR-0077), at 0:
+		// the leg attaches at the stream's start and its bridge starts only
+		// after this write, so no frame is applied yet. From here the
+		// adapter's pump moves it forward, and a coordinator that takes the
+		// session back resumes the helper's lifecycle stream exactly there.
+		LifecycleApplied: new(uint64),
 	})
 	if err == nil {
 		// THE CLOSING END OF L7'S INTERVAL, and it is this line rather than

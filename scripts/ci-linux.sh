@@ -182,7 +182,7 @@ RC=0
 
 if [ "$RUN_NO_KEYRING" = 1 ]; then
     run_variant "no Secret Service" '
-        go test -race -tags gtk3 -count=1 $PKGS
+        go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
         go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
     ' || RC=1
 fi
@@ -198,7 +198,7 @@ if [ "$RUN_KEYRING" = 1 ]; then
             set -euo pipefail
             eval \"\$(echo -n nocx-ci | gnome-keyring-daemon --daemonize --login)\"
             echo -n nocx-ci | gnome-keyring-daemon --unlock
-            go test -race -tags gtk3 -count=1 $PKGS
+            go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
             go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
         "' || RC=1
 fi

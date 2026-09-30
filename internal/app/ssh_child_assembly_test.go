@@ -319,7 +319,7 @@ type factLog struct {
 	all []lifecyclepub.Fact
 }
 
-func (l *factLog) PublishLifecycle(f lifecyclepub.Fact) {
+func (l *factLog) PublishLifecycle(_ context.Context, f lifecyclepub.Fact) {
 	l.mu.Lock()
 	l.all = append(l.all, f)
 	l.mu.Unlock()

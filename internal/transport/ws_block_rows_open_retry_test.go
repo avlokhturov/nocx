@@ -97,7 +97,7 @@ func TestTheBindsOpenIsNotSwallowedByAnOpenStillInFlight(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 	}()
 	select {
 	case <-store.entered:
@@ -107,7 +107,7 @@ func TestTheBindsOpenIsNotSwallowedByAnOpenStillInFlight(t *testing.T) {
 
 	// The bind lands and asks for the open while the other is in flight.
 	close(store.bound)
-	e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 
 	// The in-flight read fails, as a read before the bind must.
 	close(release)
@@ -131,7 +131,7 @@ func TestTheBindsOpenOpensTheBlock(t *testing.T) {
 	e, sid, attempt, store, ingest := commandBeforeItsRow(t)
 
 	close(store.bound)
-	e.ws.blockStream.openAttemptFor(e.ws, sid, attempt)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, attempt)
 
 	got := finishes(t, e, sid, attempt, ingest)
 	if got.EntryID != attempt || !got.Kept {

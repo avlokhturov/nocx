@@ -15,6 +15,7 @@ package transport
 //     and forgotten: the store row stood open with no owner.
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -97,7 +98,7 @@ func TestADuplicateQueuedAttemptDoesNotStrandTheQueue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -107,8 +108,8 @@ func TestADuplicateQueuedAttemptDoesNotStrandTheQueue(t *testing.T) {
 
 	// A duplicate request for A itself while it is still opening, then B
 	// queued behind that duplicate.
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
-	e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 
 	close(release)
 	<-done
@@ -141,7 +142,7 @@ func TestManyDuplicateRequestsCoalesceInTheQueue(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "A")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "A")
 	}()
 	select {
 	case <-store.entered:
@@ -150,7 +151,7 @@ func TestManyDuplicateRequestsCoalesceInTheQueue(t *testing.T) {
 	}
 
 	for range 50 {
-		e.ws.blockStream.openAttemptFor(e.ws, sid, "B")
+		e.ws.blockStream.openAttemptFor(context.Background(), e.ws, sid, "B")
 	}
 
 	bs := e.ws.blockStream

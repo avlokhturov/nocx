@@ -272,7 +272,7 @@ jobs:
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -tags gtk3 -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
 
       # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
       # not appear in `go list ./...` at all, so it was not merely failing to be
@@ -422,7 +422,7 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
           TESTEOF
@@ -433,7 +433,7 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
 
@@ -579,7 +579,7 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
           TESTEOF
@@ -590,7 +590,7 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
           go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
 

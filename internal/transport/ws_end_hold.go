@@ -12,18 +12,22 @@ package transport
 // so the exit may not overtake a replayed fact that preceded it.
 //
 // The hold is that ordering, owned by the transport. The re-adopt arms it
-// with the attachment's lifecycle-drain signal (internal/helper/client's
-// AttachedSession.LifecycleDrained, closed when the ingest cursor reaches
-// the window's head — or the attachment ends, whichever first). monitorExit
-// waits it after Done; the boundary consults settle only behind it. The
-// bounds that keep a dead replay from hanging the exit: the drain channel
-// itself closes when the attachment ends, and NoteIntegrationLoss releases
-// every hold for the session when the lifecycle channel is lost. A waiter
+// with the lifecycle leg's drain signal: the leg's APPLIED cursor reaching
+// the window's head, or the leg's adapter stopping, whichever first
+// (internal/app's lifecycleCursor, ADR-0077) — applied, not merely read,
+// because bytes the bridge has read are not yet facts the kernel has
+// published. A leg that was not adopted keeps the attachment's ingest drain
+// (AttachedSession.LifecycleDrained). monitorExit waits it after Done; the
+// boundary consults settle only behind it. The bounds that keep a dead
+// replay from hanging the exit: the drain closes when the leg stops, and
+// NoteIntegrationLoss releases every hold for the session when the lifecycle
+// channel is lost. A waiter
 // selects the two channels directly — there is no third goroutine holding
 // the hold's state, and no muxer to leak.
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/session"
 )
@@ -36,6 +40,10 @@ type sessionEndHold struct {
 	drained  <-chan struct{}
 	released chan struct{}
 	release  sync.Once
+	// waiting counts the settles parked behind this hold right now — the
+	// observable that says an end is being kept back, for a test and a log
+	// line alike.
+	waiting atomic.Int32
 }
 
 func (h *sessionEndHold) releaseNow() { h.release.Do(func() { close(h.released) }) }
@@ -67,6 +75,28 @@ func (s *WSServer) waitSessionEnd(sid session.ID) *sessionEndHold {
 	s.endHoldMu.Lock()
 	defer s.endHoldMu.Unlock()
 	return s.endHolds[sid]
+}
+
+// awaitSessionEnd parks the caller behind the armed hold for sid until it
+// lifts; with no hold armed it returns at once. It is how a settle that runs
+// on a goroutine of its own — the helper's session-end report, reaching
+// HelperSessionEnded from the attachment's end rather than through
+// monitorExit — keeps the same order the hold keeps for monitorExit: the
+// helper's facts apply in the order it recorded them, so a completion the
+// replay still owes is applied before the session's end settles what is
+// left (nocx-zg3k3.5.11). Never call it from the lifecycle leg's own pump:
+// the hold is waiting for that pump.
+func (s *WSServer) awaitSessionEnd(sid session.ID) {
+	hold := s.waitSessionEnd(sid)
+	if hold == nil {
+		return
+	}
+	hold.waiting.Add(1)
+	defer hold.waiting.Add(-1)
+	select {
+	case <-hold.drained:
+	case <-hold.released:
+	}
 }
 
 // settleWhenEndHoldLifts defers one boundary consult behind the hold: it

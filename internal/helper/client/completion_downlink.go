@@ -149,7 +149,7 @@ var errNeverBound = errors.New("the helper session's identity was never bound an
 // incomplete (transport's BlockBoundaryLost). A boundary lost before Bind
 // named a session is not reported: nothing on the coordinator streams that
 // session's blocks yet.
-type BoundaryLost func(session string, fence [32]byte)
+type BoundaryLost func(ctx context.Context, session string, fence [32]byte)
 
 // CompletionSender is what the downlink needs from the pane's client: the
 // carrier ops the already-authenticated completion, and an authenticated
@@ -221,7 +221,10 @@ func (d *CompletionDownlink) Bind(entry HostSessionID) {
 // purpose: the gap between the kernel accepting a completion and the queue
 // learning of it is exactly where a second source's completion used to
 // overtake it.
-func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.Complete) error {
+// ctx is the frame's (ADR-0077): a completion that cannot be queued because
+// the session has already ended is reported lost from inside Accept, and
+// that report settles a block — a write that joins the frame's transaction.
+func (d *CompletionDownlink) Accept(ctx context.Context, ingest func() error, completion *lifecycle.Complete) error {
 	d.accept.Lock()
 	defer d.accept.Unlock()
 	if err := ingest(); err != nil {
@@ -233,7 +236,7 @@ func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.C
 			e := *completion.ExitCode
 			c.exitCode = &e
 		}
-		d.enqueue(c)
+		d.enqueue(ctx, c)
 	}
 	return nil
 }
@@ -248,20 +251,20 @@ func (d *CompletionDownlink) Accept(ingest func() error, completion *lifecycle.C
 // the lane. A failed send is retried, and an attempt that timed out may have
 // landed, so every attempt carries the same identity and the helper seals
 // one interval per entry rather than one per delivery (nocx-2v80t.3.28).
-func (d *CompletionDownlink) ObserveEnvironmentEntry(entry string) {
-	d.enqueue(pendingCompletion{entered: true, entry: entry})
+func (d *CompletionDownlink) ObserveEnvironmentEntry(ctx context.Context, entry string) {
+	d.enqueue(ctx, pendingCompletion{entered: true, entry: entry})
 }
 
 // enqueue puts one accepted fact at the back of the queue and wakes the
 // worker. See maxPendingCompletions for what a full queue does.
-func (d *CompletionDownlink) enqueue(c pendingCompletion) {
+func (d *CompletionDownlink) enqueue(ctx context.Context, c pendingCompletion) {
 	d.mu.Lock()
 	for {
 		// THE STOP. A session that has ended has no runtime left to tell,
 		// and nothing is put on a wire the session's end has condemned.
 		if err := d.ctx.Err(); err != nil {
 			d.mu.Unlock()
-			d.lost(c, err)
+			d.lost(ctx, c, err)
 			return
 		}
 		if len(d.pending) < maxPendingCompletions {
@@ -269,7 +272,7 @@ func (d *CompletionDownlink) enqueue(c pendingCompletion) {
 		}
 		if !d.bound {
 			d.mu.Unlock()
-			d.lost(c, errNeverBound)
+			d.lost(ctx, c, errNeverBound)
 			return
 		}
 		d.space.Wait()
@@ -302,19 +305,25 @@ func (d *CompletionDownlink) run() {
 			d.space.Broadcast()
 			d.mu.Unlock()
 			for _, c := range abandoned {
-				d.lost(c, err)
+				d.lost(context.WithoutCancel(d.ctx), c, err)
 			}
 			return
 		}
 		head := d.pending[0]
 		d.mu.Unlock()
 
-		d.deliver(head)
+		cause := d.deliver(head)
 
 		d.mu.Lock()
 		d.pending = d.pending[1:]
 		d.space.Broadcast()
 		d.mu.Unlock()
+		// Reported only once the queue has made room: the report settles a
+		// block in the store, and an Accept waiting for room may be inside a
+		// lifecycle frame that holds the store until it returns (ADR-0077).
+		if cause != nil {
+			d.lost(context.WithoutCancel(d.ctx), head, cause)
+		}
 	}
 }
 
@@ -329,11 +338,11 @@ func (d *CompletionDownlink) run() {
 // may BEGIN only while the session's context is live, and one already on
 // the wire when the session ends finishes there — its own context ends with
 // the session's, which is as far as a write already made can be recalled.
-func (d *CompletionDownlink) deliver(c pendingCompletion) {
+// deliver answers nil once the fact landed, or the cause it was lost to.
+func (d *CompletionDownlink) deliver(c pendingCompletion) error {
 	for attempt := 1; ; attempt++ {
 		if err := d.ctx.Err(); err != nil {
-			d.lost(c, err)
-			return
+			return err
 		}
 		err := d.sendOnce(c)
 		if err == nil {
@@ -341,17 +350,15 @@ func (d *CompletionDownlink) deliver(c pendingCompletion) {
 				log.From(d.ctx).Info("helper: the "+c.kind()+" the kernel accepted reached the helper session on a retry",
 					"attempt", attempt)
 			}
-			return
+			return nil
 		}
 		if !retryable(err) || d.ctx.Err() != nil {
-			d.lost(c, err)
-			return
+			return err
 		}
 		log.From(d.ctx).Warn("helper: delivering the "+c.kind()+" the kernel accepted failed; retrying",
 			"attempt", attempt, "err", err)
 		if waitErr := d.retryWait(d.ctx, attempt); waitErr != nil {
-			d.lost(c, fmt.Errorf("%w; the session ended before the retry: %w", err, waitErr))
-			return
+			return fmt.Errorf("%w; the session ended before the retry: %w", err, waitErr)
 		}
 	}
 }
@@ -428,14 +435,14 @@ func waitToRetry(ctx context.Context, attempt int) error {
 // boundary. The log line — with the cause chain intact — is how an operator
 // learns of it, and onLost is how the pane does: the block the boundary
 // would have closed is settled as incomplete (nocx-2v80t.3.29).
-func (d *CompletionDownlink) lost(c pendingCompletion, cause error) {
+func (d *CompletionDownlink) lost(ctx context.Context, c pendingCompletion, cause error) {
 	log.From(d.ctx).Warn("helper: the "+c.kind()+" the kernel accepted did not reach the helper session",
 		"err", fmt.Errorf("%s not delivered: %w", c.kind(), cause))
 	d.mu.Lock()
 	bound, session := d.bound, d.entry.Session
 	d.mu.Unlock()
 	if bound && d.onLost != nil {
-		d.onLost(session, c.fence)
+		d.onLost(ctx, session, c.fence)
 	}
 }
 
@@ -474,7 +481,7 @@ type CompletionObservingKernel struct {
 // (CompletionDownlink.Accept). *CompletionDownlink is the one production
 // implementation.
 type CompletionObserver interface {
-	Accept(ingest func() error, completion *lifecycle.Complete) error
+	Accept(ctx context.Context, ingest func() error, completion *lifecycle.Complete) error
 }
 
 // CompletionObservingAdoptingKernel is the adopting form of the observing
@@ -526,10 +533,10 @@ func NewCompletionObservingKernel(k lifecyclechannel.Kernel, d CompletionObserve
 // EVERY envelope goes through the observer's Accept, not only completions:
 // an environment entry is observed from inside the Ingest of whatever frame
 // grew the stack, and it has to take its place in the same order.
-func (k *CompletionObservingKernel) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+func (k *CompletionObservingKernel) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
 	var completion *lifecycle.Complete
 	if env.Event.Kind == lifecycle.KindComplete {
 		completion = env.Event.Complete
 	}
-	return k.downlink.Accept(func() error { return k.Kernel.Ingest(t, env) }, completion)
+	return k.downlink.Accept(ctx, func() error { return k.Kernel.Ingest(ctx, t, env) }, completion)
 }

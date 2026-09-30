@@ -11,6 +11,7 @@ package transport
 // "whichever block is current" — each block is settled by its own fence.
 
 import (
+	"context"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -335,7 +336,7 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			// lock hold that extracts it (nocx-2v80t.3.51).
 			e.ws.blockStream.beginFlushLocked(sid, pending)
 			e.ws.blockStream.mu.Unlock()
-			e.ws.blockStream.flushPendingRows(e.ws, sid, block, pending, nil)
+			e.ws.blockStream.flushPendingRows(context.Background(), e.ws, sid, block, pending, nil)
 			if len(closing) == len(small) {
 				assertSealedAs(t, db, a, nil)
 			} else {
@@ -353,7 +354,7 @@ func TestEveryEndQueueCountsAgainstTheCoordinatorsBuffer(t *testing.T) {
 			e.ws.blockStream.beyond[sid] = []pendingRows{{from: 1, rows: big}}
 			e.ws.blockStream.mu.Unlock()
 			fenceSecond := lifecycleFence(0x75)
-			e.ws.blockStream.publishFence(e.ws, sid, hex.EncodeToString(fenceSecond[:]), second)
+			e.ws.blockStream.publishFence(context.Background(), e.ws, sid, hex.EncodeToString(fenceSecond[:]), second)
 			e.ws.BlockIntervalEnded(sid, fenceSecond, 2, closing, false)
 			assertHeldWithin(t, e, sid, bound)
 			e.ws.blockStream.mu.Lock()

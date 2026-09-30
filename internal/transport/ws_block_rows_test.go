@@ -780,7 +780,7 @@ func TestBlockRowsArrived_BeforeLedgerBindIsHeldUntilRetry(t *testing.T) {
 	const command = "printf before-bind"
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
 		lifecycleSubmitParams(string(h.Domain), command), 42))
-	e.ws.blockStream.openAttemptFor(e.ws, session.ID(sid), got.ID)
+	e.ws.blockStream.openAttemptFor(context.Background(), e.ws, session.ID(sid), got.ID)
 	e.ws.blockStream.mu.Lock()
 	current := e.ws.blockStream.current[session.ID(sid)]
 	waiting := e.ws.blockStream.waiting[session.ID(sid)]
@@ -829,7 +829,7 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	e.ws.blockStream.flushing[session.ID(sid)] = true
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.closeBlockRows(session.ID(sid), attempt, from+1, []emulator.Row{aStreamRow("closing")}, "deferred-close", false)
+	e.ws.closeBlockRows(context.Background(), session.ID(sid), attempt, from+1, []emulator.Row{aStreamRow("closing")}, "deferred-close", false)
 	e.ws.blockStream.mu.Lock()
 	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
 	stillOpen := e.ws.blockStream.open[session.ID(sid)][attempt] != nil
@@ -845,7 +845,7 @@ func TestBlockRowsCloseWaitsForDeferredRows(t *testing.T) {
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
 
-	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
+	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
 	kept := streamRows(t, db, attempt)
 	if len(kept) != 3 || kept[0].Text != "seed" || kept[1].Text != "deferred" || kept[2].Text != "closing" {
 		t.Fatalf("flush-before-close rows = %+v, want seed, deferred, closing", kept)
@@ -895,7 +895,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 		t.Fatal("first block was not open")
 	}
 
-	e.ws.closeBlockRows(session.ID(sid), second, 2, []emulator.Row{aStreamRow("second-final")}, "second-close", false)
+	e.ws.closeBlockRows(context.Background(), session.ID(sid), second, 2, []emulator.Row{aStreamRow("second-final")}, "second-close", false)
 	e.ws.blockStream.mu.Lock()
 	parked := len(e.ws.blockStream.pendingCloses[session.ID(sid)])
 	e.ws.blockStream.mu.Unlock()
@@ -909,7 +909,7 @@ func TestBlockRowsCloseKeepsTheAttemptThatEndedDuringAFlush(t *testing.T) {
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
-	e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), firstBlock, pending, nil)
+	e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), firstBlock, pending, nil)
 
 	e.ws.BlockIntervalEnded(session.ID(sid), firstFence, 2, []emulator.Row{aStreamRow("first-final")}, false)
 	assertBlockSealed(t, db, first)
@@ -983,7 +983,7 @@ func TestFlushingBatchCountsAgainstTheBufferBound(t *testing.T) {
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), inFlight)
 	e.ws.blockStream.mu.Unlock()
-	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, inFlight, nil)
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, inFlight, nil)
 	select {
 	case <-store.entered:
 	case <-time.After(5 * time.Second):
@@ -1074,7 +1074,7 @@ func TestFlushingBatchReleasesTheBudgetOnceItLands(t *testing.T) {
 	// that extracts it (nocx-2v80t.3.51).
 	e.ws.blockStream.beginFlushLocked(session.ID(sid), pending)
 	e.ws.blockStream.mu.Unlock()
-	go e.ws.blockStream.flushPendingRows(e.ws, session.ID(sid), block, pending, nil)
+	go e.ws.blockStream.flushPendingRows(context.Background(), e.ws, session.ID(sid), block, pending, nil)
 	select {
 	case <-store.entered:
 	case <-time.After(5 * time.Second):
@@ -1904,7 +1904,7 @@ func TestBlockClosed_EndsWithoutACompletionAreSaid(t *testing.T) {
 	t.Run("an attempt gone unknown whose block never opened", func(t *testing.T) {
 		e, _, _, _, sid, _ := newLifecycleLedgerEnv(t, true)
 		e.ws.AttachBlockRows(session.ID(sid))
-		e.ws.blockStream.abandonAttempt(e.ws, session.ID(sid), "att-never-opened")
+		e.ws.blockStream.abandonAttempt(context.Background(), e.ws, session.ID(sid), "att-never-opened")
 
 		got := awaitBlockClosed(t, e)
 		if got.EntryID != "att-never-opened" || got.Kept {

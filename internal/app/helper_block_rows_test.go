@@ -60,7 +60,7 @@ func (f *fakeSink) BlockIntervalEnded(_ session.ID, nonce [32]byte, endRow uint6
 	f.ends = append(f.ends, client.IntervalEnd{Nonce: sessionruntime.FenceNonce(nonce), EndRow: endRow, Closing: closing, NoFence: noFence})
 }
 
-func (f *fakeSink) BlockBoundaryLost(sid session.ID, nonce [32]byte) {
+func (f *fakeSink) BlockBoundaryLost(_ context.Context, sid session.ID, nonce [32]byte) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.lost = append(f.lost, lostBoundary{sid: sid, nonce: nonce})
@@ -262,7 +262,7 @@ func TestEndsReachTheTransportAndStopDetaches(t *testing.T) {
 
 // A nil sink or attachment wires nothing and stop is safe.
 func TestANilSinkWiresNothing(t *testing.T) {
-	stop := bindBlockRows(context.Background(), nil, "s1", nil)
+	stop := bindHeldBlockRows(context.Background(), nil, "s1", nil, nil)
 	stop()
 }
 

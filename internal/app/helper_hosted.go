@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	helperclient "github.com/shady2k/nocx/internal/helper/client"
@@ -83,7 +84,13 @@ type hostedSpawn struct {
 	// PTY. Nil wires nothing, the same shape blockRows and publishScreen
 	// already have.
 	environmentEntries *environmentEntryRegistry
-	log                *slog.Logger
+	// cursors keeps the pane's lifecycle cursor (lifecycle_cursor.go,
+	// ADR-0077) with its binding, for the coordinator that takes the session
+	// back. Nil keeps nothing.
+	cursors lifecycleCursorStore
+	// stopping is the coordinator's stopping signal. Nil never stops.
+	stopping *atomic.Bool
+	log      *slog.Logger
 }
 
 // hostedSpawnResult is what the three acts produced, as facts rather than as a
@@ -176,6 +183,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// paneLife is that delivery context: the pane's own lifetime, which the
 	// lane's registration below is tied to as well (nocx-2v80t.3.32).
 	var paneLife context.Context
+	// cursor is the leg's applied cursor (ADR-0077): built with the adapter
+	// it is an option of, bound to the session once the helper names it.
+	var cursor *lifecycleCursor
 	if h.lifecycle != nil {
 		// THE DELIVERY CONTEXT IS THE HOSTED SESSION'S LIFETIME, not the open
 		// request's. The request context is cancelled the moment the
@@ -195,7 +205,11 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		driveKernel := helperclient.NewCompletionObservingKernel(h.lifecycle, downlink)
 
 		coordinatorConn, peerConn := net.Pipe()
-		opts := []lifecyclechannel.Option{lifecyclechannel.WithLossReporter(h.loss)}
+		cursor = newLifecycleCursor(ctx, h.cursors, h.stopping)
+		opts := []lifecyclechannel.Option{
+			lifecyclechannel.WithLossReporter(h.loss),
+			lifecyclechannel.WithFrameScope(cursor.applyFrame),
+		}
 		if h.helloTimeout > 0 {
 			opts = append(opts, lifecyclechannel.WithHelloTimeout(h.helloTimeout))
 		}
@@ -253,6 +267,9 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		downlink.Bind(entry.HostSessionID)
 	}
 
+	// The rows plane is held from the first frame, for the reason the
+	// re-adopt's is (heldRows): the stream is bound below.
+	holdOpt, held := holdRowsBeforeAttach(h.blockRows)
 	attached, err := h.client.Attach(ctx, proto.AttachParams{
 		Subscriber: subscriber,
 		Session: proto.HostSessionID{
@@ -261,11 +278,14 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		},
 		Offset: proto.StreamOffset(entry.Window.Base), Fresh: true,
 		LifecycleOffset: 0, LifecycleFresh: true, RequestWrite: true,
-	})
+	}, holdOpt)
 	if err != nil {
 		abortLifecycleNow()
 		_ = h.client.CloseSession(ctx, entry.HostSessionID)
 		return hostedSpawnResult{}, err
+	}
+	if cursor != nil {
+		cursor.bind(entry.HostSessionID.Session, attached.LifecycleIngested())
 	}
 
 	// THE HELPER'S OWN KEEPALIVE PROBER, RELAYED (nocx-y6fh7 item 6). A local
@@ -306,7 +326,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 	// THE STREAMED BLOCK OUTPUT (nocx-2v80t.3.7): registered BEFORE the
 	// adopt, like the screen drain, so no row the runtime streams from its
 	// first output is dropped at a door nobody opened yet.
-	stopBlockRows := bindBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached)
+	stopBlockRows := bindHeldBlockRows(ctx, h.blockRows, session.ID(entry.HostSessionID.Session), attached, held)
 
 	sess, err := h.registry.Adopt(ctx, cfg, session.ID(entry.HostSessionID.Session), attached)
 	if err != nil {
@@ -339,7 +359,7 @@ func (h hostedSpawn) run(ctx context.Context, cfg session.Config, spawn spawnFun
 		out.StartLifecycle = func() {
 			startOnce.Do(func() {
 				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
-					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle())
+					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle(), cursor, attached)
 			})
 		}
 		var abortOnce sync.Once

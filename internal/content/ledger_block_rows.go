@@ -88,14 +88,25 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 		return "", nil
 	}
 	opened, openedExec := "", int64(-1) // the execution the open resolved to; probe context (nocx-zg3k3.5.3 round 7)
+	// answer settles the artifact the open resolved to. A lifecycle frame
+	// replays this write into a fresh transaction when its first one failed
+	// (lifecycle_frame.go), and its caller already holds the first answer:
+	// a different artifact is not the block the caller installed.
+	answer := func(id string) error {
+		if opened != "" && id != opened {
+			return ErrFrameReplayDiverged
+		}
+		opened = id
+		return nil
+	}
 	err := s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE for the reason Submit and CaptureOutput state:
 		// the write lock is taken at BEGIN rather than at the first write.
-		tx, txErr := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, txErr := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if txErr != nil {
 			return txErr
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var sensitivity string
 		if err := tx.QueryRowContext(ctx,
@@ -146,8 +157,10 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 				return fmt.Errorf("content: block rows: artifact %s belongs to entry %s: %w",
 					in.ArtifactID, heldEntry, ErrIDConflict)
 			}
-			opened = heldID
-			return tx.Commit()
+			if err := answer(heldID); err != nil {
+				return err
+			}
+			return txEnd.commit()
 		case !errors.Is(byIDErr, sql.ErrNoRows):
 			return byIDErr
 		}
@@ -171,13 +184,17 @@ func (s *sqliteContent) OpenBlockOutput(ctx context.Context, in OpenBlockOutput)
 			}); insertErr != nil {
 				return insertErr
 			}
-			opened = in.ArtifactID
+			if err := answer(in.ArtifactID); err != nil {
+				return err
+			}
 		case lookupErr != nil:
 			return lookupErr
 		default:
-			opened = existingID
+			if err := answer(existingID); err != nil {
+				return err
+			}
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 	// Probe (nocx-zg3k3.5.3 round 7): which id the caller asked for and
 	// which id the store answered — the per-execution idempotency reuse is
@@ -209,11 +226,11 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 	capBytes := int64(s.policy.OutputCapBytes())
 	return s.run(ctx, func(ctx context.Context) error {
 		// BEGIN IMMEDIATE — CaptureOutput's reason, again.
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		var known int
 		if knownErr := tx.QueryRowContext(ctx,
@@ -294,7 +311,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 			if err := evictBlockRowsToCap(ctx, tx, in.ArtifactID, capBytes); err != nil {
 				return err
 			}
-			return tx.Commit()
+			return txEnd.commit()
 		}
 
 		// The block's stored floor is its FIRST delivery's FromRow —
@@ -347,7 +364,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 				state.payload.json(), in.ArtifactID); err != nil {
 				return err
 			}
-			return tx.Commit()
+			return txEnd.commit()
 		}
 
 		// Encode, then cut into chunk rows at line boundaries — every line
@@ -420,7 +437,7 @@ func (s *sqliteContent) AppendBlockRows(ctx context.Context, in AppendBlockRows)
 		if err := evictBlockRowsToCap(ctx, tx, in.ArtifactID, capBytes); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 }
 
@@ -430,11 +447,11 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 	}
 	var summary BlockRowsSummary
 	err := s.run(ctx, func(ctx context.Context) error {
-		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		tx, txEnd, err := s.beginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 		if err != nil {
 			return err
 		}
-		defer func() { _ = tx.Rollback() }()
+		defer txEnd.rollback()
 
 		state, err := blockRowsForClose(ctx, tx, in)
 		if err != nil {
@@ -442,7 +459,7 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 		}
 		if state.sealed {
 			summary = state.summary
-			return tx.Commit()
+			return txEnd.commit()
 		}
 
 		// The cap's count is DERIVED from the chunks that are actually
@@ -479,7 +496,7 @@ func (s *sqliteContent) CloseBlockRows(ctx context.Context, in CloseBlockRows) (
 			string(ArtifactSealed), truncated, final.json(), in.ArtifactID); err != nil {
 			return err
 		}
-		return tx.Commit()
+		return txEnd.commit()
 	})
 	return summary, err
 }
@@ -498,7 +515,7 @@ func (s *sqliteContent) OpenBlockRowsForSession(ctx context.Context, sessionID s
 	var out OpenBlockRowsEntry
 	err := s.run(ctx, func(ctx context.Context) error {
 		var entryID, artifactID, payload string
-		scanErr := s.db.QueryRowContext(ctx,
+		scanErr := s.conn(ctx).QueryRowContext(ctx,
 			`SELECT a.entry_id, a.id, a.payload
 			   FROM artifacts a
 			   JOIN entries e ON e.id = a.entry_id

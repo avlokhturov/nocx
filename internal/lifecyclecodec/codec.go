@@ -95,6 +95,7 @@ type Decoder struct {
 	cfg          Config
 	gap          GapSink
 	pending      []byte // bytes already read from the stream, not yet consumed
+	read         uint64 // every byte ever read from the stream, pending included
 	inScan       bool
 	regionBytes  int
 	regionFrames int
@@ -104,6 +105,15 @@ type Decoder struct {
 // protocol defaults; gap, when non-nil, receives every skipped region.
 func NewDecoder(r io.Reader, cfg Config, gap GapSink) *Decoder {
 	return &Decoder{r: r, cfg: cfg.withDefaults(), gap: gap}
+}
+
+// Consumed answers how many bytes of the stream the decoder has taken: every
+// frame it returned and every garbage byte it skipped, and none it has only
+// buffered. Read straight after ReadFrame returns a frame, it is the stream
+// position that frame ends at — the coordinator's lifecycle cursor, once the
+// frame's effect is stored (ADR-0077).
+func (d *Decoder) Consumed() uint64 {
+	return d.read - uint64(len(d.pending))
 }
 
 // ReadFrame returns the next frame's envelope. It may scan past garbage to
@@ -243,6 +253,7 @@ func (d *Decoder) topUp(n int) error {
 		var chunk [4096]byte
 		m, err := d.r.Read(chunk[:])
 		d.pending = append(d.pending, chunk[:m]...)
+		d.read += uint64(m) //nolint:gosec // a read count, never negative
 		if err != nil {
 			if errors.Is(err, io.EOF) && m > 0 {
 				continue

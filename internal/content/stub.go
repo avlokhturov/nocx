@@ -271,6 +271,13 @@ func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) ApplyLifecycleFrame(ctx context.Context, sessionID string, offset uint64, apply func(ctx context.Context) error) error {
+	s.log.Info("content stub: LedgerRepository.ApplyLifecycleFrame", "id", sessionID, "offset", offset)
+	// The frame is the kernel's as well as the store's: it is applied, and
+	// with no store there is nothing to record and nothing that can fail.
+	return apply(ctx)
+}
+
 func (s *ledgerStub) DeleteSession(_ context.Context, id string) error {
 	s.log.Info("content stub: LedgerRepository.DeleteSession", "id", id)
 	return ErrNotImplemented
@@ -334,6 +341,11 @@ func (s *ledgerStub) EvictBodies(_ context.Context, req BodyEvictionRequest) (Bo
 func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
 	s.log.Info("content stub: LedgerRepository.Watermark")
 	return RetentionWatermark{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) EntryForShellAttempt(_ context.Context, paneID, shellAttempt string) (string, error) {
+	s.log.Info("content stub: LedgerRepository.EntryForShellAttempt", "pane", paneID, "shellAttempt", shellAttempt)
+	return "", nil
 }
 
 func (s *ledgerStub) StartExecution(_ context.Context, in StartExecution) (int64, error) {

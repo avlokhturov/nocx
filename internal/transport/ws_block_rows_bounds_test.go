@@ -456,7 +456,7 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 				nonce, nonceHex := fenceNonce(nonceIdx)
 				attempt = startsACommand(t, e, pub, lane, h, seqSubmit, command)
 				typeCommand(t, c, spawned.Entry.Session, command+"\r")
-				if err := pub.Ingest("T", lifecycleEnv(lane, h, seqSubmit+1,
+				if err := pub.Ingest(context.Background(), "T", lifecycleEnv(lane, h, seqSubmit+1,
 					lifecycleCompleteEvt(lifecycle.AttemptID(attempt), 0, nonce))); err != nil {
 					t.Fatalf("ingest the completion: %v", err)
 				}
@@ -468,7 +468,7 @@ func TestTheThreeOutputBoundsHoldTogetherAtRealGeometry(t *testing.T) {
 					t.Fatalf("lifecycle-complete: %v", err)
 				}
 				end = waitForEnds(t, rec, endIdx)
-				if err := pub.Ingest("T", lifecycleEnv(lane, h, seqSubmit+2,
+				if err := pub.Ingest(context.Background(), "T", lifecycleEnv(lane, h, seqSubmit+2,
 					lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}})); err != nil {
 					t.Fatalf("ingest the prompt ready: %v", err)
 				}

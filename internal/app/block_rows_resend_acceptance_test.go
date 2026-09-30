@@ -315,10 +315,13 @@ func TestABlockEndsWithTheWholeOutputAfterACoordinatorRestart(t *testing.T) {
 	}
 }
 
-// THE PAIRED HALF, end to end over the real helper: the shell EXITS while
-// the coordinator is away. On return the block is settled — by the
-// helper's own session-end report (ADR-0074 decision 3, ADR-0076) — not
-// left running: the entry is terminal and the block's artifact is sealed.
+// THE PAIRED HALF, end to end over the real helper: the command ENDS and the
+// shell EXITS while the coordinator is away. On return the block is settled
+// with the command's own status — the end the shell spoke while nobody was
+// attached, delivered to the returning coordinator from the cursor the first
+// one stored (ADR-0076 decision 4, ADR-0077) — not left running, and not
+// flattened to the "unknown" the helper's session-end report alone would
+// give it: the entry reads success and the block's artifact is sealed.
 func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *testing.T) {
 	src := realHelperArtifacts(t)
 	home := storagetest.IsolateWithHome(t)
@@ -386,11 +389,12 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	})
 
 	// The command opens its block, prints its first row, and holds on the
-	// release file; releasing it makes the shell finish the command and
-	// EXIT — while the coordinator is away, in the second half below.
+	// release file; releasing it lets the command finish, and the `exit`
+	// typed ahead behind it then ends the shell — both while the
+	// coordinator is away, in the second half below.
 	cmd := "echo started; while [ ! -f " + release + " ]; do sleep 0.1; done; " +
-		"echo bye > " + done + "; exit"
-	if _, writeErr := p.sess.Write([]byte(cmd + "\n")); writeErr != nil {
+		"echo bye > " + done
+	if _, writeErr := p.sess.Write([]byte(cmd + "\nexit\n")); writeErr != nil {
 		t.Fatalf("writing the command into the pane: %v", writeErr)
 	}
 	p.await(t, regexp.MustCompile("started"))
@@ -493,9 +497,10 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 	defer func() { _ = conn2.Close() }()
 
 	// On return the block is settled, not left running: the entry is
-	// terminal — the shell exited with no completion fact, so the honest
-	// end is the helper's own session-end report — and the block's
-	// artifact is sealed rather than open.
+	// terminal with the status the command's own completion carried — the
+	// frame the shell spoke while nobody was attached, which only the
+	// returning coordinator's resume from its stored cursor can deliver —
+	// and the block's artifact is sealed rather than open.
 	deadline = time.Now().Add(30 * time.Second)
 	var itemID, itemStatus string
 	for {
@@ -523,6 +528,9 @@ func TestAShellThatExitsWhileTheCoordinatorIsAwaySettlesItsBlockOnReturn(t *test
 			t.Fatalf("the block was left running after the shell's exit: entries = %+v", q.Entries)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+	if itemStatus != "success" {
+		t.Fatalf("the block settled %q, want success: the command completed while the coordinator was away, and its completion never reached the one that came back", itemStatus)
 	}
 	got := callAppWS(t, conn2, "ledger.get", map[string]any{"id": itemID}, 8)
 	if got.Error != nil {

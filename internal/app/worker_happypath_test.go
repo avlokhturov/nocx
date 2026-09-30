@@ -543,7 +543,7 @@ func (happyEndpointOwner) OwnerUID(string) (uint32, error) {
 // as the Emitter the publisher requires.
 type happyLifecycleEmitter struct{}
 
-func (happyLifecycleEmitter) PublishLifecycle(lifecyclepub.Fact) {}
+func (happyLifecycleEmitter) PublishLifecycle(context.Context, lifecyclepub.Fact) {}
 
 // happyStandOption tunes the stand for a test that needs something other than
 // the happy path's own values — a logger it can read back, or a deadline it can

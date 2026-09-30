@@ -713,8 +713,17 @@ func (k *Kernel) applyComplete(d *Domain, ls *laneState, env Envelope) ([]Outbou
 	}
 	att := k.openAttemptFor(d.ID)
 	if c.AttemptID != nil {
-		named, ok := k.attempts[*c.AttemptID]
-		if !ok {
+		// The id the shell names is its own: the attempt's key for a
+		// shell-originated command, the alias the start recorded for one
+		// submitted from the app. Resolved exactly as a snapshot's
+		// last_completed is (resolveAttempt), so both shipped shells can
+		// name every completion with the id they minted at start — the
+		// block's identity across coordinators (nocx-zg3k3.5.11).
+		// A found id of another domain is refused below
+		// (ErrAttemptDomainMismatch), so resolveAttempt's ownership bool is
+		// not needed here.
+		named, _ := k.resolveAttempt(d, *c.AttemptID)
+		if named == nil {
 			// A completion naming an attempt this kernel never saw is the
 			// retained window's replay of a command that ran for the
 			// coordinator BEFORE this one: the shell is the only witness
@@ -1442,8 +1451,10 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // place and which already owns the session's keyboard and its whole output
 // stream. The one new exposure adoption WOULD create is replay of the
 // helper's retained lifecycle window, and it is closed where the window is
-// read rather than here: the re-attachment resumes at the window's head, so
-// no frame the previous coordinator already consumed is ever re-delivered.
+// read rather than here: the re-attachment resumes at the cursor the
+// previous coordinator stored of the last frame it applied (ADR-0077,
+// superseding ADR-0024's resume at the head), so no frame it already
+// applied is ever re-delivered.
 //
 // The domain is installed Established and the lane PromptReady — the state
 // the shell is actually in, since it has its accept and speaks only from a

@@ -763,3 +763,33 @@ func TestNoOutboundFrameCarriesBearerMaterial(t *testing.T) {
 type captureKernelPort struct{}
 
 func (*captureKernelPort) Send(lifecycle.Envelope) error { return nil }
+
+// TestConsumedNamesTheStreamPositionEachFrameEndsAt proves the decoder says
+// where in its stream the frame it just returned ended (ADR-0077): the
+// coordinator's lifecycle cursor is that position, translated to the helper's
+// stream, so it must count every byte the decoder has taken — the frame's own
+// and any garbage skipped before it — and none it has only buffered. The
+// decoder reads the whole buffer in its first top-up, so a count of what was
+// READ rather than what was CONSUMED names the stream's end after frame one.
+func TestConsumedNamesTheStreamPositionEachFrameEndsAt(t *testing.T) {
+	var buf bytes.Buffer
+	first, _ := Encode(&buf, env(lifecycle.KindHello, helloEvt("bash"), 1))
+	garbage := "not a frame"
+	buf.WriteString(garbage)
+	second, _ := Encode(&buf, env(lifecycle.KindPromptReady, promptReadyEvt(), 2))
+	third, _ := Encode(&buf, env(lifecycle.KindPromptReady, promptReadyEvt(), 3))
+
+	dec := NewDecoder(&buf, Config{}, nil)
+	if dec.Consumed() != 0 {
+		t.Fatalf("Consumed before any frame = %d, want 0", dec.Consumed())
+	}
+	wants := []int{first, first + len(garbage) + second, first + len(garbage) + second + third}
+	for i, want := range wants {
+		if _, err := dec.ReadFrame(); err != nil {
+			t.Fatalf("frame %d: %v", i, err)
+		}
+		if got := dec.Consumed(); got != uint64(want) { //nolint:gosec // a test byte count
+			t.Fatalf("after frame %d Consumed = %d, want %d — the position the frame ends at", i, got, want)
+		}
+	}
+}
