@@ -648,7 +648,14 @@ func (s *WSServer) AttachBlockRows(sid session.ID) {
 	// The helper's end fact may have arrived before this lane registered
 	// (the shell exited while the coordinator was away): the adopted
 	// domain's recorded terminal state settles the session now (Round 10).
-	// Idempotent — HelperSessionEnded seals only open blocks.
+	// Idempotent — HelperSessionEnded seals only open blocks. Behind an
+	// armed end hold (nocx-zg3k3.5.11 Round 4) the settle waits for the
+	// replayed window instead: consulting now would read a kernel that has
+	// ingested nothing yet, and the exit's own post-hold settle would race
+	// the teardown's unregistering.
+	if s.settleWhenEndHoldLifts(sid) {
+		return
+	}
 	if s.adoptedDomainTerminal(sid) {
 		s.HelperSessionEnded(sid)
 	}
@@ -661,7 +668,11 @@ func (s *WSServer) AttachBlockRowsWithConfirmation(sid session.ID, confirm func(
 	found := s.adoptableOpenBlock(sid)
 	s.blockStream.attach(sid, confirm, s.blockRowsBuffer())
 	s.blockStream.adoptOpenBlock(sid, found)
-	// The same boundary consult as AttachBlockRows (Round 10).
+	// The same boundary consult as AttachBlockRows (Round 10), and the same
+	// end-hold deferral (nocx-zg3k3.5.11 Round 4).
+	if s.settleWhenEndHoldLifts(sid) {
+		return
+	}
 	if s.adoptedDomainTerminal(sid) {
 		s.HelperSessionEnded(sid)
 	}
