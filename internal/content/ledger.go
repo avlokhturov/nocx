@@ -398,6 +398,14 @@ type Session struct {
 	// a helper-hosted session's channel is not closed by an uninstall
 	// whether it was opened or taken back.
 	Fingerprint string
+	// LifecycleApplied is the coordinator's own lifecycle cursor (ADR-0077):
+	// the helper's lifecycle stream offset one past the last frame whose
+	// effect this coordinator stored. A binding records it at 0 — the leg is
+	// attached at the stream's start and nothing is applied yet — and
+	// RecordLifecycleApplied moves it forward. Nil records none, and a
+	// re-adopt reads that as "this coordinator holds no record of what it
+	// applied", never as offset 0.
+	LifecycleApplied *uint64
 }
 
 // Environment is the durable identity of where work happens (design §3.1,
@@ -1876,6 +1884,13 @@ type LedgerRepository interface {
 	// CreateSession records a restore key under a workspace. The workspace
 	// itself belongs to LayoutRepository (layout.go).
 	CreateSession(ctx context.Context, sess Session) error
+	// RecordLifecycleApplied moves the session's lifecycle cursor forward to
+	// offset (ADR-0077): the stream offset one past the last lifecycle frame
+	// whose effect is stored. It is called once that frame's effect has been
+	// written and before the next frame is read, and it never moves the
+	// cursor back — a late write for an offset already passed changes
+	// nothing. A session with no binding row records nothing.
+	RecordLifecycleApplied(ctx context.Context, sessionID string, offset uint64) error
 	// DeleteSession removes a restore key; entries keep their rows and
 	// lose the reference (ON DELETE SET NULL — an entry outlives its
 	// session, ADR-0019 §5).

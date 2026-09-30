@@ -271,6 +271,11 @@ func (s *ledgerStub) CreateSession(_ context.Context, sess Session) error {
 	return ErrNotImplemented
 }
 
+func (s *ledgerStub) RecordLifecycleApplied(_ context.Context, sessionID string, offset uint64) error {
+	s.log.Info("content stub: LedgerRepository.RecordLifecycleApplied", "id", sessionID, "offset", offset)
+	return ErrNotImplemented
+}
+
 func (s *ledgerStub) DeleteSession(_ context.Context, id string) error {
 	s.log.Info("content stub: LedgerRepository.DeleteSession", "id", id)
 	return ErrNotImplemented

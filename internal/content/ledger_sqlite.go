@@ -50,14 +50,19 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 			Profile       string `json:"profile,omitempty"`
 			HelperCommand string `json:"helperCommand,omitempty"`
 			Fingerprint   string `json:"fingerprint,omitempty"`
+			// The coordinator's lifecycle cursor (ADR-0077), omitted when
+			// the binding records none — "no record" and "offset 0" are
+			// two states a re-adopt must tell apart.
+			LifecycleApplied *uint64 `json:"lifecycleApplied,omitempty"`
 		}{
-			Generation:    sess.Generation,
-			Host:          sess.Host,
-			Account:       sess.Account,
-			Pane:          sess.PaneID,
-			Profile:       sess.ProfileID,
-			HelperCommand: sess.HelperCommand,
-			Fingerprint:   sess.Fingerprint,
+			Generation:       sess.Generation,
+			Host:             sess.Host,
+			Account:          sess.Account,
+			Pane:             sess.PaneID,
+			Profile:          sess.ProfileID,
+			HelperCommand:    sess.HelperCommand,
+			Fingerprint:      sess.Fingerprint,
+			LifecycleApplied: sess.LifecycleApplied,
 		}
 		raw, err := json.Marshal(payload)
 		if err != nil {
@@ -91,6 +96,28 @@ func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 			// TEXT, so a []byte binds as a BLOB and the constraint refuses it.
 			sess.ID, sess.WorkspaceID, time.Now().UnixMilli(), string(raw))
 		return err
+	})
+}
+
+// RecordLifecycleApplied moves the binding's lifecycle cursor forward
+// (ADR-0077). The cursor lives in the binding's payload beside the route back
+// it completes — the same row a re-adopt reads — and the statement only ever
+// raises it: a write for an offset at or behind the stored one matches no row.
+// A binding that recorded no cursor at all is not given one here: the cursor
+// is born with the binding (CreateSession), and a row that lacks it is a
+// session whose lifecycle leg this coordinator never attached from the start.
+func (s *sqliteContent) RecordLifecycleApplied(ctx context.Context, sessionID string, offset uint64) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE sessions SET payload = json_set(payload, '$.lifecycleApplied', ?)
+			  WHERE id = ?
+			    AND json_type(payload, '$.lifecycleApplied') = 'integer'
+			    AND json_extract(payload, '$.lifecycleApplied') < ?`,
+			int64(offset), sessionID, int64(offset)) //nolint:gosec // a stream offset, far below 2^63
+		if err != nil {
+			return fmt.Errorf("content: record the lifecycle cursor: %w", err)
+		}
+		return nil
 	})
 }
 
