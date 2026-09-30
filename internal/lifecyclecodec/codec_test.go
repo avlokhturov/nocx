@@ -169,6 +169,39 @@ func TestTwoFramesAndCleanEOF(t *testing.T) {
 	}
 }
 
+// writeCounter records every Write it is handed, as a descriptor shared with
+// another writer would see them.
+type writeCounter struct{ writes [][]byte }
+
+func (w *writeCounter) Write(p []byte) (int, error) {
+	w.writes = append(w.writes, append([]byte(nil), p...))
+	return len(p), nil
+}
+
+// TestAFrameReachesItsWriterInOneWrite proves Encode hands its writer the
+// header and the body together. A lifecycle descriptor is shared — a nested
+// child holds a dup of its parent's, and the stillborn tests inject a frame
+// onto the socket the shell is still writing to — so a frame split across two
+// writes lets the other writer's frame land between its length and its body,
+// and the reader loses framing for good (nocx-zg3k3.5.12).
+func TestAFrameReachesItsWriterInOneWrite(t *testing.T) {
+	var w writeCounter
+	n, err := Encode(&w, env(lifecycle.KindHello, helloEvt("bash"), 1))
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if len(w.writes) != 1 {
+		t.Fatalf("one frame took %d writes; want 1", len(w.writes))
+	}
+	if len(w.writes[0]) != n {
+		t.Fatalf("the one write holds %d bytes; Encode reported %d", len(w.writes[0]), n)
+	}
+	dec := NewDecoder(bytes.NewReader(w.writes[0]), Config{}, nil)
+	if f, err := dec.ReadFrame(); err != nil || f.Event.Kind != lifecycle.KindHello {
+		t.Fatalf("the one write is not a whole frame: kind=%s err=%v", f.Event.Kind, err)
+	}
+}
+
 // TestOversizePrefixRejectedWithoutAllocating proves a length prefix above
 // max_frame is refused before any body buffer exists: the prefix here claims
 // 4 GiB, which an allocating decoder would try to allocate (and this test

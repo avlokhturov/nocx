@@ -609,16 +609,16 @@ func Encode(w io.Writer, env lifecycle.Envelope) (int, error) {
 	if len(body) > lifecycle.MaxFrameBytes {
 		return 0, ErrFrameTooLarge
 	}
-	var hdr [4]byte
+	// One Write for the whole frame: a lifecycle descriptor can have a second
+	// writer (a nested child holds a dup of its parent's), and a frame split
+	// across two writes lets the other writer's frame land between its length
+	// and its body, which costs the reader its framing for good.
+	frame := make([]byte, 4, 4+len(body))
 	// #nosec G115 -- len(body) is checked against MaxFrameBytes (64 KiB)
 	// above, far below the uint32 ceiling; the frame length is the JSON
 	// byte count by contract.
-	binary.BigEndian.PutUint32(hdr[:], uint32(len(body)))
-	if _, werr := w.Write(hdr[:]); werr != nil {
-		return 0, werr
-	}
-	n, err := w.Write(body)
-	return 4 + n, err
+	binary.BigEndian.PutUint32(frame, uint32(len(body)))
+	return w.Write(append(frame, body...))
 }
 
 func derefInt(p *int) int {
