@@ -658,8 +658,15 @@ func (p *Publisher) closeQuestion(asked lifecycle.Outbound, rid lifecycle.Reques
 	}
 }
 
+// shouldPublishStartedAttempt reports whether env is a start attaching to a
+// pending app attempt — the one transition the lane's fact cannot show, since
+// the lane is already running that attempt before and after. It holds for a
+// named start exactly as for an unnamed one: the shipped shells name every
+// start with their own id, which the kernel records as the app attempt's
+// alias, and excluding them left every command submitted from nocx's editor
+// with no execution and no block (nocx-zg3k3.5.11).
 func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
-	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil || env.Event.Start.AttemptID != nil {
+	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil {
 		return false
 	}
 	before, ok := p.derive(env.Lane)
