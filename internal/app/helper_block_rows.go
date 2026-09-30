@@ -252,15 +252,6 @@ func (h *heldRows) OnClearBoundary(f func()) {
 	h.clear = f
 }
 
-// bind binds the transport's stream to the held attachment — the re-bind and
-// the consumers, through the ordinary bridge — and then delivers what was
-// held, in arrival order. It answers the bridge's stop.
-func (h *heldRows) bind(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer) func() {
-	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
-	h.release()
-	return stop
-}
-
 // release delivers what was held, in arrival order, and lets every later
 // frame pass straight through.
 func (h *heldRows) release() {
@@ -286,15 +277,17 @@ func (h *heldRows) release() {
 	h.bound = true
 }
 
-// bindAfter binds the stream now — its re-bind of the store's open block
-// happens here — and keeps holding the rows plane until ready closes: a
+// bindAfter binds the transport's stream to the held attachment now — the
+// re-bind of the store's open block and the consumers, through the ordinary
+// bridge — answers the bridge's stop, and keeps holding the rows plane until ready closes: a
 // re-adopted pane's replayed lifecycle window applied (nocx-zg3k3.5.11). The
 // read-back the helper sends at the attach starts at the command's first row,
 // and the command's block may be opened only by a start frame that window
 // carries — one the coordinator that went away left to this one. Released
 // before that, the rows find no block, are dropped unconfirmed, and the
 // read-back is not sent twice. Everything arriving meanwhile is held behind
-// them, so the stream sees one order. A nil ready releases at once (bind).
+// them, so the stream sees one order. A nil ready releases at once: a fresh
+// open, with no window to replay.
 func (h *heldRows) bindAfter(ctx context.Context, sink blockRowsSink, sid session.ID, conf confirmer, ready <-chan struct{}) func() {
 	stop := bindBlockRowsTo(ctx, sink, sid, h, conf)
 	if ready == nil {

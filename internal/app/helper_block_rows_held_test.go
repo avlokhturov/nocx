@@ -66,7 +66,7 @@ func TestRowsArrivingBetweenTheAttachAndTheBindReachTheStreamInOrder(t *testing.
 	src.deliverEnd(client.IntervalEnd{Nonce: nonce, EndRow: 277, Closing: rowsN(23)})
 
 	conf := &gatedConfirmer{asked: make(chan uint64, 8), release: make(chan struct{})}
-	stop := held.bind(context.Background(), sink, "s1", conf)
+	stop := held.bindAfter(context.Background(), sink, "s1", conf, nil)
 	defer stop()
 	src.deliverClear()
 
