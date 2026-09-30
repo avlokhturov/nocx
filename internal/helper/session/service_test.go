@@ -1103,6 +1103,12 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// row index — scalars all, and no free-form []string, which is
 		// the rule this list exists to hold.
 		proto.OpConfirmRows: true,
+		// The live-history page (nocx-zg3k3.10.3): one page of the
+		// scrollback the session's emulator holds. Its params are a
+		// session handle, a nullable cursor and a row bound — scalars
+		// all, and no free-form []string, which is the rule this list
+		// exists to hold.
+		proto.OpHistoryPage: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

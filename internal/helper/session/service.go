@@ -508,6 +508,7 @@ func (s *Service) Ops() []string {
 		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
 		proto.OpAdoptLifecycle, proto.OpLifecycleComplete, proto.OpLifecycleEntered, proto.OpScreen, proto.OpScreenResend, proto.OpReplay,
 		proto.OpSnapshot, proto.OpTarget, proto.OpIntent, proto.OpIntentStatus, proto.OpAccessBump,
+		proto.OpHistoryPage,
 	}
 }
 
@@ -541,6 +542,8 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.ScreenResendParams{})
 	case proto.OpReplay:
 		return host.SchemaFor(proto.ReplayParams{})
+	case proto.OpHistoryPage:
+		return host.SchemaFor(proto.HistoryPageParams{})
 	case proto.OpSnapshot:
 		return host.SchemaFor(proto.SnapshotParams{})
 	case proto.OpTarget:
@@ -719,6 +722,12 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return s.replay(p)
+	case proto.OpHistoryPage:
+		var p proto.HistoryPageParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		return s.historyPage(p)
 	case proto.OpSnapshot:
 		var p proto.SnapshotParams
 		if err := decode(params, &p); err != nil {
