@@ -264,10 +264,11 @@ type AdoptingKernel interface {
 // Close, exactly as for a minted one.
 //
 // The carrier may be attached after this call; the decoder waits for bytes.
-// The caller must attach it at the HELPER's current lifecycle head and not at
-// the window's base: the helper retains the bytes the previous coordinator
-// already consumed, and replaying them into a domain whose capability is
-// unchanged would replay authenticated events.
+// The caller attaches it at the cursor the previous coordinator stored of
+// the last frame it applied (ADR-0077), never at the window's base: the
+// helper retains the bytes that coordinator already applied, and replaying
+// them into a domain whose capability is unchanged would replay
+// authenticated events.
 func NewAdoptedStream(logger log.Logger, k AdoptingKernel, conn io.ReadWriteCloser, adopt Launch, opts ...Option) (*Adapter, error) {
 	if conn == nil {
 		return nil, errors.New("lifecyclechannel: nil stream")
@@ -343,6 +344,13 @@ func (l Launch) secrets() (lifecycle.Capability, lifecycle.FenceNonce, error) {
 		copy(recovery[:], rec)
 	}
 	return capability, recovery, nil
+}
+
+// Done closes when the adapter's pump has stopped: no frame will be applied
+// after it. A caller waiting for frames to be applied waits on this too, so a
+// leg that ended short of its target never holds the wait (ADR-0077).
+func (a *Adapter) Done() <-chan struct{} {
+	return a.pumpDone
 }
 
 // Lane returns the adapter's own lane — the addressing tuple it minted and

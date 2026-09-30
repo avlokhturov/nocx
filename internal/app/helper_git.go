@@ -566,9 +566,13 @@ type helperRegistry struct {
 	// (environment_entry.go, nocx-2v80t.3.21), the same one the local route
 	// uses. Nil wires nothing.
 	environmentEntries *environmentEntryRegistry
-	mu                 sync.Mutex
-	hosts              map[session.ID]*hostHelper
-	closing            map[string]struct{}
+	// lifecycleCursors keeps every pane's lifecycle cursor with its binding
+	// (lifecycle_cursor.go, ADR-0077): this route's opens write it, and the
+	// re-adopt pass reads the one the store carried over. Nil keeps nothing.
+	lifecycleCursors lifecycleCursorStore
+	mu               sync.Mutex
+	hosts            map[session.ID]*hostHelper
+	closing          map[string]struct{}
 	// farTools are the far-side tool sockets this registry opened, keyed by the
 	// session each belongs to (nocx-e2bws). They are held HERE rather than by
 	// the hostHelper because the event that ends them is a session's end and not
@@ -954,6 +958,8 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	// stopDownlink ends the delivery context; nil with the downlink. Its two
 	// ends are endLifecycleLeg's rollback and the pane's own end.
 	var stopDownlink context.CancelFunc
+	// cursor is the leg's applied cursor (lifecycle_cursor.go, ADR-0077).
+	var cursor *lifecycleCursor
 	if r.lifecycle != nil {
 		// THE DELIVERY CONTEXT IS THE PANE'S LIFETIME, not this request's:
 		// the request context dies with the renderer's socket while the PTY
@@ -971,9 +977,11 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		coordinatorConn, peerConn := net.Pipe()
 		var lifecycleErr error
 		// The caller's exchange, for the reason helper_hosted.go gives.
+		cursor = newLifecycleCursor(ctx, r.lifecycleCursors)
 		lifecycleAdapter, lifecycleErr = lifecyclechannel.NewStream(
 			log.NewSlogAdapter(r.log).WithContext(ctx), driveKernel, coordinatorConn,
 			lifecyclechannel.WithLossReporter(r.reportLifecycleLoss),
+			lifecyclechannel.WithFrameApplied(cursor.frameApplied),
 		)
 		if lifecycleErr != nil {
 			_ = peerConn.Close()
@@ -1077,6 +1085,9 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 	}
 	sid := session.ID(entry.HostSessionID.Session)
 	f.sid = sid
+	if cursor != nil {
+		cursor.bind(entry.HostSessionID.Session, attached.LifecycleIngested())
+	}
 	sess, err := r.registry.Adopt(ctx, cfg, sid, attached)
 	if err != nil {
 		_ = attached.Close()
@@ -1179,7 +1190,7 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 		startLifecycle = func() {
 			startOnce.Do(func() {
 				bridgeLifecycle(log.NewSlogAdapter(h.log).WithContext(ctx),
-					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle())
+					lifecycleAdapter.TransportID(), lifecyclePeer, attached.Lifecycle(), cursor, attached)
 			})
 		}
 		var abortOnce sync.Once
@@ -1241,7 +1252,25 @@ func (r *helperRegistry) openFarHelper(ctx context.Context, cfg session.Config, 
 // it. And each half says what it carried when it ends, with carried_nothing
 // stated as its own fact: a bridge that ran and moved nothing and a bridge
 // that never ran look identical in a byte count and must not read alike.
-func bridgeLifecycle(lg log.Logger, transport lifecycle.TransportID, peer net.Conn, carrier io.ReadWriteCloser) {
+//
+// IT ALSO FEEDS THE APPLIED CURSOR (ADR-0077). cursor, when not nil, is told
+// every stretch this bridge hands the adapter and where that stretch ends in
+// the helper's stream (offsets is the attachment's own ingest cursor) —
+// before the write, since the adapter can apply a frame from those bytes
+// before the write returns.
+//
+// AND IT NEVER DROPS WHAT THE SHELL SAID. The two directions used to end each
+// other: the moment the adapter-to-shell copy failed to write — which is
+// exactly what happens when the attachment is done because the shell has
+// exited — it closed the pipe the shell-to-adapter copy was still writing
+// into, and whatever the attachment still held, a replayed command end or
+// the domain's close, raced that close to the adapter (nocx-zg3k3.5.11: a
+// returned coordinator meets an exited shell with its last frames queued).
+// A write that fails toward the shell now ends only that direction; the other
+// drains what the attachment holds, and its own end closes both.
+func bridgeLifecycle(lg log.Logger, transport lifecycle.TransportID, peer net.Conn, carrier io.ReadWriteCloser,
+	cursor *lifecycleCursor, offsets lifecycleOffsets,
+) {
 	if lg == nil {
 		lg = log.NewSlogAdapter(nil)
 	}
@@ -1256,13 +1285,61 @@ func bridgeLifecycle(lg log.Logger, transport lifecycle.TransportID, peer net.Co
 		})
 	}
 	go func() {
-		n, err := io.Copy(carrier, countingFirst(lg, "the adapter's first bytes reached the shell", peer))
+		from := countingFirst(lg, "the adapter's first bytes reached the shell", peer)
+		buf := make([]byte, 32*1024)
+		var n int64
+		var err error
+		towardShellFailed := false
+		for {
+			m, rerr := from.Read(buf)
+			if m > 0 {
+				if _, werr := carrier.Write(buf[:m]); werr != nil {
+					err, towardShellFailed = werr, true
+					break
+				}
+				n += int64(m)
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
+					err = rerr
+				}
+				break
+			}
+		}
 		lg.Info("lifecycle bridge: the adapter's end closed",
 			"to_shell_bytes", n, "carried_nothing", n == 0, "error", err)
+		if towardShellFailed {
+			// The shell's side refuses writes; what it already said is
+			// still owed to the adapter, and the other direction's end
+			// closes both once it is delivered.
+			return
+		}
 		closeBoth()
 	}()
 	go func() {
-		n, err := io.Copy(peer, countingFirst(lg, "the shell's first bytes reached the adapter", carrier))
+		from := countingFirst(lg, "the shell's first bytes reached the adapter", carrier)
+		buf := make([]byte, 32*1024)
+		var n int64
+		var err error
+		for {
+			m, rerr := from.Read(buf)
+			if m > 0 {
+				if cursor != nil && offsets != nil {
+					cursor.relayed(m, offsets.LifecycleIngested())
+				}
+				if _, werr := peer.Write(buf[:m]); werr != nil {
+					err = werr
+					break
+				}
+				n += int64(m)
+			}
+			if rerr != nil {
+				if rerr != io.EOF {
+					err = rerr
+				}
+				break
+			}
+		}
 		lg.Info("lifecycle bridge: the shell's end closed",
 			"to_adapter_bytes", n, "carried_nothing", n == 0, "error", err)
 		closeBoth()

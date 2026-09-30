@@ -941,6 +941,49 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 	}
 }
 
+// LifecycleRangeLost settles what a lost stretch of the helper's lifecycle
+// stream could have settled (ADR-0077). A re-adopt asks for the stream from
+// the cursor this machine stored; when the helper's window no longer reaches
+// back that far it answers from its base instead, and every frame between —
+// possibly the end of the command the session's open block belongs to — is
+// gone. That block is not left running on the hope that its end was not in
+// the gap: it is sealed as a block whose boundary never arrived whole
+// (Incomplete, the store's 'gap' truncation — the same statement a lost
+// boundary makes, BlockBoundaryLost), and its entry closes unknown, the
+// verdict a kernel records for an attempt whose end it cannot know. The
+// helper's own word is what triggers it — its reset names the lost range —
+// never the coordinator's absence (ADR-0076 decision 2).
+//
+// It runs before the re-adopted stream re-binds the session, so there is no
+// in-memory block yet: the store's open block is the one to settle.
+func (s *WSServer) LifecycleRangeLost(sid session.ID) {
+	ctx := log.WithLogger(context.Background(), s.log)
+	store := s.blockStore()
+	if store == nil {
+		return
+	}
+	open, err := store.OpenBlockRowsForSession(ctx, string(sid))
+	if err != nil || open.EntryID == "" {
+		log.From(ctx).Info("lifecycle range lost: the session holds no open block to settle",
+			"session", sid, "error", err)
+		return
+	}
+	if _, sealErr := store.CloseBlockRows(ctx, content.CloseBlockRows{
+		EntryID: open.EntryID, ArtifactID: open.ArtifactID, Incomplete: true,
+	}); sealErr != nil {
+		log.From(ctx).Warn("lifecycle range lost: the open block could not be sealed",
+			"session", sid, "entry", open.EntryID, "artifact", open.ArtifactID, "error", sealErr)
+		return
+	}
+	log.From(ctx).Info("lifecycle range lost: the open block is sealed incomplete and its entry closes unknown",
+		"session", sid, "entry", open.EntryID, "artifact", open.ArtifactID)
+	s.syncLifecycleLedger(lifecyclepub.Fact{
+		Attempt: &lifecyclepub.Attempt{
+			ID: open.EntryID, State: lifecyclepub.AttemptUnknown, Origin: lifecyclepub.OriginShell,
+		},
+	})
+}
+
 // detach forgets the session and seals what it held, and answers the
 // block.closed each still-unended interval is owed: every open block, and
 // every completion whose end marker never arrived.

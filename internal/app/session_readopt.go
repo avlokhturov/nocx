@@ -614,6 +614,27 @@ func isLocalBinding(p content.PendingSession) bool {
 	return p.Generation != "" && p.HelperCommand == ""
 }
 
+// lifecycleResumePoint is where a re-adopt asks the helper's lifecycle stream
+// to resume, and whether the asker holds no lifecycle state of its own
+// (ADR-0077). The binding's stored cursor is the answer whenever there is one:
+// the offset one past the last frame the previous coordinator applied. A
+// binding with no cursor is a coordinator that kept no record of what it
+// applied, and the one resume that re-delivers nothing is the window's head —
+// ADR-0024's answer, which stands exactly where nothing better is known.
+func lifecycleResumePoint(p content.PendingSession, entry client.SessionEntry) (proto.StreamOffset, bool) {
+	if p.LifecycleApplied != nil {
+		return proto.StreamOffset(*p.LifecycleApplied), false
+	}
+	return proto.StreamOffset(entry.LifecycleWindow.Written), true
+}
+
+// lifecycleRangeLostSink is the transport's settle for a lifecycle range the
+// helper no longer holds (WSServer.LifecycleRangeLost, ADR-0077): an optional
+// capability of the block rows seam, the same shape the confirmation sink has.
+type lifecycleRangeLostSink interface {
+	LifecycleRangeLost(sid session.ID)
+}
+
 // entrySummaries is nocx-73aln's diagnostic: one line per entry a helper's
 // `sessions` op answered with, so a mismatch between what a binding names and
 // what the helper actually holds is a measurement rather than a guess.
@@ -680,6 +701,10 @@ func (rp *readoptPass) readopt(
 		// launch to adopt, "this session is conventional", or a reason the
 		// product will state (nocx-k6p18.31).
 		adoption := rp.adoptLifecycle(ctx, carrier, entry)
+		lifecycleFrom, lifecycleFresh := lifecycleResumePoint(p, entry)
+		nocxlog.From(ctx).Debug("re-adopt: the lifecycle stream resumes",
+			"session", p.SessionID, "offset", uint64(lifecycleFrom), "storedCursor", !lifecycleFresh,
+			"windowBase", entry.LifecycleWindow.Base, "windowHead", entry.LifecycleWindow.Written)
 		attached, err := carrier.Attach(ctx, proto.AttachParams{
 			Subscriber: proto.SubscriberID(hex.EncodeToString(subscriberRaw[:])),
 			Session: proto.HostSessionID{
@@ -694,22 +719,17 @@ func (rp *readoptPass) readopt(
 			// range it lost — when the host out-produced the window while
 			// nobody was listening, which is the case this epic is about.
 			Offset: proto.StreamOffset(from), Fresh: false,
-			// THE LIFECYCLE STREAM RESUMES AT THE WINDOW'S BASE, NOT ITS
-			// HEAD. ADR-0076 decision 4: an end the helper saw while no
-			// coordinator was attached closes the block on return, and the
-			// helper's retained window is the only place that end exists.
-			// The frames are capability-stamped by the shell and the helper
-			// kept them because they authenticated; replaying them into the
-			// replacing kernel re-delivers events, not commands — the start
-			// of an entry that is already open is a ledger no-op, and the
-			// completion of a command that ran for the process before this
-			// one is the completion-only replay the kernel reconstructs
-			// under a synthetic id (ADR-0076). Asking for the head instead
-			// skips the whole retained record: every frame the shell spoke
-			// while nobody was attached is lost for good, and the entry a
-			// command left open stays open forever.
-			LifecycleOffset: 0,
-			LifecycleFresh:  true,
+			// THE LIFECYCLE STREAM RESUMES AT THIS MACHINE'S OWN CURSOR
+			// (ADR-0077, lifecycleResumePoint): one past the last frame the
+			// coordinator that is gone applied and stored. Nothing before it
+			// is offered again — those frames carry a capability the adopted
+			// domain still honours, which is ADR-0024's reason for never
+			// replaying the window from its base — and nothing after it is
+			// skipped: a command's end the shell spoke while nobody was
+			// attached reaches the replacing kernel exactly once (ADR-0076
+			// decision 4).
+			LifecycleOffset: lifecycleFrom,
+			LifecycleFresh:  lifecycleFresh,
 			RequestWrite:    true,
 		})
 		if err != nil {
@@ -720,13 +740,38 @@ func (rp *readoptPass) readopt(
 		// Round 4). The window the helper retained is the replay this
 		// attachment is about to deliver, and the shell's exit carry —
 		// AdoptExitStatus above, once the pane's own output drains — must
-		// not tear the lane down ahead of it. The drain is the attachment's
-		// lifecycle cursor reaching the window's head; armed only when a
-		// window exists, so a conventional session arms nothing and its end
+		// not tear the lane down ahead of it. Armed only when a window
+		// exists, so a conventional session arms nothing and its end
 		// proceeds exactly as it always did.
+		//
+		// The drain is the leg's APPLIED cursor reaching the window's head
+		// (ADR-0077), not its ingest cursor: bytes the bridge has read are
+		// not yet frames the kernel has applied, and a teardown that ran in
+		// between unregistered the lane under the replay (the loaded
+		// shell-exit acceptance, nocx-zg3k3.5.11). A session whose leg was
+		// not adopted has no applied cursor and keeps the ingest drain.
+		if adoption.cursor != nil {
+			adoption.cursor.bind(p.SessionID, attached.LifecycleIngested())
+		}
 		if entry.LifecycleWindow.Written > 0 {
-			rp.adopter.HoldSessionEndFor(sid, attached.LifecycleDrained(
-				proto.StreamOffset(entry.LifecycleWindow.Written)))
+			head := proto.StreamOffset(entry.LifecycleWindow.Written)
+			drained := attached.LifecycleDrained(head)
+			if adoption.cursor != nil {
+				drained = adoption.cursor.reached(head)
+			}
+			rp.adopter.HoldSessionEndFor(sid, drained)
+		}
+		// THE STORED CURSOR IS NO LONGER IN THE HELPER'S WINDOW: the helper
+		// answered from its base, and every frame between the cursor and the
+		// base is gone. The block those frames could have settled is marked
+		// from the helper's own statement of the loss, before the stream
+		// re-binds it, never left running (ADR-0077).
+		if p.LifecycleApplied != nil && uint64(attached.LifecycleIngested()) > *p.LifecycleApplied {
+			nocxlog.From(ctx).Warn("the helper no longer holds the lifecycle stream from this coordinator's cursor; the frames between are lost",
+				"session", p.SessionID, "cursor", *p.LifecycleApplied, "resumedAt", uint64(attached.LifecycleIngested()))
+			if lost, ok := rp.blockRows.(lifecycleRangeLostSink); ok {
+				lost.LifecycleRangeLost(sid)
+			}
 		}
 		// THE HOST'S OWN VERDICT ON A SHELL THAT ENDED WHILE WE WERE AWAY.
 		// The helper's exit notification fired once, at the moment the process

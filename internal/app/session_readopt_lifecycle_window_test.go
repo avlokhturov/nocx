@@ -1,13 +1,14 @@
 package app
 
-// THE RE-ADOPT'S LIFECYCLE WINDOW RESUME (ADR-0076 decision 4): a command
-// whose end the helper saw while no coordinator was attached must close when
-// the coordinator returns, and the only carrier for that end is the helper's
-// retained lifecycle window. The re-adopt's attach therefore has to resume
-// that window FROM ITS BASE — the frames no coordinator ever read replay into
-// the replacing kernel — and not from the window's head, where the whole
-// retained record is skipped and every frame spoken while nobody was
-// attached is lost for good.
+// THE RE-ADOPT'S LIFECYCLE RESUME POINT (ADR-0077, the owner's decision of
+// 2026-09-30). The coordinator that went away stored, with the session's
+// binding, the offset one past the last lifecycle frame it applied; the one
+// that takes the session back asks the helper for the stream from exactly
+// there. Not from the window's base — those frames were applied once and carry
+// a capability the adopted domain still honours (ADR-0024) — and not from its
+// head, which skips every frame the shell spoke while nobody was attached
+// (ADR-0076 decision 4). Only a binding that stored no cursor at all resumes
+// at the head, because nothing better is known.
 
 import (
 	"context"
@@ -16,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	helpersession "github.com/shady2k/nocx/internal/helper/session"
@@ -108,7 +110,12 @@ func (r *recordingLocalRoute) lastAttach() (proto.AttachParams, bool) {
 	return r.attach[len(r.attach)-1], true
 }
 
-func TestAReadoptResumesTheHelpersRetainedLifecycleWindowFromItsBase(t *testing.T) {
+// readoptLifecycleFixture spawns one lifecycle-carrying session through a
+// first coordinator, has its shell speak `spoken` while nobody is attached,
+// waits until the helper's window has retained it, and answers the binding and
+// a recording route over the same daemon.
+func readoptLifecycleFixture(t *testing.T, spoken string) (content.PendingSession, *recordingLocalRoute, *fakeLaneProvider) {
+	t.Helper()
 	spawner := &lifecycleWindowSpawner{}
 	svc := helpersession.New(helpersession.Options{
 		Generation: proto.GenerationID(syntheticArtifactHash),
@@ -145,11 +152,8 @@ func TestAReadoptResumesTheHelpersRetainedLifecycleWindowFromItsBase(t *testing.
 		route.Client = c
 	}
 
-	// THE FRAMES NOBODY READ: the shell speaks while no coordinator is
-	// attached. The window has provably retained them before anything asks
-	// for the session back — that precondition is what makes the attach's
-	// offset choice mean one thing and not the other.
-	const spoken = `{"kind":"complete","exit":0}`
+	// THE FRAMES SPOKEN WHILE NOBODY WAS ATTACHED. The window has provably
+	// retained them before anything asks for the session back.
 	if _, err := proc.speak.Write([]byte(spoken)); err != nil {
 		t.Fatalf("the shell spoke: %v", err)
 	}
@@ -174,9 +178,15 @@ func TestAReadoptResumesTheHelpersRetainedLifecycleWindowFromItsBase(t *testing.
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
+	return binding, route, provider
+}
 
-	// THE REPLACING COORDINATOR takes the session back over the recording
-	// route.
+// readoptAndReadTheAttach takes the binding back over the recording route and
+// answers the attach params the readopt sent.
+func readoptAndReadTheAttach(t *testing.T, binding content.PendingSession, route *recordingLocalRoute, provider *fakeLaneProvider) proto.AttachParams {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	second := newCoordinator(t, provider)
 	adopter := &stubAdopter{}
 	t.Cleanup(adopter.endAdopted)
@@ -184,17 +194,42 @@ func TestAReadoptResumesTheHelpersRetainedLifecycleWindowFromItsBase(t *testing.
 	if _, err := pass.readoptLocal(ctx, binding); err != nil {
 		t.Fatalf("readopt: %v", err)
 	}
-
-	// THE ATTACH MUST ASK FOR THE WINDOW FROM ITS BASE. The offset the
-	// readopt sends is the whole of the decision: from the base, the frames
-	// nobody read replay into the replacing kernel; from the head — where
-	// the stream stands now — they are skipped and gone.
 	attach, ok := route.lastAttach()
 	if !ok {
 		t.Fatal("the readopt never attached")
 	}
-	if attach.LifecycleOffset != 0 {
-		t.Fatalf("the re-adopt's attach resumed the lifecycle window at offset %d, want 0 (the window's base): the helper holds %d retained bytes no coordinator has read, and asking for the head skips them for good",
-			attach.LifecycleOffset, uint64(len(spoken)))
+	return attach
+}
+
+func TestAReadoptResumesTheLifecycleStreamAtTheCursorTheLastCoordinatorStored(t *testing.T) {
+	// Two stretches: the first the previous coordinator applied and stored
+	// its cursor for, the second the shell spoke after that coordinator was
+	// gone.
+	const applied = `{"kind":"start"}`
+	const unread = `{"kind":"complete","exit":0}`
+	binding, route, provider := readoptLifecycleFixture(t, applied+unread)
+	cursor := uint64(len(applied))
+	binding.LifecycleApplied = &cursor
+
+	attach := readoptAndReadTheAttach(t, binding, route, provider)
+	if attach.LifecycleOffset != proto.StreamOffset(cursor) {
+		t.Fatalf("the re-adopt's attach resumed the lifecycle stream at offset %d, want %d — the cursor the previous coordinator stored: "+
+			"0 re-delivers what it applied, %d skips what the shell said while nobody was attached",
+			attach.LifecycleOffset, cursor, len(applied)+len(unread))
+	}
+	if attach.LifecycleFresh {
+		t.Fatal("the re-adopt called itself fresh while resuming from a cursor it holds")
+	}
+}
+
+func TestAReadoptWithNoStoredCursorResumesTheLifecycleStreamAtItsHead(t *testing.T) {
+	const spoken = `{"kind":"complete","exit":0}`
+	binding, route, provider := readoptLifecycleFixture(t, spoken)
+	binding.LifecycleApplied = nil
+
+	attach := readoptAndReadTheAttach(t, binding, route, provider)
+	if attach.LifecycleOffset != proto.StreamOffset(len(spoken)) {
+		t.Fatalf("with no stored cursor the re-adopt resumed at offset %d, want the head (%d): a coordinator that holds no record of what was applied may not offer any of it again",
+			attach.LifecycleOffset, len(spoken))
 	}
 }

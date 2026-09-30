@@ -1742,6 +1742,13 @@ func New(opts ...Option) (*App, error) {
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
 	helperReg.environmentEntries = envEntryRegistry
+	// Every hosted pane's lifecycle cursor is kept with its binding, on both
+	// routes (lifecycle_cursor.go, ADR-0077). The stub store records nothing,
+	// so it is not handed out as a place to keep one.
+	if _, stubbed := contentDB.(*content.Stub); !stubbed {
+		helperReg.lifecycleCursors = contentDB.Ledger()
+		localOpener.lifecycleCursors = contentDB.Ledger()
+	}
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
 	// bead nocx-u7uh.4; moved onto this machine's helper by nocx-50w7p.8):
 	// the composition root implements the ssh layer's RemoteLifecycle seam

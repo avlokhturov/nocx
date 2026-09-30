@@ -344,6 +344,9 @@ type localHelperOpener struct {
 	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
 	// reason blockRows is. Nil wires nothing.
 	environmentEntries *environmentEntryRegistry
+	// lifecycleCursors keeps each pane's lifecycle cursor with its binding
+	// (lifecycle_cursor.go, ADR-0077). Nil keeps nothing.
+	lifecycleCursors lifecycleCursorStore
 	// noteChildDomainParent records the two facts a nested sudo/su needs
 	// about the pane it is opened inside: which transport its parent's
 	// lifecycle lane rides, and which session that lane speaks for
@@ -656,6 +659,7 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 		publishScreen:      o.publishScreen,
 		blockRows:          o.blockRows,
 		environmentEntries: o.environmentEntries,
+		cursors:            o.lifecycleCursors,
 		// The handshake bound, stated here rather than left to the adapter:
 		// how long a shell may take to prove itself before the pane falls
 		// back to a conventional terminal is a product decision, and this is

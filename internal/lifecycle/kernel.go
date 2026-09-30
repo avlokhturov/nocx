@@ -1442,8 +1442,10 @@ func (k *Kernel) newAttemptID() (AttemptID, error) {
 // place and which already owns the session's keyboard and its whole output
 // stream. The one new exposure adoption WOULD create is replay of the
 // helper's retained lifecycle window, and it is closed where the window is
-// read rather than here: the re-attachment resumes at the window's head, so
-// no frame the previous coordinator already consumed is ever re-delivered.
+// read rather than here: the re-attachment resumes at the cursor the
+// previous coordinator stored of the last frame it applied (ADR-0077,
+// superseding ADR-0024's resume at the head), so no frame it already
+// applied is ever re-delivered.
 //
 // The domain is installed Established and the lane PromptReady — the state
 // the shell is actually in, since it has its accept and speaks only from a
