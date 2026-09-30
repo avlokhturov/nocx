@@ -884,6 +884,10 @@ func (s *WSServer) DetachBlockRows(sid session.ID) {
 // every still-open block is sealed with whatever arrived and said closed —
 // the honest end when the interval's own end never will.
 func (s *WSServer) HelperSessionEnded(sid session.ID) {
+	// Behind an armed end hold the report waits for the replay it follows:
+	// settling now would close, "unknown", a command whose own completion
+	// the replay is about to deliver (awaitSessionEnd).
+	s.awaitSessionEnd(sid)
 	// Owner: this stream, on behalf of the session the helper just
 	// reported ended. Closing event: HelperSessionEnded's own seals —
 	// nothing is held past them (ADR-0076).
@@ -957,6 +961,9 @@ func (s *WSServer) HelperSessionEnded(sid session.ID) {
 // It runs before the re-adopted stream re-binds the session, so there is no
 // in-memory block yet: the store's open block is the one to settle.
 func (s *WSServer) LifecycleRangeLost(sid session.ID) {
+	// Owner: this stream, on behalf of the open block a lost lifecycle
+	// range could have settled. Closing event: the seal and the entry's
+	// close below — nothing is held past them.
 	ctx := log.WithLogger(context.Background(), s.log)
 	store := s.blockStore()
 	if store == nil {
