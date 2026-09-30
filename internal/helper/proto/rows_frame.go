@@ -210,9 +210,17 @@ func encodeRowsPlaneFrame(session, subscriber [16]byte, rowIndex uint64, payload
 type OutputRowsDoc struct {
 	FromRow    uint64          `json:"fromRow"`
 	LostRows   uint64          `json:"lostRows"`
+	LostCause  string          `json:"lostCause,omitempty"`
 	Rows       json.RawMessage `json:"rows"`
 	Incomplete bool            `json:"incomplete"`
 }
+
+// LostCauseCoordinatorUnavailable marks a lostRows gap whose rows the
+// helper could not resend because the coordinator was away while ghostty
+// pruned them from the scrollback (nocx-zg3k3.5.3). Its absence leaves
+// lostRows meaning what it always meant: the emulator's own struck feeds
+// and the bridge's backpressure drops.
+const LostCauseCoordinatorUnavailable = "coordinator-unavailable"
 
 // ClearBoundaryFrameHeaderLen is 16 (session) + 16 (subscriber): this plane
 // carries no row index, unlike its two siblings above — the store resolves

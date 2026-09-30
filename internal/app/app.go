@@ -99,6 +99,9 @@ func (a *noteBackupAdapter) ReplaceNotes(notes []note.Note) error {
 }
 
 type App struct {
+	// lifecycleStopping is raised when Shutdown begins (ADR-0077's
+	// teardown rule).
+	lifecycleStopping   *atomic.Bool
 	Logger              log.Logger
 	Session             *session.Reg
 	Transport           *transport.WSServer
@@ -1742,6 +1745,19 @@ func New(opts ...Option) (*App, error) {
 	// remote, but lifecycle facts still follow the coordinator's session route.
 	helperReg.lifecycle = lifecyclePub
 	helperReg.environmentEntries = envEntryRegistry
+	// Every hosted pane's lifecycle cursor is kept with its binding, on both
+	// routes (lifecycle_cursor.go, ADR-0077). The stub store records nothing,
+	// so it is not handed out as a place to keep one.
+	if _, stubbed := contentDB.(*content.Stub); !stubbed {
+		helperReg.lifecycleCursors = contentDB.Ledger()
+		localOpener.lifecycleCursors = contentDB.Ledger()
+	}
+	// Raised the moment the coordinator begins stopping (Shutdown): a
+	// lifecycle frame arriving after it is left for the next coordinator,
+	// not applied against sessions the shutdown is closing (ADR-0077).
+	lifecycleStopping := &atomic.Bool{}
+	helperReg.lifecycleStopping = lifecycleStopping
+	localOpener.lifecycleStopping = lifecycleStopping
 	// The remote lifecycle transport (ADR-0024 decision 2 "Over SSH",
 	// bead nocx-u7uh.4; moved onto this machine's helper by nocx-50w7p.8):
 	// the composition root implements the ssh layer's RemoteLifecycle seam
@@ -2617,6 +2633,7 @@ func New(opts ...Option) (*App, error) {
 	sessionRoutes := hostRouteResolver(resolver)
 
 	app := &App{
+		lifecycleStopping:   lifecycleStopping,
 		Logger:              logger,
 		Session:             sess,
 		Transport:           tp,
@@ -3222,6 +3239,11 @@ func (a *App) SetLocalToolSocketPath(path string) {
 
 func (a *App) Shutdown(ctx context.Context) {
 	a.Logger.Info("shutting down application")
+	// First, before any session is closed: no lifecycle frame is applied
+	// from here on (lifecycleCursor.applyFrame).
+	if a.lifecycleStopping != nil {
+		a.lifecycleStopping.Store(true)
+	}
 	if err := a.Transport.Stop(ctx); err != nil {
 		a.Logger.Error("transport shutdown error", "error", err)
 	}

@@ -1456,10 +1456,13 @@ __nocx_prompt_command() {
             # Complete the attempt: the exit status and a fresh fence nonce,
             # and write the SAME nonce to the pty after the command's output
             # — the render-order rendezvous (decision 1 carve-out, doc §8).
-            # The complete carries no attempt id; the kernel resolves the
-            # domain's single open attempt.
+            # The complete names the attempt this shell minted at start —
+            # the block's identity, stable across coordinators, so a
+            # completion delivered twice closes the same block once
+            # (ADR-0077). For a command the app submitted it is the alias
+            # the kernel recorded at start.
             if __nocx_lc_fence; then
-                if __nocx_lc_send complete ',"exit_code":'"$__nocx_exit"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
+                if __nocx_lc_send complete ',"attempt":"'"$__nocx_lc_attempt_id"'","exit_code":'"$__nocx_exit"',"fence":"'"$__nocx_lc_fence_hex"'"'; then
                     builtin printf '\e]1337;NOCX_FENCE;%s\a' "$__nocx_lc_fence_hex"
                 else
                     __nocx_lc_recover

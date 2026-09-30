@@ -264,7 +264,13 @@ var (
 // protocol together. Every installed copy must be rewritten, because a shell
 // still sourcing 53 sends a frame (`agent_report`) the backend no longer
 // knows, and spends the agent's launch on a rendezvous nobody reads.
-const version = "54"
+// 55: both shells name every completion with the attempt id they minted at
+// start (ADR-0077). The id is the block's identity across coordinators: a
+// completion delivered again to a coordinator that never saw the start
+// closes the block it belongs to, found by that id, rather than whatever the
+// session happens to hold open. A shell still sourcing 54 sends unnamed
+// completions, which a fresh coordinator can only resolve by that guess.
+const version = "55"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

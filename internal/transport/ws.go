@@ -820,6 +820,12 @@ type WSServer struct {
 	lifecyclePub   *lifecyclepub.Publisher
 	lifecycleMu    sync.Mutex
 	lifecycleLanes map[lifecycle.LaneID]session.ID
+	// The per-session end hold (ws_end_hold.go): the replay window a
+	// re-adopted session owes before its shell's exit may tear the lane
+	// down. endHoldMu guards endHolds; nothing else takes it, and it takes
+	// nothing else.
+	endHoldMu sync.Mutex
+	endHolds  map[session.ID]*sessionEndHold
 	// historySources preserves the submitting target and capture scope for an
 	// app attempt when history policy suppresses its row before completion.
 	historySources map[string]historyAttemptScope
@@ -1520,6 +1526,12 @@ type HostedSessionOpen struct {
 	LifecycleLane  lifecycle.LaneID
 	StartLifecycle func()
 	AbortLifecycle func()
+	// DetachLifecycle ends the pane's lifecycle leg as an ORDERLY HANDOVER —
+	// the coordinator giving the session back to its helper (process
+	// shutdown, a re-adopt that lost the write-lease) — with no loss anywhere
+	// (ADR-0076). AbortLifecycle is the failure rollback; this is the
+	// departure.
+	DetachLifecycle func()
 	// IntegrationShell, IntegrationStatus and IntegrationReason are what the
 	// opener already knows about this session's shell integration, for the
 	// axis session.integrationChanged renders (nocx-k6p18.31).
@@ -3587,6 +3599,30 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// e2e/remote-coordinator-reclaim.spec.ts's 60s bound. So the message
 	// that tells the far helper goes out while the connection to send it on
 	// is still guaranteed open.
+	// THE END HOLD (nocx-zg3k3.5.11 Round 4, REVIEW-2's decision): a
+	// re-adopted session whose helper retained a lifecycle window replays it
+	// through its lane — start, rows, end, domain close — and the exit carry
+	// rides the pane's output stream, so Done can fire while the replay is
+	// still in flight. The re-adopt armed the hold with the attachment's
+	// lifecycle-drain signal; waiting it here is what keeps the teardown
+	// below from unregistering the lane before the window's start frame
+	// ingests (the Round-2 probe chain: attemptFact dropped with "no lane",
+	// the block never opened, the settle sealed nothing). The bounds that
+	// keep a dead replay from hanging this goroutine: the drain channel
+	// closes when the attachment ends, and NoteIntegrationLoss releases the
+	// hold when the lifecycle channel is lost.
+	//
+	// AFTER the wait, and BEFORE EndSession: the settle from the helper's
+	// own record. It is idempotent with the deferred boundary consults, and
+	if hold := s.waitSessionEnd(sess.ID()); hold != nil {
+		select {
+		case <-hold.drained:
+		case <-hold.released:
+		}
+		s.settleAdoptedTerminalDomains(sess.ID())
+		s.dropSessionEndHold(sess.ID())
+	}
+
 	_ = s.registry.EndSession(sess.ID())
 
 	// The pane's observation closes here, because everything below this line

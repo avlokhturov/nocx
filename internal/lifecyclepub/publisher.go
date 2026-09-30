@@ -29,6 +29,7 @@
 package lifecyclepub
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"reflect"
@@ -36,6 +37,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclecommit"
 	nocxlog "github.com/shady2k/nocx/internal/log"
 )
 
@@ -252,6 +254,7 @@ type Kernel interface {
 	AbandonAttempt(id lifecycle.AttemptID) error
 	State(lane lifecycle.LaneID) (lifecycle.LaneSnapshot, error)
 	Domain(id lifecycle.DomainID) (lifecycle.Domain, bool)
+	TerminalDomainOfLane(lane lifecycle.LaneID) (lifecycle.Domain, bool)
 	Attempt(id lifecycle.AttemptID) (lifecycle.ExecutionAttempt, bool)
 	OpenAttempt(domain lifecycle.DomainID) (lifecycle.ExecutionAttempt, bool)
 }
@@ -382,13 +385,13 @@ func WithAgentEnroller(e AgentEnroller) Option {
 // shell, which is long after both exist, so the unbound window is empty in
 // practice.
 type Emitter interface {
-	PublishLifecycle(f Fact)
+	PublishLifecycle(ctx context.Context, f Fact)
 }
 
 // ProjectionEmitter receives lifecycle facts that must update server-owned
 // projections without creating a duplicate renderer notification.
 type ProjectionEmitter interface {
-	PublishLifecycleProjection(f Fact)
+	PublishLifecycleProjection(ctx context.Context, f Fact)
 }
 
 // AttemptTransitionEmitter receives the two transitions of one attempt that
@@ -418,11 +421,11 @@ type AttemptTransitionEmitter interface {
 	// started — the shell has authenticated the line it belongs to, which is
 	// the first moment an interrupt may be written for it without landing in
 	// bash's parser (nocx-zas0d).
-	PublishAttemptStarted(attempt lifecycle.AttemptID)
+	PublishAttemptStarted(ctx context.Context, attempt lifecycle.AttemptID)
 	// PublishAttemptClosed reports that this attempt has left `open`, with no
 	// start ever having been authenticated for it. An obligation held against
 	// that start can never be discharged and must be dropped.
-	PublishAttemptClosed(attempt lifecycle.AttemptID)
+	PublishAttemptClosed(ctx context.Context, attempt lifecycle.AttemptID)
 }
 
 // Publisher wraps the kernel, forwards every mutation, and projects the
@@ -525,7 +528,7 @@ func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID
 	p.mu.Lock()
 	p.known[lane] = struct{}{}
 	p.mu.Unlock()
-	p.publishLane(lane)
+	p.publishLane(context.Background(), lane)
 	return h, nil
 }
 
@@ -538,10 +541,10 @@ func (p *Publisher) AdoptDomain(lane lifecycle.LaneID, domain lifecycle.DomainID
 // conventionally — never suspended under a child that cannot exist. The
 // child's minting is published: a new Pending domain on a known lane is a
 // change the renderer must see (its projection follows the active domain).
-func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
+func (p *Publisher) buildAndDeliverGrant(ctx context.Context, out lifecycle.Outbound) {
 	grant := out.Envelope.Event.DomainGrant
 	if grant == nil {
-		_ = p.kernel.Deliver(out)
+		lifecyclecommit.OnCommit(ctx, func() { _ = p.kernel.Deliver(out) })
 		return
 	}
 	req := GrantRequest{
@@ -576,8 +579,8 @@ func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
 		// child that cannot exist, and the builder's log line carries the
 		// reason (fail-open: the pump never panics).
 	}
-	p.publishLane(out.Envelope.Lane)
-	_ = p.kernel.Deliver(out)
+	p.publishLane(ctx, out.Envelope.Lane)
+	lifecyclecommit.OnCommit(ctx, func() { _ = p.kernel.Deliver(out) })
 }
 
 // answerAgentEnrolment fills the verdict and delivers it.
@@ -657,8 +660,15 @@ func (p *Publisher) closeQuestion(asked lifecycle.Outbound, rid lifecycle.Reques
 	}
 }
 
+// shouldPublishStartedAttempt reports whether env is a start attaching to a
+// pending app attempt — the one transition the lane's fact cannot show, since
+// the lane is already running that attempt before and after. It holds for a
+// named start exactly as for an unnamed one: the shipped shells name every
+// start with their own id, which the kernel records as the app attempt's
+// alias, and excluding them left every command submitted from nocx's editor
+// with no execution and no block (nocx-zg3k3.5.11).
 func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
-	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil || env.Event.Start.AttemptID != nil {
+	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil {
 		return false
 	}
 	before, ok := p.derive(env.Lane)
@@ -723,7 +733,7 @@ func (p *Publisher) openAttemptsIn(snap lifecycle.LaneSnapshot) map[lifecycle.At
 // renderer that read the receipt before that fact still held the attempt
 // open, and a receipt naming an open attempt attaches to nothing and is
 // dropped for good.
-func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
+func (p *Publisher) transitionsBelow(ctx context.Context, before map[lifecycle.AttemptID]bool) {
 	if len(before) == 0 {
 		return
 	}
@@ -738,14 +748,38 @@ func (p *Publisher) transitionsBelow(before map[lifecycle.AttemptID]bool) {
 		current, ok := p.kernel.Attempt(attempt)
 		switch {
 		case !ok || current.State != lifecycle.AttemptOpen:
-			te.PublishAttemptClosed(attempt)
+			te.PublishAttemptClosed(ctx, attempt)
 		case !wasStarted && current.Started:
-			te.PublishAttemptStarted(attempt)
+			te.PublishAttemptStarted(ctx, attempt)
 		}
 	}
 }
 
-func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+// Ingest applies one frame and publishes what it changed.
+//
+// THE LANE'S EMISSION TURN IS HELD FOR THE WHOLE FRAME (ADR-0077), not only
+// for the lane fact at its end. A frame's projections write the store, and a
+// frame's writes are one transaction that holds the store's only connection
+// from its first write until the frame ends (content's ApplyLifecycleFrame).
+// ReplayLane takes this same turn and then writes the store through the
+// emitter; were the frame to take the turn only after its first write — the
+// attempt transitions report before the lane fact — the two would each hold
+// what the other waits for. Taken first, the turn orders every frame's store
+// work after any replay of its lane, and the frame's own emissions below run
+// under the turn it already holds (holdsTurn).
+//
+// ctx is the frame's: every emission the frame causes carries it, and with it
+// the store transaction the frame's writes join. What the frame sends the
+// shell — the ACCEPT, a grant, an enrolment's answer, any other outbound —
+// waits in the frame's post-commit queue (lifecyclecommit, ADR-0077 decision
+// 12) in the order the kernel minted it, and goes out only if the frame is
+// stored; outside a frame it goes out at once.
+func (p *Publisher) Ingest(ctx context.Context, t lifecycle.TransportID, env lifecycle.Envelope) error {
+	turn := p.laneEmission(env.Lane)
+	turn <- struct{}{}
+	defer func() { <-turn }()
+	ctx = context.WithValue(ctx, heldTurnKey{}, env.Lane)
+
 	// The lane's open attempts are read BEFORE the mutation — the only moment
 	// they can be — because a prompt_ready that closes one also clears the
 	// lane's own reference to it, leaving nothing afterwards to compare
@@ -763,8 +797,8 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 		// the success path alone left those closures unsaid and a Stop held for
 		// one of them behind, until unrelated session teardown (nocx-zas0d,
 		// review finding 5 of 1e899f6a).
-		p.transitionsBelow(before)
-		p.publishLane(env.Lane)
+		p.transitionsBelow(ctx, before)
+		p.publishLane(ctx, env.Lane)
 		return err
 	}
 	for _, out := range outs {
@@ -775,7 +809,7 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// never deferred behind an acknowledgement (unlike accept):
 			// the parent is blocked waiting for it before it can launch
 			// the child.
-			p.buildAndDeliverGrant(out)
+			p.buildAndDeliverGrant(ctx, out)
 		case lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn:
 			// Same shape and the same reason: the caller is blocked waiting
 			// for the verdict before it launches the agent, and the answer
@@ -784,26 +818,28 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// "enrolled" and starts the agent in the next instruction cannot
 			// beat the watch it was promised. That is the byte-zero guarantee
 			// the whole grid rests on.
-			p.answerAgentEnrolment(env, out)
+			lifecyclecommit.OnCommit(ctx, func() { p.answerAgentEnrolment(env, out) })
 		case lifecycle.KindAccept:
 			// The shell must receive ACCEPT before the lifecycle.changed
 			// prompt_ready publication. Otherwise a renderer can submit
 			// against the prompt_ready fact while the domain still waits
 			// for the shell's authenticated admission.
-			p.deliverAccept(out)
+			lifecyclecommit.OnCommit(ctx, func() { p.deliverAccept(out) })
 		}
 	}
-	p.transitionsBelow(before)
+	p.transitionsBelow(ctx, before)
 	if forceStartedProjection {
-		p.publishLaneProjection(env.Lane)
+		p.publishLaneProjection(ctx, env.Lane)
 	}
-	p.publishLane(env.Lane)
+	p.publishLane(ctx, env.Lane)
 	for _, out := range outs {
 		switch out.Envelope.Event.Kind {
 		case lifecycle.KindDomainGrant, lifecycle.KindAgentEnrolled, lifecycle.KindAgentWithdrawn, lifecycle.KindAccept:
 			continue // already delivered above, with their answers
 		}
-		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		lifecyclecommit.OnCommit(ctx, func() {
+			_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
+		})
 	}
 	return nil
 }
@@ -834,6 +870,13 @@ func (p *Publisher) deliverAccept(out lifecycle.Outbound) {
 // became Established.
 func (p *Publisher) Domain(id lifecycle.DomainID) (lifecycle.Domain, bool) {
 	return p.kernel.Domain(id)
+}
+
+// TerminalDomainOfLane returns the lane's most recent domain in a terminal
+// state (closed or lost), and whether one exists — the helper's own recorded
+// end, replayed for a re-adopting attach (nocx-zg3k3.5.3 Round 10).
+func (p *Publisher) TerminalDomainOfLane(lane lifecycle.LaneID) (lifecycle.Domain, bool) {
+	return p.kernel.TerminalDomainOfLane(lane)
 }
 
 // State returns the read model of one lane. Projection consumers (a future
@@ -870,9 +913,9 @@ func (p *Publisher) NotifyGap(t lifecycle.TransportID, d lifecycle.DomainID, gar
 		before = p.openAttemptsOf(dom.Lane)
 	}
 	outs, err := p.kernel.NotifyGap(t, d, garbageBytes, garbageFrames)
-	p.transitionsBelow(before)
+	p.transitionsBelow(context.Background(), before)
 	if lane != "" {
-		p.publishLane(lifecycle.LaneID(lane))
+		p.publishLane(context.Background(), lifecycle.LaneID(lane))
 	}
 	for _, out := range outs {
 		_ = p.kernel.Deliver(out) // best-effort; the shell times out in the safe direction
@@ -914,12 +957,12 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 		return err
 	}
 	for _, l := range lanes {
-		p.transitionsBelow(openBefore[l])
+		p.transitionsBelow(context.Background(), openBefore[l])
 		if attemptID, ok := attempts[l]; ok {
-			p.publishLostLane(l, attemptID)
+			p.publishLostLane(context.Background(), l, attemptID)
 			continue
 		}
-		p.publishLane(l)
+		p.publishLane(context.Background(), l)
 	}
 	return nil
 }
@@ -934,7 +977,7 @@ func (p *Publisher) RecoverLane(lane lifecycle.LaneID) error {
 	if err != nil {
 		return err
 	}
-	p.publishLane(lane)
+	p.publishLane(context.Background(), lane)
 	return nil
 }
 
@@ -954,8 +997,8 @@ func (p *Publisher) SubmitAttempt(domain lifecycle.DomainID, command, cwd, host,
 	if err != nil {
 		return att, err
 	}
-	p.transitionsBelow(before)
-	p.publishLane(att.Lane)
+	p.transitionsBelow(context.Background(), before)
+	p.publishLane(context.Background(), att.Lane)
 	return att, nil
 }
 
@@ -971,11 +1014,21 @@ func (p *Publisher) AbandonAttempt(id lifecycle.AttemptID) error {
 	if err != nil {
 		return err
 	}
-	p.transitionsBelow(before)
+	p.transitionsBelow(context.Background(), before)
 	if att, ok := p.kernel.Attempt(id); ok {
-		p.publishLane(att.Lane)
+		p.publishLane(context.Background(), att.Lane)
 	}
 	return nil
+}
+
+// heldTurnKey marks a context whose goroutine already holds a lane's
+// emission turn (Ingest).
+type heldTurnKey struct{}
+
+// holdsTurn reports whether ctx's goroutine already holds lane's turn.
+func holdsTurn(ctx context.Context, lane lifecycle.LaneID) bool {
+	held, ok := ctx.Value(heldTurnKey{}).(lifecycle.LaneID)
+	return ok && held == lane
 }
 
 // laneEmission returns the lane's emission turn: a one-slot semaphore that
@@ -1021,13 +1074,13 @@ func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
 	e := p.emitter
 	p.mu.Unlock()
 	if e != nil {
-		e.PublishLifecycle(f)
+		e.PublishLifecycle(context.Background(), f)
 	}
 }
 
 // publishLaneProjection hands the lane's current fact to a ProjectionEmitter
 // only — server-owned projections, no renderer notification, no dedupe.
-func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
+func (p *Publisher) publishLaneProjection(ctx context.Context, lane lifecycle.LaneID) {
 	f, ok := p.derive(lane)
 	if !ok {
 		return
@@ -1036,7 +1089,7 @@ func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
 	e := p.emitter
 	p.mu.Unlock()
 	if pe, ok := e.(ProjectionEmitter); ok {
-		pe.PublishLifecycleProjection(f)
+		pe.PublishLifecycleProjection(ctx, f)
 	}
 }
 
@@ -1062,10 +1115,12 @@ func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
 // for its Stop to settle, WSServer.signalDeliveryFor) still stalls no other
 // lane's bookkeeping — only a publisher of the same lane, which has to wait
 // for the earlier fact to be delivered before its own may be.
-func (p *Publisher) publishLane(lane lifecycle.LaneID) {
-	turn := p.laneEmission(lane)
-	turn <- struct{}{}
-	defer func() { <-turn }()
+func (p *Publisher) publishLane(ctx context.Context, lane lifecycle.LaneID) {
+	if !holdsTurn(ctx, lane) {
+		turn := p.laneEmission(lane)
+		turn <- struct{}{}
+		defer func() { <-turn }()
+	}
 	f, ok := p.derive(lane)
 	if !ok {
 		return
@@ -1079,23 +1134,23 @@ func (p *Publisher) publishLane(lane lifecycle.LaneID) {
 	e := p.emitter
 	p.mu.Unlock()
 	if e != nil {
-		e.PublishLifecycle(f)
+		e.PublishLifecycle(ctx, f)
 	}
 }
 
-func (p *Publisher) publishLostLane(lane lifecycle.LaneID, attemptID lifecycle.AttemptID) {
+func (p *Publisher) publishLostLane(ctx context.Context, lane lifecycle.LaneID, attemptID lifecycle.AttemptID) {
 	f, ok := p.derive(lane)
 	if !ok {
 		return
 	}
 	attempt, ok := p.kernel.Attempt(attemptID)
 	if !ok {
-		p.publishLane(lane)
+		p.publishLane(ctx, lane)
 		return
 	}
 	f.Attempt = attemptFact(attempt)
 	if pe, ok := p.emitter.(ProjectionEmitter); ok {
-		pe.PublishLifecycleProjection(f)
+		pe.PublishLifecycleProjection(ctx, f)
 	}
-	p.publishLane(lane)
+	p.publishLane(ctx, lane)
 }

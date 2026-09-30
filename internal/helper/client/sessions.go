@@ -320,8 +320,21 @@ type AttachedSession struct {
 	// through sessionExited/finish directly and needs no target — there is
 	// always more that COULD arrive until the process is observed to end).
 	exitFinalOffset *proto.StreamOffset
-	offset          proto.StreamOffset
-	lifecycleOffset proto.StreamOffset
+	// exitLifecycleHead is the lifecycle window an adopted leg is owed when
+	// the session already exited (ExitAfterLifecycle, nocx-zg3k3.5.11): the
+	// attachment ends only once the lifecycle cursor reaches it as well.
+	// Guarded alongside exit; nil when no leg reads this attachment's
+	// lifecycle stream.
+	exitLifecycleHead *proto.StreamOffset
+	offset            proto.StreamOffset
+	lifecycleOffset   proto.StreamOffset
+	// lifecycleDrain is the one-shot hold's client half (nocx-zg3k3.5.11
+	// Round 4): the channel LifecycleDrained armed, with the target it
+	// closes at. nil when nothing waits; the cursor's two move sites under
+	// mu are the only writers, and finish() — the attachment's end — closes
+	// it, so a hold can never outlive the stream it was armed on.
+	lifecycleDrain       chan struct{}
+	lifecycleDrainTarget proto.StreamOffset
 	// pendingReset and pendingLifecycleReset count the live resets that have
 	// been RECEIVED but not yet REACHED by the reader, and they exist because
 	// the helper moves its own cursor the moment it sends one. The interval
@@ -418,7 +431,20 @@ func (c *Client) SpawnSSH(ctx context.Context, params proto.SSHSpawnParams) (Ses
 // Attach subscribes this coordinator to a helper-owned session and returns its
 // raw PTY data channel. Registration happens before the request so data sent
 // immediately after the helper accepts the subscriber cannot be lost.
-func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*AttachedSession, error) {
+// AttachOption configures one Attach on the attachment it creates.
+type AttachOption func(*AttachedSession)
+
+// ObserveBeforeAttach runs f on the attachment after it exists and before the
+// helper is asked for it — the one moment a consumer can be registered that no
+// frame for this attachment can precede (nocx-zg3k3.5.11). The helper binds a
+// new subscriber and wakes its row pump before it writes the attach's result,
+// so the read-back a returning coordinator is owed can arrive ahead of that
+// result; an observer registered once Attach has returned has missed it.
+func ObserveBeforeAttach(f func(*AttachedSession)) AttachOption {
+	return f
+}
+
+func (c *Client) Attach(ctx context.Context, params proto.AttachParams, opts ...AttachOption) (*AttachedSession, error) {
 	session, err := proto.SessionBytes(params.Session.Session)
 	if err != nil {
 		return nil, err
@@ -443,6 +469,9 @@ func (c *Client) Attach(ctx context.Context, params proto.AttachParams) (*Attach
 	}
 	c.attachments[subscriber] = a
 	c.mu.Unlock()
+	for _, opt := range opts {
+		opt(a)
+	}
 
 	var result proto.AttachResult
 	if err := c.Call(ctx, proto.ServiceSession, proto.OpAttach, params, &result); err != nil {
@@ -770,6 +799,20 @@ func (a *AttachedSession) reportHole(gap *proto.Gap) {
 // actually closes a.done, once this attachment's own read cursor reaches
 // finalOffset — called here for the (rare) case nothing is left to read at
 // all, and again after every Read that moves the cursor toward it.
+// ExitAfterLifecycle names the lifecycle window an adopted leg is owed, for
+// a session whose exit AdoptExitStatus carries (nocx-zg3k3.5.11). Ending the
+// attachment at the pane's output frontier alone closed the lifecycle reader
+// too — with the helper's replay of that window still on its way, the leg
+// read EOF and the command's completion was never applied. Call it before
+// AdoptExitStatus, and only when a leg will read the lifecycle stream: the
+// attachment then ends once both cursors reached their frontiers.
+func (a *AttachedSession) ExitAfterLifecycle(head proto.StreamOffset) {
+	a.exitMu.Lock()
+	target := head
+	a.exitLifecycleHead = &target
+	a.exitMu.Unlock()
+}
+
 func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.StreamOffset) {
 	a.exitMu.Lock()
 	already := a.exit != nil
@@ -799,16 +842,60 @@ func (a *AttachedSession) AdoptExitStatus(status ExitStatus, finalOffset proto.S
 // already does for the case where a coordinator was attached the whole time.
 func (a *AttachedSession) checkFullyDrained() {
 	a.exitMu.Lock()
-	target := a.exitFinalOffset
+	target, lifecycleHead := a.exitFinalOffset, a.exitLifecycleHead
 	a.exitMu.Unlock()
 	if target == nil {
 		return
 	}
 	a.mu.Lock()
-	reached := a.offset >= *target
+	reached := a.offset >= *target && (lifecycleHead == nil || a.lifecycleOffset >= *lifecycleHead)
 	a.mu.Unlock()
 	if reached {
 		a.finish()
+	}
+}
+
+// LifecycleIngested returns this attachment's lifecycle ingest cursor: the
+// stream position of the next lifecycle byte the reader will hand over. It
+// moves only as the bridge actually reads frames — it is not an ack and not
+// the helper's own notion of what it has sent.
+func (a *AttachedSession) LifecycleIngested() proto.StreamOffset {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.lifecycleOffset
+}
+
+// LifecycleDrained arms the one-shot hold a re-adopted session's end waits
+// on (nocx-zg3k3.5.11 Round 4): the returned channel closes once the ingest
+// cursor has reached target — the window's head, the offset the helper's
+// retained lifecycle record ends at — or the attachment has ended, whichever
+// first. A second arm returns the first hold: the hold is per attachment,
+// and two waiters on one window wait one drain. An attachment that ends
+// (finish) closes an armed hold, so the transport's exit can never wait on
+// a stream that is already gone.
+func (a *AttachedSession) LifecycleDrained(target proto.StreamOffset) <-chan struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.lifecycleDrain != nil {
+		return a.lifecycleDrain
+	}
+	drained := make(chan struct{})
+	if a.lifecycleOffset >= target {
+		close(drained)
+		return drained
+	}
+	a.lifecycleDrain = drained
+	a.lifecycleDrainTarget = target
+	return drained
+}
+
+// lifecycleDrainReachedLocked closes the armed hold once the cursor has
+// reached its target. Called with mu held, from the only two places the
+// lifecycle cursor moves: the reset's jump and the advance per read.
+func (a *AttachedSession) lifecycleDrainReachedLocked() {
+	if a.lifecycleDrain != nil && a.lifecycleOffset >= a.lifecycleDrainTarget {
+		close(a.lifecycleDrain)
+		a.lifecycleDrain = nil
 	}
 }
 
@@ -834,7 +921,21 @@ func (a *AttachedSession) WaitErr() (error, bool) {
 	return &snapshot, true
 }
 
-func (a *AttachedSession) finish() { a.once.Do(func() { close(a.done) }) }
+// finish ends the attachment. An armed lifecycle drain closes with it: the
+// transport's exit hold waits this channel, and a stream that is over can
+// never owe a window. a.mu is NOT held by any caller (checked), so taking
+// it here cannot invert against the exitMu path above.
+func (a *AttachedSession) finish() {
+	a.once.Do(func() {
+		a.mu.Lock()
+		if a.lifecycleDrain != nil {
+			close(a.lifecycleDrain)
+			a.lifecycleDrain = nil
+		}
+		a.mu.Unlock()
+		close(a.done)
+	})
+}
 
 func (a *AttachedSession) Read(p []byte) (int, error) {
 	if len(p) == 0 {
@@ -910,6 +1011,9 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
+	// An exited session waiting on its lifecycle window ends once this read
+	// reaches it (ExitAfterLifecycle); a no-op otherwise.
+	defer l.session.checkFullyDrained()
 	item, ok := l.session.take(l.session.lifecycleData, l.closed)
 	if !ok {
 		return 0, io.EOF
@@ -920,6 +1024,7 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if l.session.pendingLifecycleReset > 0 {
 			l.session.pendingLifecycleReset--
 		}
+		l.session.lifecycleDrainReachedLocked()
 		l.session.mu.Unlock()
 	}
 	n := copy(p, item.payload)
@@ -933,6 +1038,7 @@ func (l *attachedLifecycle) Read(p []byte) (int, error) {
 		if !frozen {
 			l.session.lifecycleOffset += advance
 		}
+		l.session.lifecycleDrainReachedLocked()
 		offset := l.session.lifecycleOffset
 		ptyOffset := l.session.offset
 		l.session.mu.Unlock()
@@ -979,6 +1085,12 @@ func (l *attachedLifecycle) Write(p []byte) (int, error) {
 
 func (l *attachedLifecycle) Close() error {
 	l.once.Do(func() { close(l.closed) })
+	// Nobody reads the window any more: an exited session waiting on it
+	// (ExitAfterLifecycle) waits no longer.
+	l.session.exitMu.Lock()
+	l.session.exitLifecycleHead = nil
+	l.session.exitMu.Unlock()
+	l.session.checkFullyDrained()
 	return nil
 }
 

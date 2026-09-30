@@ -272,7 +272,7 @@ jobs:
       - name: Test (the OS-specific packages)
         env:
           PKGS: ${{ steps.pkgs.outputs.list }}
-        run: go test -race -tags gtk3 -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
 
       # THE SECOND PASS. A package whose Go files all carry nocx_local_ssh does
       # not appear in `go list ./...` at all, so it was not merely failing to be
@@ -284,7 +284,7 @@ jobs:
       - name: Test (the local helper's ssh client, nocx_local_ssh)
         env:
           PKGS: ${{ steps.localssh.outputs.list }}
-        run: go test -race -tags gtk3,nocx_local_ssh -count=1 $PKGS
+        run: go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $PKGS
 
       # The shipped profile directory lives behind `-tags release`
       # (internal/storage/appdir.go), so the ordinary run never compiles it. One
@@ -422,9 +422,9 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -433,9 +433,19 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
+
+      # THE ALLOCATION BUDGETS, WITHOUT -race (nocx-zg3k3.5.8). Every pass above
+      # runs -race, which instruments and adds allocations (the pump's window
+      # reads 8.3-8.7 MB/MiB under it against 5.56 without), so each budget
+      # test skips itself there and is measured here instead. Once, in one
+      # variant: the keyring does not touch the ingest path. The list and the
+      # pattern belong to the Makefile.
+      - name: Test (allocation budgets, no race detector)
+        if: matrix.keyring == 'no-secret-service'
+        run: make -s test-alloc-budgets
 
   # ci-linux — the OS-SPECIFIC half of the Go suite on Linux.
   #
@@ -579,9 +589,9 @@ jobs:
           echo "=== Unlocking login keyring ==="
           echo -n "nocx-ci" | gnome-keyring-daemon --unlock
           echo "=== Running tests ==="
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
           TESTEOF
 
       - name: Test (no Secret Service)
@@ -590,9 +600,9 @@ jobs:
           PKGS: ${{ steps.pkgs.outputs.list }}
           LOCAL_SSH_PKGS: ${{ steps.localssh.outputs.list }}
         run: |
-          go test -race -tags gtk3 -count=1 $PKGS
+          go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
           echo "=== Running the local helper's ssh tests (nocx_local_ssh) ==="
-          go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+          go test -race -tags gtk3,nocx_local_ssh,nocx_framecheck -count=1 $LOCAL_SSH_PKGS
 
   ci-frontend:
     needs: changes
