@@ -292,6 +292,10 @@ const (
 // everywhere the suite runs (the owner's decision of 2026-09-29, run
 // preflight point 5). Throughput is deliberately NOT asserted.
 func TestPumpEncodingStaysWithinItsBudget(t *testing.T) {
+	if raceDetector {
+		t.Skip("allocation budget not measured under -race: the race detector instruments and adds allocations, " +
+			"so this run would measure the detector, not the shipped path; `make test-alloc-budgets` runs it without -race")
+	}
 	// One warm-up feed on its own session, so the measured feed pays only
 	// the path's own costs and not the process's one-time charges (the
 	// emulator library's init, the JSON encoder's type caches, the pump

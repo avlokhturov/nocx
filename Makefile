@@ -4,7 +4,7 @@
         require-local-helper \
         print-os-pkgs print-portable-pkgs print-local-ssh-pkgs \
         print-os-local-ssh-pkgs print-portable-local-ssh-pkgs \
-        lint-ci test-ci build-ci root-ci frontend-ci
+        lint-ci test-ci build-ci root-ci frontend-ci test-alloc-budgets print-alloc-budget-pkgs
 
 GO ?= go
 GOFUMPT ?= gofumpt
@@ -714,7 +714,29 @@ GOLANGCI_LOCAL_SSH_TAGS := --build-tags=$(LOCAL_SSH_TAGS)
 ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
 	NOCX_LOCAL_SSH_PKGS='$(LOCAL_SSH_PORTABLE_PKGS)' \
+	NOCX_ALLOC_BUDGET_PKGS='$(ALLOC_BUDGET_PKGS)' \
 	  ./scripts/ci-linux.sh -- $$($(MAKE) -s print-portable-pkgs)
+
+# THE ALLOCATION BUDGETS RUN WITHOUT -race (nocx-zg3k3.5.8). Every other Go pass
+# here and in ci.yml runs -race, and the race detector instruments and adds
+# allocations: the pump's window reads 8.3-8.7 MB/MiB under it against 5.56
+# MB/MiB without (measured 2026-09-30), past a 7 MB budget that holds the
+# shipped path. So each budget test skips itself under -race
+# (budget_race_on_test.go, one per package) and is gated here instead: every
+# *StaysWithinItsBudget test of the ingest budget, in the packages that hold
+# one. The tags are the helper session's (it builds only with the ssh client
+# linked in); ci.yml's ci-backend job and scripts/ci-linux.sh run this same
+# list and pattern.
+ALLOC_BUDGET_PKGS := ./internal/sessionruntime ./internal/helper/session
+ALLOC_BUDGET_RUN := StaysWithinItsBudget$$
+ALLOC_BUDGET_TAGS := gtk3,$(LOCAL_SSH_TAG)
+
+print-alloc-budget-pkgs:
+	@echo $(ALLOC_BUDGET_PKGS)
+
+test-alloc-budgets:
+	@echo "=== go test (no -race): the allocation budgets ==="
+	$(GO) test -count=1 -v -tags '$(ALLOC_BUDGET_TAGS)' -run '$(ALLOC_BUDGET_RUN)' $(ALLOC_BUDGET_PKGS)
 
 ci-linux:
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
@@ -1059,6 +1081,10 @@ test-ci:
 	@# `backend` job runs this; this target did not, which is exactly the kind
 	@# of gap that makes a green local gate mean nothing.
 	$(GO) test -race -count=1 -tags release ./internal/storage/...
+	@echo ""
+	@# The allocation budgets skip themselves under -race; this is where the
+	@# host gate measures them (see test-alloc-budgets).
+	@$(MAKE) -s test-alloc-budgets
 	@echo ""
 	@echo "=== go test -race -tags $(LOCAL_SSH_TAGS) (this machine's helper, the one with the ssh client) ==="
 	@# The other build constraint the suite is partitioned by, and the second

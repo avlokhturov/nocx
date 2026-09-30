@@ -106,6 +106,18 @@ else
     LOCAL_SSH_PKGS="$(cd "$REPO" && make -s print-local-ssh-pkgs)"
 fi
 
+# THE ALLOCATION BUDGETS (nocx-zg3k3.5.8), run without -race in the no-Secret-
+# Service variant. `make ci-backend` passes them (its job owns both packages);
+# `make ci-linux` passes none; a bare invocation, which runs the whole tree,
+# gets them from the Makefile.
+if [ -n "${NOCX_ALLOC_BUDGET_PKGS+set}" ]; then
+    ALLOC_BUDGET_PKGS="$NOCX_ALLOC_BUDGET_PKGS"
+elif [ "$PKGS" = "./..." ]; then
+    ALLOC_BUDGET_PKGS="$(cd "$REPO" && make -s print-alloc-budget-pkgs)"
+else
+    ALLOC_BUDGET_PKGS=""
+fi
+
 # An empty list must not read as "the tagged packages passed": it is the shape
 # the defect had, and go test with no arguments would report the repository
 # root's absence of Go files rather than the omission.
@@ -162,6 +174,7 @@ run_variant() {
         -e GOMODCACHE=/cache/gomod \
         -e PKGS="$PKGS" \
         -e LOCAL_SSH_PKGS="$LOCAL_SSH_PKGS" \
+        -e ALLOC_BUDGET_PKGS="$ALLOC_BUDGET_PKGS" \
         -e INNER="$_cmd" \
         -w /src \
         "$IMAGE" \
@@ -181,9 +194,15 @@ run_variant() {
 RC=0
 
 if [ "$RUN_NO_KEYRING" = 1 ]; then
+    # The allocation budgets (nocx-zg3k3.5.8) skip themselves under -race,
+    # which instruments allocations; they are measured here, without it, in
+    # the variant ci.yml runs them in (make test-alloc-budgets owns the list).
     run_variant "no Secret Service" '
         go test -race -tags gtk3,nocx_framecheck -count=1 $PKGS
         go test -race -tags gtk3,nocx_local_ssh -count=1 $LOCAL_SSH_PKGS
+        if [ -n "$ALLOC_BUDGET_PKGS" ]; then
+            go test -count=1 -tags gtk3,nocx_local_ssh -run "StaysWithinItsBudget\$" $ALLOC_BUDGET_PKGS
+        fi
     ' || RC=1
 fi
 
