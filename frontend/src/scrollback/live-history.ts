@@ -143,6 +143,10 @@ export class LiveHistorySurface {
    *  Once away, nothing touches the rows they are reading (nocx-zg3k3.10.4:
    *  arriving output does not move the reader). */
   private _away = false
+  /** The reader's distance from the live end at the moment a stale rebuild
+   *  began (leftTail): paid back by the first page the rebuild installs, so
+   *  the gesture that left the tail is not eaten by the replacement. */
+  private _rebuildTailGap: number | null = null
   /** True only while the unstructured mode owns the pane. */
   private _active = false
   /** One page's two planes, held apart until they meet: the rows document
@@ -198,9 +202,17 @@ export class LiveHistorySurface {
     }
     const before = this._scroller.scrollTop
     // The browser clamps; when the clamp holds the reader exactly where
-    // they were, there is nothing to claim.
+    // they were, there is nothing to claim — but the GESTURE still counts:
+    // an empty surface's wheel-up is the "next gesture" a refused page or a
+    // timed-out rows document waits on, and the live rectangle fills the
+    // scroller exactly, so the clamp would otherwise swallow the retry
+    // (the e2e review's second P2). The pump decides; claiming the event
+    // needs a move.
     this._scroller.scrollTop = before + delta
-    if (this._scroller.scrollTop === before) return
+    if (this._scroller.scrollTop === before) {
+      this._pump()
+      return
+    }
     ev.preventDefault()
     // The browser's own scroll would have fired one; the translation just
     // made the change ourselves, so the pump runs for the same reason.
@@ -283,7 +295,19 @@ export class LiveHistorySurface {
     if (this._away) return
     this._away = true
     if (this._dirty) {
+      // The reader's distance from the live end survives the rebuild: the
+      // forget clamps scrollTop to what remains and the replacement page
+      // would otherwise pay its full height back into scrollTop — the
+      // reader ends at the live end again and the gesture that left was
+      // eaten (the e2e review's first-wheel finding). The first page the
+      // rebuild installs places the reader the same distance from the tail
+      // as the moment they wheeled.
+      const gap = Math.max(
+        0,
+        this._scroller.scrollHeight - this._scroller.clientHeight - this._scroller.scrollTop,
+      )
       this._forget()
+      this._rebuildTailGap = gap
       this._request()
     }
   }
@@ -315,11 +339,16 @@ export class LiveHistorySurface {
    *  under the reflow (ADR-0078: live positions move under reflow), so the
    *  painted pages are addresses of a numbering that no longer exists and
    *  are dropped rather than shown misaligned. As with a clear, the
-   *  content above is gone and the reader is back at the live end. */
+   *  content above is gone and the reader is back at the live end — and
+   *  the head is asked for again at once, because a resize that drops the
+   *  past and waits for output to restore it leaves the pane with nothing
+   *  to scroll: the wheel cannot ask for what it cannot reach (the e2e
+   *  review's first finding). */
   reflowed(): void {
     if (this._pages.length === 0 && this._cursor === null) return
     this._away = false
     this._forget()
+    this._sync()
   }
 
   dispose(): void {
@@ -360,6 +389,7 @@ export class LiveHistorySurface {
     this._docs.clear()
     this._clearTimers()
     this._dirty = false
+    this._rebuildTailGap = null
   }
 
   /** Ask for the head page once, when there is a reason to want it: the
@@ -619,6 +649,17 @@ export class LiveHistorySurface {
     this.el.insertBefore(pageEl, this.el.firstChild)
     const added = this._scroller.scrollHeight - before
     if (added > 0) this._scroller.scrollTop += added
+    if (this._rebuildTailGap !== null) {
+      // A stale rebuild's first page: the reader's own distance from the
+      // tail, taken as they left it, is where they land — the gesture that
+      // asked to scroll up is honored by the replacement, not reset.
+      const gap = this._rebuildTailGap
+      this._rebuildTailGap = null
+      this._scroller.scrollTop = Math.max(
+        0,
+        this._scroller.scrollHeight - this._scroller.clientHeight - gap,
+      )
+    }
     this._pages.unshift({
       el: pageEl,
       start: page.start,

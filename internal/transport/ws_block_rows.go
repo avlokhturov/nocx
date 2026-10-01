@@ -2008,6 +2008,12 @@ func (bs *blockStream) isLostLocked(sid session.ID, hexNonce string) bool {
 
 // blockClearedParams is block.cleared's payload — see contracts/block.cleared.schema.json.
 type blockClearedParams struct {
+	// SessionID names the session whose emulator was sighted erased. The
+	// notification reaches every pane's dispatcher (one socket, one
+	// client), and the live tier's surface must wipe only ITS OWN
+	// session's past — a markerless pane beside an integrated one loses
+	// nothing when the other clears (nocx-zg3k3.10.4).
+	SessionID string `json:"sessionId"`
 	// KeepEntryID is the block whose interval the erase happened inside —
 	// the command still running, which must never be hidden by its own
 	// report of the clear. Null when no interval was open at the sighting:
@@ -2051,7 +2057,7 @@ func (s *WSServer) BlockClearBoundary(sid session.ID) {
 		keepEntryID = &id
 	}
 	bs.mu.Unlock()
-	s.notifyBlockSubscriber(ctx, sid, "block.cleared", blockClearedParams{KeepEntryID: keepEntryID})
+	s.notifyBlockSubscriber(ctx, sid, "block.cleared", blockClearedParams{SessionID: string(sid), KeepEntryID: keepEntryID})
 }
 
 // closeBlockRows appends the closing rows and seals the block an interval

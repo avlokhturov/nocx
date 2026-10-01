@@ -4561,8 +4561,15 @@ export class TerminalContent extends BasePaneContent {
       // The live tier's surface rendezvouses with the same fact
       // (nocx-zg3k3.10.4): ED3 erased the emulator's saved lines, so
       // nothing painted above the live rectangle survives it, and no
-      // boundary row is invented.
-      this._liveHistory?.cleared()
+      // boundary row is invented. But the notification reaches EVERY
+      // pane's dispatcher (one socket, one client), so the wipe is scoped
+      // by the session the event names — a markerless pane beside an
+      // integrated one loses nothing when the other clears.
+      const clearedSession =
+        'sessionId' in params && typeof params.sessionId === 'string' ? params.sessionId : null
+      if (clearedSession !== null && this.session?.sessionId === clearedSession) {
+        this._liveHistory?.cleared()
+      }
       this.scrollback?.onClearBoundary(keepEntryId)
     }
     this._blockRowsUnsubs.push(

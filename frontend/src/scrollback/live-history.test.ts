@@ -683,6 +683,81 @@ describe('live-history', () => {
     expect(other.defaultPrevented).toBe(false)
   })
 
+  it('a column reflow drops the painted past and asks for the head again at once', async () => {
+    const { surface, scroller } = mount()
+    atBottom(scroller)
+    surface.setMode('unstructured')
+    const source = scriptedSource([
+      pageOf('G'.repeat(32), 0, 30, 0, false),
+      pageOf('H'.repeat(32), 0, 30, 0, false),
+    ])
+    surface.bind(source)
+    await settle()
+    expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+    expect(source.requested).toEqual([null])
+
+    // The pane reflowed: the addresses are a numbering that no longer
+    // exists, and a resize that dropped the past and waited for output
+    // would leave nothing to scroll — the wheel cannot ask for what it
+    // cannot reach. The head is re-read immediately.
+    surface.reflowed()
+    await settle()
+    expect(source.requested).toEqual([null, null])
+    expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+  })
+
+  it('a clamped wheel on an empty surface is still the gesture a lost page waits on', async () => {
+    vi.useFakeTimers()
+    try {
+      const { surface, scroller } = mount()
+      surface.setMode('unstructured')
+      // The first page's rows document never arrives; the watchdog gives
+      // the page back, and the surface is empty with no exhaustion latched.
+      const source = scriptedSource(
+        [pageOf('I'.repeat(32), 0, 10, 0, false), pageOf('J'.repeat(32), 0, 10, 0, false)],
+        { holdRows: true },
+      )
+      surface.bind(source)
+      await settle()
+      vi.advanceTimersByTime(AWAIT_ROWS_MS)
+      await settle()
+      expect(source.requested).toEqual([null])
+
+      // The live rectangle fills the scroller exactly, so the wheel-up
+      // moves nothing — clamped at zero — and the retry it stands for must
+      // still run: the gesture counts even when the pixels do not.
+      const wheel = new WheelEvent('wheel', { deltaY: -240, cancelable: true, bubbles: true })
+      scroller.dispatchEvent(wheel)
+      await settle()
+      expect(source.requested).toEqual([null, null])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('a stale rebuild honors the gesture that left: the reader lands the same distance from the tail', async () => {
+    const { surface, scroller } = mount()
+    atBottom(scroller)
+    surface.setMode('unstructured')
+    const source = scriptedSource([
+      pageOf('K'.repeat(32), 0, 30, 0, false),
+      pageOf('L'.repeat(32), 0, 30, 0, false),
+    ])
+    surface.bind(source)
+    await settle()
+    expect(scroller.scrollTop).toBe(30 * ROW_PX)
+
+    // Output dirties the painted past; the reader wheels up before the
+    // trailing refresh fires. The rebuild must not return them to the live
+    // end: they land as far from the tail as the moment they left it.
+    surface.noteOutput()
+    scrollNearTop(scroller, 100)
+    await settle()
+    expect(source.requested).toEqual([null, null])
+    expect(scroller.scrollTop).toBe(100)
+    expect(surface.el.querySelectorAll('.term-grid-row').length).toBe(30)
+  })
+
   it('a drop cancels what was in flight: a stale answer installs nothing', async () => {
     const { surface } = mount()
     surface.setMode('unstructured')
