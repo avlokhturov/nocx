@@ -877,6 +877,16 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 	// LostRows is the runtime's own loss (a struck feed immediately before
 	// em.from); the incomplete marker carries no rows and says so.
 	doc := proto.OutputRowsDoc{FromRow: em.from, LostRows: em.lost, Incomplete: em.incomplete}
+	// ONE subscribers snapshot for the whole emission, not one per split
+	// frame. A re-bind landing between two frames of the same batch used to
+	// redirect the batch's TAIL to the newcomer, who then also received the
+	// returned walk's re-delivery of those very rows from below — the same
+	// index line delivered twice, out of order, the tail-after-walk seam's
+	// loaded residual (nocx-zg3k3.5.11): the walk owns the newcomer's past,
+	// the emission belongs to whoever was bound when it started.
+	s.mu.Lock()
+	subs := s.subscribersLocked()
+	s.mu.Unlock()
 	delivered := true
 	for start := 0; start <= len(em.rows); start += rowsPerFrame {
 		stop := start + rowsPerFrame
@@ -894,9 +904,6 @@ func (s *hostSession) deliverRowEmission(em rowEmission) bool {
 			s.log.Warn("session rows not encodable", "session", s.id.Session, "err", err)
 			return false
 		}
-		s.mu.Lock()
-		subs := s.subscribersLocked()
-		s.mu.Unlock()
 		taken := 0
 		for _, sub := range subs {
 			if err := sub.sink.SendOutputRows(proto.OutputRowsFrame{
