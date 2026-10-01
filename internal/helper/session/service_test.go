@@ -1103,6 +1103,11 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 		// row index — scalars all, and no free-form []string, which is
 		// the rule this list exists to hold.
 		proto.OpConfirmRows: true,
+		// The scrollback budget (nocx-zg3k3.10.1): a session handle and a
+		// line count — a scalar and nothing else — applied through the
+		// session's runtime, so no caller can name a program with it and
+		// no free-form []string rides past the registration rule below.
+		proto.OpSetScrollback: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

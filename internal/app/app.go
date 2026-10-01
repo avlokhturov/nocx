@@ -2114,6 +2114,14 @@ func New(opts ...Option) (*App, error) {
 	// session only.
 	localOpener.rowBuffers = &rowBuffers{}
 	watchRowBuffers(settingsRegistry, localOpener.rowBuffers, tp)
+	// The person's scrollback budget (nocx-zg3k3.10.1): what a pane opened
+	// now is born with, and every change fans out to the sessions already
+	// running — this machine's helper's panes and the far registry's.
+	localOpener.scrollback = newScrollbackSetting(settingsRegistry)
+	watchScrollback(settingsRegistry, localOpener.scrollback, &scrollbackFanout{
+		local:  localOpener.scrollbackTargets,
+		remote: helperReg.scrollbackTargets,
+	})
 	localOpener.environmentEntries = envEntryRegistry
 	// The prompt seam a helper's keyboard-interactive challenge needs is the
 	// transport's own connection-password ask — the same one the coordinator's
