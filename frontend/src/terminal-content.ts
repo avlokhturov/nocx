@@ -117,6 +117,7 @@ import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboar
 import { attachTerminalLinks } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
+import { LiveHistorySurface } from './scrollback/live-history'
 import type {
   AnswerToolCall,
   BlockRecord,
@@ -1404,6 +1405,16 @@ export class TerminalContent extends BasePaneContent {
    *  revision, never an intermediate one nobody could have seen. */
   private _pendingPaint: ScreenSnapshot | null = null
   private _paintFrameHandle = 0
+  /** The live tier's scrollback surface (nocx-zg3k3.10.4): the rows above
+   *  the live rectangle in a session with no shell integration. Created at
+   *  mount beside the painter it shares its painter and its measuring
+   *  authority with; bound to the page seam per session below. */
+  private _liveHistory: LiveHistorySurface | null = null
+  /** The committed columns of the last frame this pane applied, so a
+   *  reflow — the one event that renumbers the emulator's history under
+   *  the reader (ADR-0078) — is seen by the one watcher frames flow
+   *  through. */
+  private _paintedCols: number | null = null
   // The last thing the backend said about REACHING this pane's host, and the
   // corner mark drawn from it. Null liveness is the ordinary state of a local
   // pane: this machine is never probed, so there is nothing to say about
@@ -2501,8 +2512,16 @@ export class TerminalContent extends BasePaneContent {
         // What a tool call returned, read back from the action entry it was
         // recorded under — the handle agent.runToolCall sends instead of the
         // bytes (nocx-hp8p2.13).
-        toolResult: (actionEntryId) => toolResultForEntry(this.client, actionEntryId),
+        toolResult: (actionEntryId: string) => toolResultForEntry(this.client, actionEntryId),
         runningActions: this.runningActions,
+        // The live tier's surface follows the pane's hands (nocx-zg3k3.10.4):
+        // it is the unstructured mode's alone, and a return to the live end
+        // is what drops a stale past so the next scroll-up reads the head.
+        onModeChanged: (mode) =>
+          this._liveHistory?.setMode(mode === 'unstructured' ? 'unstructured' : 'other'),
+        onTailFollow: (following) => {
+          if (following) this._liveHistory?.tailReengaged()
+        },
       })
 
       // ── THE LIVE REGION'S PAINTER (nocx-zg3k3.2.5) ─────────────────────
@@ -2538,6 +2557,27 @@ export class TerminalContent extends BasePaneContent {
         // measured before it paints, not left at the default spacing.
         warm: (candidates) => this._cellFit?.warm(candidates),
       })
+
+      // ── THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4) ───────────
+      // The rows above the live rectangle when no shell integration has
+      // ever produced a block: pages of the emulator's own scrollback,
+      // painted by the same painter (paintRow, the primitive above) with
+      // the same measuring authority (the fit at the painter's own metric
+      // supplier) and the live painter's own palette. The session seam is
+      // bound per session in attachSession; the mode and the tail follow
+      // arrive through the controller's hooks, wired above.
+      const liveHistory = new LiveHistorySurface({
+        scroller: this.scrollback.scrollbackArea,
+        stack: this.scrollback.scrollbackInner,
+        columns: () => this._cellModel?.current()?.geometry.cols ?? null,
+        metric: () => {
+          const fit = this._cellFit
+          if (fit === null || !fit.begin()) return null
+          return metricOf(fit)
+        },
+        warm: (candidates) => this._cellFit?.warm(candidates),
+      })
+      this._liveHistory = liveHistory
 
       // ── Pane context strip (decision 2026-09-15-terminal-screen-mockup-
       // decision.md §1 item 3) — chrome above the transcript, never a row
@@ -4518,6 +4558,11 @@ export class TerminalContent extends BasePaneContent {
       // the client no longer decides a clear from the command's text.
       if (typeof params !== 'object' || params === null || !('keepEntryId' in params)) return
       const keepEntryId = typeof params.keepEntryId === 'string' ? params.keepEntryId : null
+      // The live tier's surface rendezvouses with the same fact
+      // (nocx-zg3k3.10.4): ED3 erased the emulator's saved lines, so
+      // nothing painted above the live rectangle survives it, and no
+      // boundary row is invented.
+      this._liveHistory?.cleared()
       this.scrollback?.onClearBoundary(keepEntryId)
     }
     this._blockRowsUnsubs.push(
@@ -4544,6 +4589,11 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // THE LIVE TIER'S PAGE SEAM (nocx-zg3k3.10.4): the session's
+    // historyPage call and its rows carrier, handed to the surface in one
+    // bind. A rebind replaces both with the new session's — a new session
+    // is a new history space, and the bind forgets the painted past.
+    this._liveHistory?.bind(session)
     // Reclaimed bytes are flushed as soon as onData is registered. Start
     // capture before that registration so their parsed C/D markers cannot
     // outrun the later ledger restore.
@@ -4708,8 +4758,12 @@ export class TerminalContent extends BasePaneContent {
     session.onData((data: string) => {
       log.debug('nocx: session data received', { length: data.length })
       renderer.write(data)
-      if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
-        host.requestAttention()
+      if (this._bufferType === 'normal') {
+        // The live tier's past may have moved under the reader (nocx-zg3k3.10.4):
+        // rows departed while the pane wrote, so the surface re-arms on the
+        // reader's next return to the live end.
+        this._liveHistory?.noteOutput()
+        if (Date.now() >= this.echoUntil) host.requestAttention()
       }
     })
     // THE PANE'S CELL MODEL (nocx-zg3k3.2.8). One per pane, created here —
@@ -4980,6 +5034,15 @@ export class TerminalContent extends BasePaneContent {
    * inside the painter makes the pass cheap: an unchanged row keeps its DOM.
    */
   private _paintFrame(snapshot: ScreenSnapshot): void {
+    // THE ONE WATCHER FRAMES FLOW THROUGH (nocx-zg3k3.10.4): a column
+    // change is a reflow, and a reflow renumbers the emulator's history
+    // under the reader (ADR-0078) — the surface drops its pages rather
+    // than show rows at addresses that no longer exist. A rows-only
+    // change renumbers nothing.
+    if (snapshot.geometry.cols !== this._paintedCols) {
+      this._paintedCols = snapshot.geometry.cols
+      this._liveHistory?.reflowed()
+    }
     this._pendingPaint = snapshot
     if (this._paintFrameHandle !== 0) return
     this._paintFrameHandle = requestAnimationFrame(() => {
@@ -8048,6 +8111,8 @@ export class TerminalContent extends BasePaneContent {
     this._painterSurface = null
     this._cellFit?.dispose()
     this._cellFit = null
+    this._liveHistory?.dispose()
+    this._liveHistory = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()
