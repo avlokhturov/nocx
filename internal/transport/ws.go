@@ -312,6 +312,10 @@ type WSServer struct {
 	// screenResender asks for the frame a subscriber is owed the moment it is
 	// installed (screen.go). Nil sends nothing until the next revision.
 	screenResender ScreenResender
+	// historyPager answers session.historyPage from the helper that holds a
+	// session's terminal (history_page.go). Nil leaves the method
+	// unregistered, exactly as an unwired store leaves session.output.
+	historyPager HistoryPager
 	// paneObserver classifies an enrolled pane's grid and reports the
 	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
 	paneObserver paneObserver
@@ -1839,6 +1843,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.agentCalibrationSpecs()...)
 	specs = append(specs, s.agentTypeSpecs()...)
 	specs = append(specs, s.seamSpecs(lane, gates.session)...)
+	specs = append(specs, s.historyPageSpecs(lane, gates.session)...)
 	methods, err := buildMethodSpecs(specs)
 	if err != nil {
 		panic("nocx: control-plane registration: " + err.Error())

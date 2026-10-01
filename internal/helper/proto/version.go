@@ -277,4 +277,11 @@ package proto
 // the budget it was spawned with. The field rides the same reasoning that
 // widened the spawn shapes twice already at 15, and nothing has shipped at
 // 15 to reject it.
+// This is still 15, widened in place for the same reason: the session service
+// gained `history-page`, one page of a session's live scrollback read as the
+// emulator holds it (nocx-zg3k3.10.3). An older generation answers
+// `unknown_op`, which the coordinator reads as "this machine's helper is
+// older than this app" — a pane whose history cannot be paged, which is a
+// fact about the generation and not about the session. Nothing shipped at 15
+// carries a shape the op changes, so nothing moved with it.
 const Version = "15"

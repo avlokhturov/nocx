@@ -68,6 +68,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 	}
 	invalid = append(invalid, idsProbe)
 	valid := map[string][][]byte{
+		"session.historyPage": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":null,"limit":30}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","before":17,"limit":1}`),
+		},
 		"notes.create": {
 			[]byte(`{}`),
 			[]byte(`{"body":"body"}`),
