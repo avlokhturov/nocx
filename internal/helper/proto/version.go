@@ -267,4 +267,21 @@ package proto
 // gained `incomplete`, the helper's one marker that its row buffer overflowed,
 // and both spawn shapes `rowBufferBytes`, the person's bound on that buffer
 // (nocx-2v80t.3.36). Nothing has shipped at 15.
+// This is still 15, widened in place for the same reason: the session
+// service gained `set-scrollback`, the op by which the coordinator applies
+// the person's scrollback budget to a RUNNING session's emulator, and both
+// spawn shapes gained `scrollbackLines`, the budget read at spawn
+// (nocx-zg3k3.10.1). The op is the half that degrades by generation: an
+// older generation answers unknown_op, which the coordinator reads as "this
+// machine's helper is older than this app" and tolerates — the pane keeps
+// the budget it was spawned with. The field rides the same reasoning that
+// widened the spawn shapes twice already at 15, and nothing has shipped at
+// 15 to reject it.
+// This is still 15, widened in place for the same reason: the session service
+// gained `history-page`, one page of a session's live scrollback read as the
+// emulator holds it (nocx-zg3k3.10.3). An older generation answers
+// `unknown_op`, which the coordinator reads as "this machine's helper is
+// older than this app" — a pane whose history cannot be paged, which is a
+// fact about the generation and not about the session. Nothing shipped at 15
+// carries a shape the op changes, so nothing moved with it.
 const Version = "15"

@@ -435,6 +435,13 @@ export interface SessionFake {
   onScreenFrame: ReturnType<typeof vi.fn>
   /** Fire the registered screen-frame callback with one document. */
   fireScreenFrame(frame: SessionFrame): void
+  /** The live tier's page seam (nocx-zg3k3.10.4): rows documents arrive
+   *  on the carrier the surface registers here. */
+  onHistoryPageRows: ReturnType<typeof vi.fn>
+  /** One page of the live history, as session.historyPage answers it. The
+   *  default is the empty head read of an empty history — inert to every
+   *  pane behavior that does not scroll. */
+  historyPage: ReturnType<typeof vi.fn>
   /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
    *  undefined for a handle that was opened rather than taken back. `size` is
    *  the grid the BACKEND says the session runs at — the one the recovered
@@ -506,6 +513,20 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onScreenFrame: vi.fn((cb: (frame: SessionFrame) => void) => {
       screenCb = cb
     }),
+    // The live tier's page seam (nocx-zg3k3.10.4): the default answers the
+    // head read with the empty page of an empty history, so a pane test
+    // that never scrolls never pages.
+    onHistoryPageRows: vi.fn(),
+    historyPage: vi.fn(() =>
+      Promise.resolve({
+        pageId: 'a1b2c3d4e5f6a7b8a1b2c3d4e5f6a7b8',
+        start: 0,
+        end: 0,
+        floor: 0,
+        more: false,
+        durableThrough: null,
+      }),
+    ),
     fireData: (data: string) => {
       dataCb?.(data)
     },

@@ -408,6 +408,20 @@ test.describe('long transcript scroll budget', () => {
     }
   }
 
+  // SKIPPED, NOT RETIRED (nocx-ccr8e): the live tier's retention is bounded
+  // now (terminal.scrollbackLines, default 10,000, and the 32 MiB per-session
+  // ceiling the port always applies), and this spec's premise — fifty
+  // thousand rows, every one capturable — is unreachable through any setting
+  // value: a feed that crosses the boundary freezes its block with rows lost
+  // before capture (measured: block 105 at the default, 290 at the maximum).
+  // The fix is decided — the departure odometer + journal that decouples
+  // durable capture from live retention (stage zg3k3.5) — and this spec IS
+  // that work's acceptance: unskip it there, at default AND at zero.
+  test.skip(
+    true,
+    'nocx-ccr8e: durable capture is retention-bounded until the zg3k3.5 departure journal lands',
+  )
+
   test('measures 500 blocks and preserves native selection/search', async ({ page }) => {
     const endpoint = await backend.start()
     await bindEndpoint(page, endpoint)

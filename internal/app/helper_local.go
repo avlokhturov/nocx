@@ -341,6 +341,10 @@ type localHelperOpener struct {
 	// rowBuffers carries the helper's row buffer setting to each spawn
 	// (nocx-2v80t.3.36). Nil sends zero, the helper's default.
 	rowBuffers *rowBuffers
+	// scrollback is the person's scrollback budget (nocx-zg3k3.10.1): what a
+	// pane this opener creates is born with, and what a change fans out to
+	// every live session through watchScrollback.
+	scrollback *scrollbackSetting
 	// environmentEntries is the lane -> downlink registry
 	// (environment_entry.go, nocx-2v80t.3.21), bound late for the same
 	// reason blockRows is. Nil wires nothing.
@@ -693,6 +697,10 @@ func (o *localHelperOpener) OpenHosted(ctx context.Context, cfg session.Config, 
 				// The person's row buffer setting, as it reads now: a
 				// changed value applies to the next pane (nocx-2v80t.3.36).
 				RowBufferBytes: o.rowBuffers.helperBytes(),
+				// The person's scrollback budget, as it reads now
+				// (nocx-zg3k3.10.1): the budget a pane is born with, while a
+				// change reaches the panes already running through the watch.
+				ScrollbackLines: o.scrollback.linesPtr(),
 				// THIS backend's own tool endpoint, carried per pane
 				// (nocx-50w7p.18): the pane's tools belong to the coordinator
 				// that opened it, and the daemon cannot know which of its
@@ -925,6 +933,10 @@ func (o *localHelperOpener) openSSH(ctx context.Context, spawn hostedSpawn, cfg 
 	params := proto.SSHSpawnParams{
 		// The person's row buffer setting, as it reads now (nocx-2v80t.3.36).
 		RowBufferBytes: o.rowBuffers.helperBytes(),
+		// The person's scrollback budget, as it reads now (nocx-zg3k3.10.1):
+		// the budget a pane is born with, while a change reaches the panes
+		// already running through the watch.
+		ScrollbackLines: o.scrollback.linesPtr(),
 		// ConnectionName and ProfileID ride on WireDestination itself now
 		// (internal/ssh's resolveDialEndpoint reads them off the resolved
 		// config), so every destination this coordinator builds — this

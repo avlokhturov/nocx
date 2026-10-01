@@ -20,6 +20,8 @@ export type { SessionSize }
 import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionFrame } from './generated/session.frame'
+import type { SessionHistoryPage } from './generated/session.historyPage'
+import type { SessionHistoryPageRows } from './generated/session.historyPageRows'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import { log } from './log'
 import { isDriverState, isPaneProgress, readPaneChildren } from './pane-observation'
@@ -367,6 +369,12 @@ interface SessionState {
   // equivalent on purpose: buffering would only move the same superseded
   // snapshot one hop.
   screenFrameCallback: ((frame: SessionFrame) => void) | null
+  // historyPageCallback receives one parsed session.historyPageRows
+  // document (nocx-zg3k3.10.3) — the rows of one live-history page, riding
+  // the same metadata frame the screen plane shares, keyed by the pageId
+  // the session.historyPage result names. The correlation is the caller's:
+  // this layer delivers the document as parsed, exactly as a frame's.
+  historyPageCallback: ((page: SessionHistoryPageRows) => void) | null
   // exitCallback receives the wire Exit (contracts/exit.schema.json): the
   // closed-set cause separating an authoritative shell exit (with its
   // status) from a loss. The failed-reattach path delivers a loss with the
@@ -541,6 +549,26 @@ export class SessionHandle {
    *  side refuses what it cannot install, and nothing here counts or acks. */
   onScreenFrame(cb: (frame: SessionFrame) => void): void {
     this.client.onSessionScreenFrame(this.sessionId, cb)
+  }
+
+  /** Asks for one page of this session's live history, as the emulator
+   *  holds it (nocx-zg3k3.10.3). before is the exclusive upper bound in the
+   *  absolute row numbering every result carries — null asks for the head.
+   *  The RESULT carries the page's facts; the rows arrive separately, on
+   *  the screen plane, keyed by the result's pageId — see
+   *  onHistoryPageRows. A dropped page (nobody attached, or the outbound
+   *  queue refused it) rejects; the caller retries, it is not an error to
+   *  survive silently. */
+  historyPage(before: number | null, limit: number): Promise<SessionHistoryPage> {
+    return this.client.historyPage(this.sessionId, before, limit)
+  }
+
+  /** Registers a callback for one live-history page's rows: the parsed
+   *  session.historyPageRows document whose pageId a historyPage result
+   *  named. Same plane, same policy as onScreenFrame — the model validates
+   *  on intake, nothing here counts or acks. */
+  onHistoryPageRows(cb: (page: SessionHistoryPageRows) => void): void {
+    this.client.onSessionHistoryPageRows(this.sessionId, cb)
   }
 }
 
@@ -943,18 +971,31 @@ export class WSClient {
       })
       return
     }
-    let doc: SessionFrame
+    let parsed: unknown
     try {
       // Boundary assertion: the payload is wire JSON the model validates on
       // intake; the parse here is the only shape this layer judges.
-      doc = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload))) as SessionFrame
+      parsed = JSON.parse(new TextDecoder().decode(new Uint8Array(frame.payload)))
     } catch {
-      log.debug('nocx: screen frame dropped: payload is not a frame document', {
+      log.debug('nocx: screen plane dropped: payload is not a JSON document', {
         sessionId: frame.sessionId,
       })
       return
     }
-    state.screenFrameCallback?.(doc)
+    // One carrier, two cargos (nocx-zg3k3.10.3): a live-history page names
+    // its pageId; a screen frame never does — the frame contract is
+    // additionalProperties:false and has no such field, so a frame carrying
+    // one would be malformed at the source. The discrimination is exact,
+    // not a guess from shape.
+    const candidate =
+      parsed !== null && typeof parsed === 'object'
+        ? (parsed as { pageId?: unknown; rows?: unknown })
+        : undefined
+    if (typeof candidate?.pageId === 'string' && Array.isArray(candidate.rows)) {
+      state.historyPageCallback?.(parsed as SessionHistoryPageRows)
+      return
+    }
+    state.screenFrameCallback?.(parsed as SessionFrame)
   }
 
   // --- ack plumbing -------------------------------------------------------
@@ -1104,6 +1145,7 @@ export class WSClient {
       reported,
       dataCallback: null,
       screenFrameCallback: null,
+      historyPageCallback: null,
       pendingData: '',
       exitCallback: null,
       resetCallback: null,
@@ -1457,6 +1499,29 @@ export class WSClient {
    */
   signalSession(sessionId: string, signal: SessionSignal['signal']): Promise<SessionSignal> {
     return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
+  }
+
+  /** Asks for one page of a session's live history (nocx-zg3k3.10.3). The
+   *  answer's facts ride the result; the rows ride the screen plane keyed
+   *  by the result's pageId — one socket, one FIFO, so a caller reading in
+   *  order finds the rows already queued when the promise resolves. */
+  historyPage(
+    sessionId: string,
+    before: number | null,
+    limit: number,
+  ): Promise<SessionHistoryPage> {
+    return this.dispatcher.call<SessionHistoryPage>('session.historyPage', {
+      sessionId,
+      before,
+      limit,
+    })
+  }
+
+  onSessionHistoryPageRows(sessionId: string, cb: (page: SessionHistoryPageRows) => void): void {
+    const state = this.sessions.get(sessionId)
+    if (state) {
+      state.historyPageCallback = cb
+    }
   }
 
   detachSession(sessionId: string): void {

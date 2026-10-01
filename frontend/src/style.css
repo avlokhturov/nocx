@@ -613,6 +613,31 @@
   flex: none;
 }
 
+/* THE LIVE TIER'S SCROLLBACK SURFACE (nocx-zg3k3.10.4, ADR-0078): the rows
+   above the live rectangle in a session with no shell integration, painted
+   from the pages session.historyPage answers with by the same painter as
+   the live screen. Hidden by default, and shown by exactly one state — the
+   unstructured mode owning the pane — so a missed JS transition can never
+   leak the past into a block transcript or an alt-screen program's pane:
+   the filled-pane exclusion above hides the surface beside every other
+   child while `inner-fullscreen-mode` is set and `inner-unstructured` is
+   not, which is the rule that keeps Page Up and the scrollbar from
+   revealing the primary's history while a full-screen program runs.
+   `.term-grid-row` shares the live rows' type context (the shared rule
+   above), so the surface itself carries only what `.term-grid` carries:
+   the mono family the measuring probe assumes. The gutter padding comes
+   from the same `.scrollback-inner > *` rule the live region wears, which
+   is why the columns of a history row and a live row are one grid. */
+.live-history {
+  display: none;
+  flex: none;
+  font-family: var(--font-family-mono);
+}
+
+.scrollback-inner.inner-unstructured > .live-history:not([hidden]) {
+  display: block;
+}
+
 /* Xterm wrapper: always has a stable min-height so xterm.fit() produces a
    sane grid even when the content clip is one row tall. xterm mounts here,
    inside the clip.

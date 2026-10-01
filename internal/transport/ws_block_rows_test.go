@@ -1338,10 +1338,14 @@ func TestBlockClearBoundary_KeepsTheRunningCommandAndNotifies(t *testing.T) {
 		t.Fatalf("block.cleared frame did not decode: %s", msg)
 	}
 	var params struct {
+		SessionID   string  `json:"sessionId"`
 		KeepEntryID *string `json:"keepEntryId"`
 	}
 	if err = json.Unmarshal(frame.Params, &params); err != nil {
 		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.SessionID != sid {
+		t.Fatalf("sessionId = %q, want the sighted session %q: the live tier's wipe is scoped by it (nocx-zg3k3.10.4)", params.SessionID, sid)
 	}
 	if params.KeepEntryID == nil || *params.KeepEntryID != attempt {
 		t.Fatalf("keepEntryId = %v, want the running command's own entry %q", params.KeepEntryID, attempt)
@@ -1400,10 +1404,14 @@ func TestBlockClearBoundary_NoOpenBlockKeepsNothing(t *testing.T) {
 		t.Fatalf("block.cleared frame did not decode: %s", msg)
 	}
 	var params struct {
+		SessionID   string  `json:"sessionId"`
 		KeepEntryID *string `json:"keepEntryId"`
 	}
 	if err = json.Unmarshal(frame.Params, &params); err != nil {
 		t.Fatalf("decode block.cleared params: %v", err)
+	}
+	if params.SessionID != sid {
+		t.Fatalf("sessionId = %q, want the sighted session %q: the live tier's wipe is scoped by it (nocx-zg3k3.10.4)", params.SessionID, sid)
 	}
 	if params.KeepEntryID != nil {
 		t.Fatalf("keepEntryId = %q, want null: nothing was open", *params.KeepEntryID)
