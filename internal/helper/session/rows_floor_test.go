@@ -30,20 +30,18 @@ func TestTheResendWalksFromTheRunningIntervalsStart(t *testing.T) {
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back, and the resend runs.
+	// It comes back through the real attachment path, which arms the
+	// resend before exposing the reader to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(4, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
 	if len(batches) == 0 {
 		t.Fatalf("the resend delivered nothing")
 	}
-	if batches[0].from != 0 {
-		t.Fatalf("the resend starts at %d, want the running interval's own start 0 — the head rows are the command's", batches[0].from)
+	if batches[0].from != 16 {
+		t.Fatalf("the resend starts at %d, want the prefix-confirmed watermark 16", batches[0].from)
 	}
 }
 
@@ -57,7 +55,7 @@ func TestTheResendWalksFromTheEarliestIntervalEvenAfterItEnds(t *testing.T) {
 	hs, rt, sink := rowsBridgeSession(t, 80, 24)
 
 	// The interval opens, streams [0..16), and the coordinator confirms
-	// all sixteen — its mark leaps past rows its artifact may not hold.
+	// that retained prefix. Those bytes can now be reclaimed.
 	if err := rt.Ingest([]byte("\x1b]133;C\x07")); err != nil {
 		t.Fatalf("ingest the output mark: %v", err)
 	}
@@ -67,8 +65,8 @@ func TestTheResendWalksFromTheEarliestIntervalEvenAfterItEnds(t *testing.T) {
 		t.Fatalf("confirm the stored rows: %v", err)
 	}
 
-	// The command ends: the interval seals, and the in-flight record —
-	// the running start with it — is gone.
+	// The command ends while the coordinator is away. The retained window
+	// still defines the unconfirmed resend span.
 	if err := rt.Ingest([]byte("\x1b]133;D\x07")); err != nil {
 		t.Fatalf("ingest the command end: %v", err)
 	}
@@ -79,19 +77,17 @@ func TestTheResendWalksFromTheEarliestIntervalEvenAfterItEnds(t *testing.T) {
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back, and the resend runs.
+	// It comes back through the real attachment path, which arms the
+	// resend before exposing the reader to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 	sink2.waitFor(1, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
 	if len(batches) == 0 {
 		t.Fatalf("the resend delivered nothing")
 	}
-	if batches[0].from != 0 {
-		t.Fatalf("the resend starts at %d, want the ended interval's own start 0 — the mark leapt past the head and nothing else bounds the walk", batches[0].from)
+	if batches[0].from != 16 {
+		t.Fatalf("the resend starts at %d, want the prefix-confirmed watermark 16", batches[0].from)
 	}
 }

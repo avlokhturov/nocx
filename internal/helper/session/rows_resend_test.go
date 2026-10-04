@@ -1,12 +1,8 @@
 package session
 
-// The resend (nocx-zg3k3.5.3): what the pump dropped for want of a
-// subscriber, the coordinator's return reads back out of ghostty's
-// scrollback. The runtime is the real one over the real emulator, exactly as
-// rows_test.go's stands are: the invariant under test is that the history
-// rows the pump can name — the ones at the top, down to the row the
-// confirmed-written mark names — ARE the dropped stream rows, at the same
-// absolute indices the stream would have carried.
+// The resend acceptance checks (nocx-ho1ri): original cells survive disconnects,
+// acknowledgements reclaim only proven prefixes, and the helper states loss
+// when a span is absent from its bounded retained window.
 
 import (
 	"encoding/json"
@@ -14,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/emulator"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/sessionruntime"
 )
@@ -21,10 +18,11 @@ import (
 // resentRows decodes every row frame a sink recorded into (fromRow, texts)
 // pairs, in arrival order.
 type resentRows struct {
-	from  uint64
-	lost  uint64
-	cause string
-	texts []string
+	from       uint64
+	lost       uint64
+	cause      string
+	incomplete bool
+	texts      []string
 }
 
 func decodeResentRows(t *testing.T, frames []proto.OutputRowsFrame) []resentRows {
@@ -32,17 +30,18 @@ func decodeResentRows(t *testing.T, frames []proto.OutputRowsFrame) []resentRows
 	var out []resentRows
 	for _, f := range frames {
 		var doc struct {
-			FromRow   uint64 `json:"fromRow"`
-			LostRows  uint64 `json:"lostRows"`
-			LostCause string `json:"lostCause"`
-			Rows      []struct {
+			FromRow    uint64 `json:"fromRow"`
+			LostRows   uint64 `json:"lostRows"`
+			LostCause  string `json:"lostCause"`
+			Incomplete bool   `json:"incomplete"`
+			Rows       []struct {
 				Text string `json:"text"`
 			} `json:"rows"`
 		}
 		if err := json.Unmarshal(f.Payload, &doc); err != nil {
 			t.Fatalf("decode a resent rows payload: %v\n%s", err, f.Payload)
 		}
-		r := resentRows{from: doc.FromRow, lost: doc.LostRows, cause: doc.LostCause}
+		r := resentRows{from: doc.FromRow, lost: doc.LostRows, cause: doc.LostCause, incomplete: doc.Incomplete}
 		for _, row := range doc.Rows {
 			r.texts = append(r.texts, row.Text)
 		}
@@ -68,31 +67,25 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 		t.Fatalf("confirm the stored rows: %v", err)
 	}
 
-	// The coordinator goes away. The command keeps printing: a hundred more
-	// lines, every one of them departing for nobody.
 	hs.mu.Lock()
 	delete(hs.subs, "coord-1")
 	hs.mu.Unlock()
 	rowsFeed(t, rt, 100, 100)
 
-	// It comes back.
+	// It comes back through the real attach path, which arms the resend
+	// before making the new reader visible to queued output.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
-	// The resend: rows 0..115 — the command's whole streamed output. The
-	// walk's lower bound is the running interval's own start (Round 8):
-	// the mark alone no longer clamps it, because a first ack can have
-	// leapt over rows the coordinator's block never held. The coordinator
-	// trims the overlap it already holds; the index never skips.
+	// The resend begins at the prefix-confirmed watermark. Those rows have
+	// been reclaimed from the helper's bounded window and need not be sent
+	// again; the unconfirmed suffix is served from original retained cells.
 	sink2.waitFor(4, 0, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
 	var got []string
 	for i, b := range batches {
-		wantFrom := uint64(0)
+		wantFrom := uint64(16)
 		if i > 0 {
 			wantFrom = batches[i-1].from + uint64(len(batches[i-1].texts))
 		}
@@ -113,18 +106,126 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 	// arithmetic suggests; the texts below are what the scrollback provably
 	// held, and the assertion pins order, indices and content against them.
 	want = nil
-	for i := 0; i < 40; i++ {
+	for i := 16; i < 40; i++ {
 		want = append(want, fmt.Sprintf("L%06d", i))
 	}
-	for i, n := 100, len(got)-40; i < 100+n; i++ {
+	for i, n := 100, len(got)-24; i < 100+n; i++ {
 		want = append(want, fmt.Sprintf("L%06d", i))
 	}
-	if len(got) <= 40 {
-		t.Fatalf("the resent rows are %d, want more than the mark-time screen held", len(got))
+	if len(got) <= 24 {
+		t.Fatalf("the resent rows are %d, want the retained unconfirmed suffix", len(got))
 	}
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the resent rows are not the command's whole output:\n got %d rows %q\nwant %d rows %q",
 			len(got), strings.Join(got, ","), len(want), strings.Join(want, ","))
+	}
+}
+
+// A new subscriber can attach after an output emission was queued but before
+// the pump observed that it had no recipient. In that ordering the queued
+// emission itself does not arm resendDue, so attaching must compare the
+// confirmed mark with the runtime's departure count and request replay before
+// the pump delivers queued rows to the new reader.
+func TestNewReaderReplaysUnconfirmedRowsBeforeQueuedOutput(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	rowsFeed(t, rt, 0, 45)
+	first.waitFor(1, 0, 0)
+	if err := hs.confirmRows(first, "coord-1", 16); err != nil {
+		t.Fatalf("confirm the stored prefix: %v", err)
+	}
+	<-hs.requestRowsDrain()
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+
+	second := newRowsSink()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", second)
+
+	// Drain gives the pump's queue-empty observation without timing. During
+	// a shutdown drain replay is intentionally paused, so if the pump has not
+	// already sent the new reader's replay, the test checks that attach armed
+	// it and invokes the same retained walk synchronously.
+	<-hs.requestRowsDrain()
+	frames := decodeResentRows(t, second.rowFrames())
+	if len(frames) == 0 {
+		hs.rowMu.Lock()
+		due := hs.resendDue
+		hs.rowMu.Unlock()
+		if !due {
+			t.Fatal("attaching a new reader did not arm a resend of its unconfirmed rows")
+		}
+		if !hs.resendFromScrollback() {
+			t.Fatal("the retained unconfirmed rows could not be replayed to the new reader")
+		}
+		frames = decodeResentRows(t, second.rowFrames())
+	}
+	if len(frames) == 0 || frames[0].from != 16 {
+		var got uint64
+		if len(frames) != 0 {
+			got = frames[0].from
+		}
+		t.Fatalf("new reader's first rows start at %d, want unconfirmed watermark 16", got)
+	}
+}
+
+// Pending output must remain after the replay prefix. The retained walk ends
+// at the first still-queued row, then the FIFO resumes at that row exactly
+// once. This forces the attach/pump ordering that is scheduler-dependent in
+// the package's ordinary full run.
+func TestReaderReplayStopsAtThePendingQueueHead(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	rowsFeed(t, rt, 0, 45)
+	first.waitFor(1, 0, 0)
+	if err := hs.confirmRows(first, "coord-1", 16); err != nil {
+		t.Fatalf("confirm the stored prefix: %v", err)
+	}
+	<-hs.requestRowsDrain()
+
+	const queuedFrom = uint64(20)
+	queued := make([]emulator.Row, 0, 2)
+	hs.rowMu.Lock()
+	for _, span := range hs.resendWindow {
+		for i, row := range span.rows {
+			index := span.from + uint64(i) //nolint:gosec // slice index is non-negative
+			if index >= queuedFrom && index < queuedFrom+2 {
+				queued = append(queued, row)
+			}
+		}
+	}
+	em := rowEmission{from: queuedFrom, rows: queued}
+	em.bytes = emissionBytes(em)
+	if len(queued) != 2 || !hs.rowPool.charge(rowOwnerFIFO, em.bytes) {
+		hs.rowMu.Unlock()
+		t.Fatalf("could not queue two retained rows from %d", queuedFrom)
+	}
+	hs.rowQueue = append(hs.rowQueue, em)
+	hs.rowQueuedBytes += em.bytes
+	hs.rowMu.Unlock()
+
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+	second := newRowsSink()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", second)
+
+	second.waitFor(1, 0, 0)
+	firstBatch := decodeResentRows(t, second.rowFrames())
+	if firstBatch[0].from != 16 {
+		t.Fatalf("the pending output overtook resend: first FromRow is %d, want 16", firstBatch[0].from)
+	}
+	second.waitFor(2, 0, 0)
+	batches := decodeResentRows(t, second.rowFrames())
+	if len(batches) != 2 || batches[1].from != queuedFrom {
+		t.Fatalf("the pending queue did not resume at %d after the replay: %+v", queuedFrom, batches)
+	}
+	if texts := append(batches[0].texts, batches[1].texts...); len(texts) != 6 {
+		t.Fatalf("replay plus queued output delivered %d rows, want 6", len(texts))
+	} else {
+		for i, text := range texts {
+			if want := fmt.Sprintf("L%06d", 16+i); text != want {
+				t.Fatalf("row %d = %q, want %q", i, text, want)
+			}
+		}
 	}
 }
 
@@ -135,6 +236,50 @@ func TestThePumpResendsTheRowsItDroppedForNoSubscriber(t *testing.T) {
 // pump handed out), and the next attach must read the scrollback back from
 // the mark, or the taken rows are silently gone: never re-sent, never
 // counted. Ordered events, no load.
+func TestReplacingAnAttachedReaderResendsItsUnconfirmedRows(t *testing.T) {
+	hs, rt, first := rowsBridgeSession(t, 80, 24)
+	subscriberID := proto.SubscriberID("11111111111111111111111111111111")
+	hs.mu.Lock()
+	old := hs.subs["coord-1"]
+	delete(hs.subs, "coord-1")
+	old.id = subscriberID
+	old.attachment = "att-old"
+	old.stop = func() {}
+	old.wake = newGate()
+	old.lifecycleWake = newGate()
+	old.done = make(chan struct{})
+	close(old.done)
+	old.lifecycleDone = make(chan struct{})
+	close(old.lifecycleDone)
+	hs.subs[subscriberID] = old
+	hs.attachments = map[proto.AttachmentID]*attachment{"att-old": {id: "att-old", subscriber: subscriberID, sink: first}}
+	hs.mu.Unlock()
+
+	rowsFeed(t, rt, 0, 40)
+	first.waitFor(1, 0, 0)
+
+	// The old connection is replaced before its asynchronous detach reaches
+	// the helper. Its last rows were delivered but never confirmed, so the
+	// replacement must replay them from the retained window.
+	second := newRowsSink()
+	_, err := hs.attach(proto.AttachParams{Subscriber: subscriberID, Session: hs.id, Fresh: true},
+		second, func() proto.AttachmentID { return "att-new" }, hs.log)
+	if err != nil {
+		t.Fatalf("replace attached reader: %v", err)
+	}
+	t.Cleanup(func() { hs.detach(second, "att-new") })
+	hs.rowMu.Lock()
+	resendDue := hs.resendDue
+	hs.rowMu.Unlock()
+	if !resendDue {
+		t.Fatal("replacing an attached reader did not arm a resend of its unconfirmed rows")
+	}
+	second.waitFor(1, 0, 0)
+	if got := decodeResentRows(t, second.rowFrames()); len(got) == 0 || len(got[0].texts) == 0 {
+		t.Fatalf("replacement reader received no unconfirmed rows: %+v", got)
+	}
+}
+
 func TestThePumpResendsRowsAnUnconfirmingReaderTook(t *testing.T) {
 	hs, rt, sink := rowsBridgeSession(t, 80, 24)
 
@@ -166,10 +311,7 @@ func TestThePumpResendsRowsAnUnconfirmingReaderTook(t *testing.T) {
 
 	// The coordinator comes back.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	// The sixteen taken rows are read back from the scrollback: the mark
 	// never moved, and it is the only dedup line there is.
@@ -255,10 +397,7 @@ func TestThePumpResendsAnEndItDroppedForNoSubscriber(t *testing.T) {
 
 	// It comes back.
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	sink2.waitFor(1, 1, 0)
 
@@ -335,24 +474,24 @@ func TestThePumpCountsWhatItCannotProveBelowADroppedBoundary(t *testing.T) {
 	}
 
 	sink2 := newRowsSink()
-	hs.mu.Lock()
-	hs.subs["coord-2"] = &subscriber{id: "coord-2", raw: mintRaw(t), sink: sink2}
-	hs.mu.Unlock()
-	hs.wakeRows()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
 
 	sink2.waitFor(2, 1, 0)
 
 	batches := decodeResentRows(t, sink2.rowFrames())
-	// First frame: the counted gap [4, 17), stated where the survivors start.
-	gap := batches[0]
-	if gap.lost != 13 || gap.from != 17 || len(gap.texts) != 0 {
-		t.Fatalf("the first frame = (from %d, lost %d, %d rows), want the counted gap [4, 17) with no rows",
-			gap.from, gap.lost, len(gap.texts))
+	// The helper retained the unconfirmed original rows before the dropped
+	// boundary, so resend them before the end marker rather than rebuilding
+	// the span from live history.
+	prior := batches[0]
+	if prior.from != 4 || prior.lost != 0 || prior.incomplete || len(prior.texts) != 13 {
+		t.Fatalf("the retained pre-boundary rows = %+v, want [4,17)", prior)
 	}
-	if gap.cause != "coordinator-unavailable" {
-		t.Fatalf("the gap's cause = %q, want the absence named", gap.cause)
+	for i, text := range prior.texts {
+		if want := fmt.Sprintf("L%06d", i+4); text != want {
+			t.Fatalf("retained row %d = %q, want %q", i+4, text, want)
+		}
 	}
-	// The end marker sits between the gap and the survivors: stream order.
+	// The end marker sits between retained rows and the survivors: stream order.
 	ends := sink2.endFrames()
 	if len(ends) != 1 || ends[0].EndRow != 17 {
 		t.Fatalf("the re-emitted end = %+v, want the boundary at row 17", ends[0])
@@ -377,5 +516,86 @@ func TestThePumpCountsWhatItCannotProveBelowADroppedBoundary(t *testing.T) {
 	if strings.Join(got, "\n") != strings.Join(want, "\n") {
 		t.Fatalf("the survivors are not the rows above the boundary:\n got %d %q\nwant %d %q",
 			len(got), strings.Join(got, ","), len(want), strings.Join(want, ","))
+	}
+}
+
+// A high ack cannot reclaim across a missing retained head: the scalar
+// watermark alone does not prove that the helper ever retained that prefix.
+func TestAckLeapingOverMissingRetainedHeadReclaimsNothing(t *testing.T) {
+	hs, rt, sink := rowsBridgeSession(t, 80, 24)
+	rowsFeed(t, rt, 0, 40)
+	sink.waitFor(1, 0, 0)
+	rows := []emulator.Row{textRow("after-hole")}
+	bytes := emissionBytes(rowEmission{rows: rows})
+	hs.rowMu.Lock()
+	// This is an intentionally sparse retained-window fixture. Charge it
+	// through the pool primitive, as the production enqueue path does, then
+	// verify the user-visible ack watermark and retained record stay put.
+	if !hs.rowPool.charge(rowOwnerResend, bytes) {
+		hs.rowMu.Unlock()
+		t.Fatal("could not charge test retained row")
+	}
+	hs.resendWindow = []retainedRowSpan{{from: 5, rows: rows, bytes: bytes}}
+	hs.rowMu.Unlock()
+	if err := hs.confirmRows(sink, "coord-1", 10); err != nil {
+		t.Fatalf("ack: %v", err)
+	}
+	if hs.rowsConfirmed != 0 {
+		t.Fatalf("confirmed watermark advanced across unproven head to %d", hs.rowsConfirmed)
+	}
+	hs.rowMu.Lock()
+	defer hs.rowMu.Unlock()
+	if len(hs.resendWindow) != 1 || hs.resendWindow[0].from != 5 || len(hs.resendWindow[0].rows) != 1 {
+		t.Fatalf("ack across missing head changed retained window: %+v", hs.resendWindow)
+	}
+}
+
+func TestResendSurvivesLiveHistoryPrune(t *testing.T) {
+	hs, rt, sink := rowsBridgeSession(t, 80, 24)
+	hs.rowBufferBytes = 64 << 20
+	rowsFeed(t, rt, 0, 40)
+	sink.waitFor(1, 0, 0)
+	initial := decodeResentRows(t, sink.rowFrames())
+	if len(initial) == 0 || len(initial[0].texts) == 0 {
+		t.Fatal("initial emission contained no rows")
+	}
+	first := initial[0].texts[0]
+	hs.mu.Lock()
+	delete(hs.subs, "coord-1")
+	hs.mu.Unlock()
+	for base := 100; base < 4100; base += 100 {
+		rowsFeed(t, rt, base, 100)
+	}
+	var liveHasFirst bool
+	_, _, err := rt.ReadDepartedScreen(func(_ uint64, terminal emulator.Terminal) error {
+		page, err := terminal.HistoryRows(0, 0)
+		if err != nil {
+			return err
+		}
+		for _, row := range page.Rows {
+			var text strings.Builder
+			for _, cell := range row.Cells {
+				if cell.HasText {
+					text.WriteString(cell.Grapheme)
+				}
+			}
+			if strings.TrimRight(text.String(), " ") == first {
+				liveHasFirst = true
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read live history: %v", err)
+	}
+	if liveHasFirst {
+		t.Fatal("the setup did not prune the initial emitted row from live history")
+	}
+	sink2 := newRowsSink()
+	rowsAttachReader(t, hs, "22222222222222222222222222222222", sink2)
+	sink2.waitFor(1, 0, 0)
+	resent := decodeResentRows(t, sink2.rowFrames())
+	if len(resent) == 0 || resent[0].from != initial[0].from || len(resent[0].texts) == 0 || resent[0].texts[0] != first {
+		t.Fatalf("resend did not serve the pruned original row %q at %d: %+v", first, initial[0].from, resent)
 	}
 }

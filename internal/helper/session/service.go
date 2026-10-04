@@ -842,6 +842,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := hs.runtime.ApplyScrollback(p.MaxLines); err != nil {
 			return nil, err
 		}
+		hs.scrollback.Store(p.MaxLines)
 		return proto.SetScrollbackResult{}, nil
 	}
 	return nil, fmt.Errorf("session: no op %q", op)
@@ -1427,7 +1428,6 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		proc:            proc,
 		win:             win,
 		runtime:         rt,
-		resendRT:        rt,
 		screen:          screen,
 		owner:           owner,
 		tokens:          tokens,
@@ -1447,6 +1447,7 @@ func (s *Service) finishSpawn(claim *keyClaim, proc Process, launch proto.Launch
 		rowsDone:        make(chan struct{}),
 		rowBufferBytes:  shape.rowBuffer,
 	}
+	hs.scrollback.Store(shape.scrollback)
 	// The book's tokens report themselves under this session's id — minted
 	// one line above, so it could not be named at newTokenBook time.
 	tokens.bindSession(hs.id)

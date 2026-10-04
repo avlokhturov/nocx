@@ -367,11 +367,11 @@ type hostSession struct {
 	// going are all inside that interval and none of them creates it or ends
 	// it (requirement 5 of nocx-ygxjv.12).
 	runtime *sessionruntime.Session
-	// resendRT is the seam the resend's scrollback walk reads the runtime
-	// through (rows.go's resendRuntime). Spawn wires the session's own
-	// runtime; only a test that arms a departure at the seam sets
-	// anything else, and resender() answers the runtime when this is nil.
-	resendRT resendRuntime
+	// scrollback is the live-history setting this helper session was given.
+	// It is separate from the emulator's bounded capture floor: at zero the
+	// runtime still captures departures, while historyPage serves no rows.
+	scrollback atomic.Uint64
+
 	// screen is the emulator the runtime directs. It is held here for its
 	// LIFETIME and not for its behaviour: every read and every write goes
 	// through runtime, and Close is this object's to call because a runtime
@@ -433,11 +433,16 @@ type hostSession struct {
 	// every emission the shutdown drain gave up on (nocx-2v80t.3.54).
 	// owedMarker is an incomplete marker no subscriber took, stated before
 	// the next delivery (rows.go, nocx-2v80t.3.38). The pump's alone.
-	owedMarker     *rowEmission
-	rowBufferBytes int64
-	rowQueuedBytes int64
-	rowsIncomplete atomic.Uint64
-	rowsDone       chan struct{}
+	owedMarker            *rowEmission
+	rowBufferBytes        int64
+	rowQueuedBytes        int64 // FIFO owner's charge in rowPool
+	rowPool               rowBytePool
+	resendWindow          []retainedRowSpan // original indexed cells kept until a proven prefix ack
+	resendReclaimed       uint64
+	rowsIncomplete        atomic.Uint64
+	rowBufferOverflows    atomic.Uint64 // ADR-0075 helper-pool exhaustion, distinct from live-tier shortfall
+	rowsLiveRetentionLost atomic.Uint64
+	rowsDone              chan struct{}
 	// rowsDrainDone, once armed by requestRowsDrain, is closed by the pump
 	// the moment its queue is next empty with nothing owed (rows.go,
 	// nocx-2v80t.3.52) — the event stop() waits on, under rowMu since it is
@@ -459,10 +464,11 @@ type hostSession struct {
 	rowSendSeq        int
 	rowLossCountedSeq int
 	rowsConfirmed     uint64
-	// resendDue is the row pump's own flag (rows.go): an emission reached
-	// zero subscribers and was dropped, so the coordinator's return owes a
-	// read-back from the scrollback (nocx-zg3k3.5.3). The pump alone writes
-	// and reads it — no lock, one goroutine.
+	// resendDue is the row pump's flag (rows.go): an emission reached zero
+	// subscribers, a reader was replaced before its detach arrived, or a
+	// reader attached while rows remained unconfirmed; in each case the next
+	// reader owes a read-back from the retained window
+	// (nocx-zg3k3.5.3). Guarded by rowMu because attach/detach arm it too.
 	resendDue bool
 	// resendEnds is the row pump's list of the interval ends its drops
 	// took (rows.go, nocx-zg3k3.5.3): the boundaries the coordinator's
@@ -683,6 +689,17 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 		return proto.AttachResult{}, ErrNoSuchSession
 	}
 
+	// A newly bound reader also needs the retained suffix when rows
+	// departed before it attached. Set the obligation before publishing the
+	// subscriber under this mutex: deliverRowEmission takes the same lock
+	// while checking resendDue, so a queued live emission cannot overtake
+	// the replay in the gap between the pump's due check and its fan-out.
+	if s.runtime != nil && s.rowsConfirmed < s.runtime.DepartedRowCount() {
+		s.rowMu.Lock()
+		s.resendDue = true
+		s.rowMu.Unlock()
+	}
+
 	// One pump per subscriber: a second attach by the same subscriber
 	// REPLACES the first, because a subscriber is one reader and two pumps on
 	// one cursor would interleave frames into a stream that must stay ordered.
@@ -693,6 +710,14 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	if previous, ok := s.subs[p.Subscriber]; ok {
 		old = previous
 		oldWriter = s.writer != nil && *s.writer == p.Subscriber && s.writerAtt == previous.attachment
+		// A replacement can win the race with the old connection's
+		// asynchronous detach. In that ordering detach will later find no
+		// attachment to remove, so it cannot arm the resend. Replacing a
+		// reader is itself proof that its last unconfirmed rows may need
+		// replay; rowsConfirmed keeps already-stored output idempotent.
+		s.rowMu.Lock()
+		s.resendDue = true
+		s.rowMu.Unlock()
 		delete(s.subs, p.Subscriber)
 		delete(s.attachments, previous.attachment)
 		if oldWriter {
